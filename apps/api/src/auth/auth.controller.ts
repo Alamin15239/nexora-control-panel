@@ -10,12 +10,11 @@ import {
   Req,
   UseGuards,
 } from "@nestjs/common";
-import { Request } from "express";
 import { AuthService } from "./auth.service";
 import { SessionAuthGuard } from "./auth.guard";
 import { SessionClaims } from "./session-token";
 
-interface AuthenticatedRequest extends Request {
+interface AuthenticatedRequest {
   user: SessionClaims;
 }
 
