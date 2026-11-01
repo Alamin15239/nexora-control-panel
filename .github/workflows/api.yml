@@ -1,0 +1,43 @@
+name: Control plane API CI
+
+on:
+  push:
+    paths:
+      - "apps/api/**"
+      - "packages/database/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/api.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "packages/database/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/api.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: API unit tests
+        run: pnpm --filter @nexora/api test
+      - name: API typecheck
+        run: pnpm --filter @nexora/api typecheck
+      - name: Validate Prisma schema
+        env:
+          DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora
+        run: pnpm --filter @nexora/database db:validate
