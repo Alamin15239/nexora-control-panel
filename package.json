@@ -1,0 +1,12 @@
+{
+  "name": "nexora-control",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @nexora/web dev",
+    "build": "pnpm --filter @nexora/web build",
+    "lint": "pnpm --filter @nexora/web lint",
+    "typecheck": "pnpm --filter @nexora/web typecheck"
+  }
+}
