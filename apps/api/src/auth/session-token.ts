@@ -24,7 +24,7 @@ function signature(input: string, secret: string): Buffer {
 }
 
 export function signSessionToken(
-  input: Omit<SessionClaims, "iat" | "exp" | "iss" | "aud">,
+  input: Omit<SessionClaims, "iat" | "exp" | "iss" | "aud" | "jti">,
   secret: string,
   nowSeconds = Math.floor(Date.now() / 1000),
   lifetimeSeconds = 15 * 60,
