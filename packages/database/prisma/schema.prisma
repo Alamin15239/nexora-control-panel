@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum MembershipRole {
+  OWNER
+  ADMIN
+  BILLING
+  SUPPORT
+  MEMBER
+}
+
+enum ServerStatus {
+  PENDING
+  ONLINE
+  DEGRADED
+  OFFLINE
+  MAINTENANCE
+}
+
+enum HostingAccountStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  FAILED
+  DELETING
+  DELETED
+}
+
+enum ProvisioningStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id              String       @id @default(uuid()) @db.Uuid
+  email           String       @unique
+  passwordHash    String?
+  displayName     String?
+  status          UserStatus   @default(INVITED)
+  mfaEnabled      Boolean      @default(false)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  memberships     Membership[]
+  auditEvents     AuditLog[]   @relation("AuditActor")
+}
+
+model Organization {
+  id              String              @id @default(uuid()) @db.Uuid
+  name            String
+  slug            String              @unique
+  status          OrganizationStatus  @default(ACTIVE)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  memberships     Membership[]
+  hostingPlans    HostingPlan[]
+  hostingAccounts HostingAccount[]
+  auditEvents     AuditLog[]
+}
+
+model Membership {
+  id             String          @id @default(uuid()) @db.Uuid
+  userId         String          @db.Uuid
+  organizationId String          @db.Uuid
+  role           MembershipRole  @default(MEMBER)
+  createdAt      DateTime        @default(now())
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization  Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId, role])
+}
+
+model Server {
+  id              String        @id @default(uuid()) @db.Uuid
+  hostname        String
+  primaryIp       String
+  region          String?
+  agentVersion    String?
+  status          ServerStatus  @default(PENDING)
+  lastHeartbeatAt DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  hostingAccounts HostingAccount[]
+
+  @@index([status, lastHeartbeatAt])
+}
+
+model HostingPlan {
+  id                String       @id @default(uuid()) @db.Uuid
+  organizationId    String       @db.Uuid
+  name              String
+  diskLimitBytes    BigInt
+  bandwidthLimitBytes BigInt?
+  websiteLimit      Int          @default(1)
+  databaseLimit     Int          @default(1)
+  mailboxLimit      Int          @default(0)
+  cpuQuotaPercent   Int?
+  memoryLimitBytes  BigInt?
+  active            Boolean      @default(true)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  hostingAccounts   HostingAccount[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId, active])
+}
+
+model HostingAccount {
+  id              String               @id @default(uuid()) @db.Uuid
+  organizationId  String               @db.Uuid
+  serverId        String               @db.Uuid
+  planId          String               @db.Uuid
+  username        String
+  primaryDomain   String?
+  status          HostingAccountStatus @default(PENDING)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  organization    Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  server          Server               @relation(fields: [serverId], references: [id], onDelete: Restrict)
+  plan            HostingPlan          @relation(fields: [planId], references: [id], onDelete: Restrict)
+  domains         Domain[]
+  jobs            ProvisioningJob[]
+
+  @@unique([serverId, username])
+  @@index([organizationId, status])
+  @@index([serverId, status])
+}
+
+model Domain {
+  id               String         @id @default(uuid()) @db.Uuid
+  hostingAccountId String         @db.Uuid
+  name             String         @unique
+  documentRoot     String
+  isPrimary        Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  hostingAccount   HostingAccount @relation(fields: [hostingAccountId], references: [id], onDelete: Cascade)
+
+  @@index([hostingAccountId])
+}
+
+model ProvisioningJob {
+  id               String             @id @default(uuid()) @db.Uuid
+  hostingAccountId String             @db.Uuid
+  operation        String
+  status           ProvisioningStatus @default(QUEUED)
+  idempotencyKey   String             @unique
+  attempts         Int                @default(0)
+  requestedAt      DateTime           @default(now())
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  errorCode        String?
+  errorMessage     String?
+  hostingAccount   HostingAccount     @relation(fields: [hostingAccountId], references: [id], onDelete: Restrict)
+
+  @@index([status, requestedAt])
+  @@index([hostingAccountId, requestedAt])
+}
+
+model AuditLog {
+  id             String        @id @default(uuid()) @db.Uuid
+  organizationId String?       @db.Uuid
+  actorUserId    String?       @db.Uuid
+  action         String
+  resourceType   String
+  resourceId     String?
+  sourceIp       String?
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  actor          User?         @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([actorUserId, createdAt])
+}
