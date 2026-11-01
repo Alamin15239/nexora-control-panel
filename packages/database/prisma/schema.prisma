@@ -63,6 +63,8 @@ model User {
   updatedAt       DateTime     @updatedAt
   memberships     Membership[]
   auditEvents     AuditLog[]   @relation("AuditActor")
+  sessions        AuthSession[]
+  loginAttempts   LoginAttempt[]
 }
 
 model Organization {
@@ -235,4 +237,31 @@ model AuditLog {
 
   @@index([organizationId, createdAt])
   @@index([actorUserId, createdAt])
+}
+
+
+model AuthSession {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @db.Uuid
+  tokenId        String   @unique
+  tokenHash      String   @unique
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
+}
+
+model LoginAttempt {
+  id          String   @id @default(uuid()) @db.Uuid
+  bucketKey   String   @unique
+  userId      String?  @db.Uuid
+  attempts    Int      @default(0)
+  windowStart DateTime @default(now())
+  blockedUntil DateTime?
+  updatedAt   DateTime @updatedAt
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([blockedUntil])
 }
