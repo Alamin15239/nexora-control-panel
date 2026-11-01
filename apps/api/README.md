@@ -8,13 +8,18 @@ NestJS control-plane API. The global route prefix is `/v1`.
 - `GET /v1/health/ready`: database readiness check.
 - `src/servers/enrollment-token.ts`: cryptographically secure enrollment token generation, SHA-256 storage hashing and constant-time verification primitives.
 - `src/auth/session-token.ts`: short-lived HS256 session token signing and verification, including organization and membership-role claims, issuer/audience checks, expiry checks and constant-time signature comparison.
-- `src/auth/password-hash.ts`: Node.js scrypt password hashing with per-password random salts, fixed resource parameters and constant-time verification.
+- `src/auth/password-hash.ts`: Node.js scrypt password hashing with per-password random salts and constant-time verification.
+- `src/auth/auth.guard.ts`: bearer-session guard; verifies a signed token and attaches verified claims to the request.
+- `src/auth/roles.guard.ts`: method/controller role metadata and exact organization membership-role authorization.
+- `@RequireRoles("OWNER", "ADMIN")`: decorator to restrict a controller route to the listed membership roles when used with `@UseGuards(SessionAuthGuard, MembershipRolesGuard)`.
 
-Password hashes use the format `scrypt$N$r$p$salt$key`. Passwords must be 12–128 characters. Do not log plaintext passwords, hashes, tokens or authorization headers.
+The auth module is registered in the API application. Guards are available for route-level use; they are not globally enforced, and no login or registration routes exist yet.
 
-## Not yet production authentication
+## Production authentication release gates
 
-The authentication files are security primitives only. They are not wired to login, registration, password reset, refresh, logout or HTTP route guards. No public credential endpoint is enabled yet. Before exposing login, implement persistent brute-force controls (prefer shared Redis or equivalent, not process-local counters), account lockout policy, secure session revocation/rotation, CSRF protections if cookie-based, email verification and audit events. Every tenant-scoped operation must derive organization access from a verified membership, never from a caller-supplied organization ID alone.
+Authentication primitives are not a complete account system. Before exposing login, implement persistent users and memberships, secure registration and email verification, password reset, persistent brute-force controls, session revocation/rotation, audit events, and CSRF protections if cookie-based. A verified token's organization and role must be revalidated against current database membership before sensitive operations; do not trust stale role claims as the only authorization source. Every tenant-scoped query must include the verified organization scope.
+
+Passwords must never be logged. Session secrets must be at least 32 random bytes and supplied through the deployment secret manager, never committed to source control.
 
 The enrollment token functions are not yet exposed as HTTP endpoints and do not persist enrollment records. A production enrollment flow must additionally enforce authenticated organization-admin authorization, short expiry, one-time atomic consumption, rate limits, certificate signing, audit events and revocation.
 
