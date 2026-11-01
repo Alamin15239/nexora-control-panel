@@ -134,7 +134,7 @@ export class AuthService {
   async login(input: { email: unknown; password: unknown; organizationId: unknown }, ip: string) {
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
     const password = typeof input.password === "string" ? input.password : "";
-    const organizationId = typeof input.organizationId === "string" ? input.organizationId : "";
+    const organizationId = typeof input.organizationId === "string" ? input.organizationId.trim() : "";
     if (!email || !password || !organizationId) {
       throw new BadRequestException("Email, password and organization ID are required");
     }
@@ -148,7 +148,7 @@ export class AuthService {
       where: { email },
       include: {
         memberships: {
-          where: { organizationId, organization: { status: "ACTIVE" } },
+          where: { organization: { status: "ACTIVE", OR: [{ id: organizationId }, { slug: organizationId }] } },
           select: { organizationId: true, role: true },
         },
       },
