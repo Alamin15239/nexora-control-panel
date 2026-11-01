@@ -1,16 +1,18 @@
 # Nexora Control API
 
-NestJS control-plane API foundation.
+NestJS control-plane API. The global route prefix is `/v1`.
 
-## Current endpoint
+## Current endpoints and components
 
-- GET /v1/health — process health only; it does not yet verify database, queue or server-agent connectivity.
+- `GET /v1/health`: process-level health response.
+- `src/servers/enrollment-token.ts`: cryptographically secure enrollment token generation, SHA-256 storage hashing and constant-time verification primitives.
+
+The enrollment token functions are not yet exposed as HTTP endpoints and do not persist enrollment records. A production enrollment flow must additionally enforce authenticated organization-admin authorization, short expiry, one-time atomic consumption, rate limits, certificate signing, audit events and revocation.
 
 ## Development
 
-From the repository root:
-
-    pnpm install
-    pnpm --filter @nexora/api dev
-
-Authentication, tenant authorization, database access and provisioning routes must be added before exposing customer or administrative operations.
+```sh
+pnpm --filter @nexora/api dev
+pnpm --filter @nexora/api typecheck
+pnpm --filter @nexora/api test
+```
