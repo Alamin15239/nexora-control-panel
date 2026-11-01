@@ -27,7 +27,7 @@ Run `pnpm install` and then `pnpm dev`.
 - Encrypted, independently stored backups
 
 ## Status
-Initial repository bootstrap. The first milestone is the web control-plane shell, followed by API, database and secure server-agent foundations.
+Repository foundation and initial web dashboard/API scaffolding are committed. The Linux agent now has a Go CLI for version reporting and local mTLS certificate/configuration validation, with Go test/build CI. Agent enrollment, live telemetry, remote operations, hosting provisioning, billing and production deployment are not implemented yet. See [agent protocol design](docs/architecture/linux-agent-protocol.md).
 
 ## License
 Proprietary. All rights reserved. Third-party dependencies retain their respective licenses.
