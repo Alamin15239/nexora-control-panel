@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Activity, ArrowUpRight, Box, Cloud, Cpu, Database, Globe2, HardDrive, LayoutDashboard, LockKeyhole, Mail, Network, Plus, Server, Settings2, ShieldCheck, Users, Zap } from "lucide-react";
 
 const nav = [
@@ -16,6 +20,31 @@ function Metric({ label, value, note, icon: Icon }: { label: string; value: stri
 }
 
 export default function Home() {
+  const router = useRouter();
+  const [identity, setIdentity] = useState<{ displayName: string | null; email: string } | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Not signed in");
+        return response.json();
+      })
+      .then((user) => { if (active) setIdentity(user); })
+      .catch(() => { if (active) router.replace("/login"); })
+      .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; };
+  }, [router]);
+
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+    router.refresh();
+  }
+
+  if (checking || !identity) return <main className="grid min-h-screen place-items-center bg-slate-50"><div className="text-center"><div className="mx-auto h-9 w-9 animate-spin rounded-full border-2 border-slate-200 border-t-blue-700"/><p className="mt-4 text-sm text-slate-500">Securing your workspace…</p></div></main>;
+
   return <main className="min-h-screen lg:flex">
     <aside className="w-full border-b border-slate-200 bg-white px-5 py-5 lg:fixed lg:inset-y-0 lg:w-64 lg:border-b-0 lg:border-r">
       <div className="flex items-center gap-3 px-2"><div className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Cloud size={21}/></div><div><p className="font-semibold tracking-tight">Nexora <span className="text-blue-700">Control</span></p><p className="text-xs text-slate-500">Infrastructure platform</p></div></div>
@@ -26,7 +55,7 @@ export default function Home() {
       <div className="mt-10 hidden rounded-2xl bg-slate-50 p-4 lg:block"><div className="flex items-center gap-2 text-sm font-medium"><ShieldCheck size={16} className="text-emerald-600"/> Secure by design</div><p className="mt-2 text-xs leading-5 text-slate-500">Privileged operations will use authenticated agents and explicit operation policies.</p></div>
     </aside>
     <section className="min-w-0 flex-1 lg:ml-64">
-      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4 lg:px-9"><div><p className="text-xs text-slate-500">Control plane / Workspace</p><h1 className="mt-1 text-lg font-semibold">Overview</h1></div><div className="flex items-center gap-3"><span className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800">Development environment</span><div className="grid h-9 w-9 place-items-center rounded-full bg-slate-900 text-xs font-semibold text-white">NC</div></div></header>
+      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4 lg:px-9"><div><p className="text-xs text-slate-500">Control plane / Workspace</p><h1 className="mt-1 text-lg font-semibold">Overview</h1></div><div className="flex items-center gap-3"><span className="hidden rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 sm:inline-flex">Development environment</span><span className="max-w-40 truncate text-xs text-slate-600">{identity.displayName || identity.email}</span><button onClick={signOut} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Sign out</button></div></header>
       <div className="mx-auto max-w-7xl space-y-7 px-5 py-8 lg:px-9">
         <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Welcome to Nexora Control</p><h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">Your hosting infrastructure, in one place.</h2><p className="mt-2 max-w-2xl text-sm text-slate-500">A unified control plane for servers, websites, databases and customers. Connect your first Linux node to begin.</p></div><button className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-blue-800"><Plus size={16}/> Register server</button></div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Managed servers" value="0" note="No server agents connected" icon={Server}/><Metric label="Hosting accounts" value="0" note="Provisioned customer accounts" icon={Users}/><Metric label="Websites" value="0" note="Managed virtual hosts" icon={Globe2}/><Metric label="System status" value="Setup" note="Awaiting infrastructure setup" icon={Activity}/></div>
