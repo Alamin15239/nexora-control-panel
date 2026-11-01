@@ -75,6 +75,8 @@ model Organization {
   memberships     Membership[]
   hostingPlans    HostingPlan[]
   hostingAccounts HostingAccount[]
+  servers         Server[]
+  agentEnrollments AgentEnrollment[]
   auditEvents     AuditLog[]
 }
 
@@ -93,6 +95,7 @@ model Membership {
 
 model Server {
   id              String        @id @default(uuid()) @db.Uuid
+  organizationId  String        @db.Uuid
   hostname        String
   primaryIp       String
   region          String?
@@ -101,9 +104,47 @@ model Server {
   lastHeartbeatAt DateTime?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   hostingAccounts HostingAccount[]
+  enrollment      AgentEnrollment?
+  telemetry       ServerTelemetry[]
 
+  @@index([organizationId, status])
   @@index([status, lastHeartbeatAt])
+}
+
+
+model AgentEnrollment {
+  id              String       @id @default(uuid()) @db.Uuid
+  organizationId  String       @db.Uuid
+  serverId        String       @unique @db.Uuid
+  tokenHash       String       @unique
+  expiresAt       DateTime
+  consumedAt      DateTime?
+  createdAt       DateTime     @default(now())
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  server          Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, expiresAt])
+  @@index([expiresAt, consumedAt])
+}
+
+model ServerTelemetry {
+  id               String   @id @default(uuid()) @db.Uuid
+  serverId         String   @db.Uuid
+  agentVersion     String
+  cpuUsagePercent  Float?
+  memoryTotalBytes BigInt?
+  memoryUsedBytes  BigInt?
+  diskTotalBytes   BigInt?
+  diskUsedBytes    BigInt?
+  loadAverage1m    Float?
+  collectedAt      DateTime
+  receivedAt       DateTime @default(now())
+  server           Server   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([serverId, collectedAt])
+  @@index([receivedAt])
 }
 
 model HostingPlan {
