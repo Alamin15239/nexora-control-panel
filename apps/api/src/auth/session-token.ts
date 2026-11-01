@@ -1,7 +1,8 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 export interface SessionClaims {
   sub: string;
+  jti: string;
   organizationId: string;
   role: "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
   iat: number;
@@ -41,6 +42,7 @@ export function signSessionToken(
   const header = encode({ alg: "HS256", typ: "JWT" });
   const payload = encode({
     ...input,
+    jti: randomUUID(),
     iat: nowSeconds,
     exp: nowSeconds + lifetimeSeconds,
     iss: ISSUER,
@@ -71,6 +73,7 @@ export function verifySessionToken(
     const claims = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as SessionClaims;
     if (
       typeof claims.sub !== "string" || !claims.sub ||
+      typeof claims.jti !== "string" || !claims.jti ||
       typeof claims.organizationId !== "string" || !claims.organizationId ||
       !["OWNER", "ADMIN", "BILLING", "SUPPORT", "MEMBER"].includes(claims.role) ||
       !Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp) ||
