@@ -1,0 +1,40 @@
+name: Web application CI
+
+on:
+  push:
+    paths:
+      - "apps/web/**"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths:
+      - "apps/web/**"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - ".github/workflows/web.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install workspace dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Web typecheck
+        run: pnpm --filter @nexora/web typecheck
+      - name: Web lint
+        run: pnpm --filter @nexora/web lint
+      - name: Web production build
+        env:
+          NEXORA_API_URL: https://api.example.invalid
+        run: pnpm --filter @nexora/web build
