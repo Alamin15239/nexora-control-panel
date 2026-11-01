@@ -1,19 +1,43 @@
 # Nexora Linux Agent
 
-The Linux agent is the trusted, restricted execution component installed on each managed hosting node.
+The Linux agent is the restricted node-side component for managed hosting servers.
 
-## Security requirements
+## Current implementation
 
-- Written in Go and distributed as a signed release.
-- Runs under a dedicated service identity wherever possible.
-- Privileged helpers are narrowly scoped and separately audited.
-- Uses mutual TLS with a unique node identity.
-- Accepts only signed, expiring operation envelopes.
-- Enforces an allowlist of operation names and strict schemas.
-- Implements replay protection, idempotency and bounded execution time.
-- Never accepts arbitrary shell commands from the API or customer.
-- Emits structured logs without secrets or customer file contents.
+Version `0.1.0` provides a Go CLI with:
 
-## Initial implementation status
+- `nexora-agent version`
+- `nexora-agent validate-config --config /path/to/agent.json`
+- HTTPS-only control-plane URL validation
+- CA PEM parsing and client certificate/private-key pair validation for the future mTLS connection
 
-This directory documents the agent contract. The executable is not implemented yet. The first agent release will support identity registration and read-only health telemetry before any mutating provisioning operation is enabled.
+It does **not** connect to the control plane, collect telemetry, or execute server operations yet. No privileged actions are implemented. This is intentional: the first network-enabled release must establish and verify node identity before exposing even read-only telemetry.
+
+## Build and test
+
+From this directory:
+
+```sh
+go test ./...
+go build -o dist/nexora-agent ./cmd/nexora-agent
+./dist/nexora-agent version
+./dist/nexora-agent validate-config --config ./config.example.json
+```
+
+The example configuration contains placeholder paths and is not expected to validate until real certificates are provisioned.
+
+## Configuration
+
+See [config.example.json](./config.example.json). Keep private keys outside the repository, owned by root or the dedicated agent service account, with restrictive permissions (normally `0600`). Never commit node credentials.
+
+## Security contract for future releases
+
+- Unique, revocable node identity and mutual TLS.
+- Short-lived signed operation envelopes with expiry, nonce/replay protection and idempotency keys.
+- Strict allowlist and schema validation for each operation.
+- Bounded timeouts, output limits and resource limits.
+- No arbitrary shell command endpoint and no customer-controlled root commands.
+- Structured audit events; never log credentials or customer file contents.
+- Read-only health telemetry before any mutating provisioning feature is enabled.
+
+The agent must run with the least privilege possible. Any privileged helper must be a separate, narrowly scoped component with its own review and audit trail.
