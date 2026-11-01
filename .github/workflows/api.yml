@@ -33,6 +33,10 @@ jobs:
           cache: pnpm
       - name: Install workspace dependencies
         run: pnpm install --no-frozen-lockfile
+      - name: Generate Prisma client
+        env:
+          DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora
+        run: pnpm --filter @nexora/database db:generate
       - name: API unit tests
         run: pnpm --filter @nexora/api test
       - name: API typecheck
