@@ -7,13 +7,20 @@ const identity = { sub: "user-1", organizationId: "org-1", role: "OWNER" as cons
 
 test("signs and verifies an organization-scoped session", () => {
   const token = signSessionToken(identity, secret, 1_800_000_000, 900);
-  assert.deepEqual(verifySessionToken(token, secret, 1_800_000_001), {
-    ...identity,
-    iat: 1_800_000_000,
-    exp: 1_800_000_900,
-    iss: "nexora-api",
-    aud: "nexora-web",
-  });
+  const claims = verifySessionToken(token, secret, 1_800_000_001);
+  assert.ok(claims);
+  assert.deepEqual(
+    { ...claims, jti: undefined },
+    {
+      ...identity,
+      jti: undefined,
+      iat: 1_800_000_000,
+      exp: 1_800_000_900,
+      iss: "nexora-api",
+      aud: "nexora-web",
+    },
+  );
+  assert.match(claims.jti, /^[0-9a-f-]{36}$/);
 });
 
 test("rejects expired, tampered and malformed tokens", () => {
