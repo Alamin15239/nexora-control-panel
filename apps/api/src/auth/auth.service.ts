@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   UnauthorizedException,
 } from "@nestjs/common";
@@ -48,6 +49,9 @@ export class AuthService {
   }
 
   async register(input: { email: unknown; password: unknown; name: unknown; organizationName: unknown }) {
+    if (process.env.ALLOW_PUBLIC_REGISTRATION !== "true") {
+      throw new ForbiddenException("Public registration is currently disabled");
+    }
     const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
     const name = typeof input.name === "string" ? input.name.trim() : "";
     const organizationName = typeof input.organizationName === "string" ? input.organizationName.trim() : "";
