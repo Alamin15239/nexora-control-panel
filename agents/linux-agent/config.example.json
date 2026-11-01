@@ -1,0 +1,7 @@
+{
+  "node_id": "replace-with-issued-node-id",
+  "control_plane_url": "https://control.example.com",
+  "ca_cert_file": "/etc/nexora/pki/control-plane-ca.pem",
+  "client_cert_file": "/etc/nexora/pki/node-client.pem",
+  "client_key_file": "/etc/nexora/pki/node-client-key.pem"
+}
