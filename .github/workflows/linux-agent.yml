@@ -1,0 +1,33 @@
+name: Linux agent CI
+
+on:
+  push:
+    paths:
+      - "agents/linux-agent/**"
+      - ".github/workflows/linux-agent.yml"
+  pull_request:
+    paths:
+      - "agents/linux-agent/**"
+      - ".github/workflows/linux-agent.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agents/linux-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+          cache-dependency-path: agents/linux-agent/go.mod
+      - name: Test
+        run: go test ./...
+      - name: Build
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
+      - name: Verify CLI
+        run: /tmp/nexora-agent version
