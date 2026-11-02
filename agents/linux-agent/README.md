@@ -24,6 +24,16 @@ nexora-agent run --config /etc/nexora/agent.json --interval 60s
 nexora-agent validate-config --config /etc/nexora/agent.json
 ```
 
+## Update an existing server
+
+From the repository checkout on the Linux server, run:
+
+```sh
+bash scripts/update-linux-agent.sh
+```
+
+The script refuses to overwrite local changes, fast-forwards the `main` branch, runs the Go tests, rebuilds both binaries, installs them with root ownership, restarts the agent, and verifies that the service is active. It does not change the agent enrollment credential or server configuration.
+
 ## Build and install
 
 From `agents/linux-agent`:
