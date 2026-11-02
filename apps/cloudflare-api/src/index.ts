@@ -441,6 +441,119 @@ app.post("/v1/hosting-plans", async (c) => {
   }
 });
 
+
+type HostingAccountRow = {
+  id: string; username: string; primary_domain: string | null; status: string;
+  created_at: string; server_id: string; server_hostname: string;
+  plan_id: string; plan_name: string; job_status: string | null;
+};
+
+function validDomain(value: string): boolean {
+  if (value.length > 253 || value.length < 3 || value.includes("..")) return false;
+  return value.split(".").every((label) =>
+    label.length >= 1 && label.length <= 63 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  ) && value.includes(".");
+}
+
+app.get("/v1/hosting-accounts", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.primary_domain, a.status, a.created_at,
+            a.server_id, s.hostname AS server_hostname,
+            a.plan_id, p.name AS plan_name,
+            (SELECT j.status FROM provisioning_jobs j
+             WHERE j.hosting_account_id = a.id ORDER BY j.requested_at DESC LIMIT 1) AS job_status
+     FROM hosting_accounts a
+     JOIN servers s ON s.id = a.server_id
+     JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.organization_id = ? AND a.status != 'DELETED'
+     ORDER BY a.created_at DESC`,
+  ).bind(identity.organizationId).all<HostingAccountRow>();
+  return c.json({ accounts: result.results ?? [] });
+});
+
+app.post("/v1/hosting-accounts", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+
+  const serverId = typeof input.serverId === "string" ? input.serverId : "";
+  const planId = typeof input.planId === "string" ? input.planId : "";
+  const username = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
+  const primaryDomain = typeof input.primaryDomain === "string" ? input.primaryDomain.trim().toLowerCase() : "";
+
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(username)) {
+    return c.json({ message: "Username must be 3–16 characters, start with a letter, and contain only lowercase letters, numbers or underscores." }, 400);
+  }
+  if (primaryDomain && !validDomain(primaryDomain)) {
+    return c.json({ message: "Enter a valid primary domain, such as example.com." }, 400);
+  }
+
+  const server = await c.env.DB.prepare(
+    "SELECT id, hostname FROM servers WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(serverId, identity.organizationId).first<{ id: string; hostname: string }>();
+  if (!server) return c.json({ message: "Select a server in your active workspace." }, 404);
+
+  const plan = await c.env.DB.prepare(
+    "SELECT id, name, active FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(planId, identity.organizationId).first<{ id: string; name: string; active: number }>();
+  if (!plan || plan.active !== 1) return c.json({ message: "Select an active hosting plan in your workspace." }, 404);
+
+  const id = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const documentRoot = `/home/${username}/public_html`;
+  const statements = [
+    c.env.DB.prepare(
+      `INSERT INTO hosting_accounts
+       (id, organization_id, server_id, plan_id, username, primary_domain, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
+    ).bind(id, identity.organizationId, serverId, planId, username, primaryDomain || null),
+  ];
+  if (primaryDomain) {
+    statements.push(c.env.DB.prepare(
+      `INSERT INTO domains (id, hosting_account_id, name, document_root, is_primary)
+       VALUES (?, ?, ?, ?, 1)`,
+    ).bind(crypto.randomUUID(), id, primaryDomain, documentRoot));
+  }
+  statements.push(
+    c.env.DB.prepare(
+      `INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key)
+       VALUES (?, ?, 'CREATE_HOSTING_ACCOUNT', 'QUEUED', ?)`,
+    ).bind(jobId, id, `create-account:${id}`),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_account.create_requested', 'hosting_account', ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
+  );
+
+  try {
+    await c.env.DB.batch(statements);
+    return c.json({
+      account: {
+        id, username, primary_domain: primaryDomain || null, status: "PENDING",
+        server_id: server.id, server_hostname: server.hostname, plan_id: plan.id,
+        plan_name: plan.name, job_status: "QUEUED",
+      },
+      provisioningJob: { id: jobId, status: "QUEUED", operation: "CREATE_HOSTING_ACCOUNT" },
+      message: "Hosting account request queued. It will remain pending until a connected Linux agent provisions it.",
+    }, 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/UNIQUE constraint failed: hosting_accounts.server_id, hosting_accounts.username/i.test(message)) {
+      return c.json({ message: "That username already exists on the selected server." }, 409);
+    }
+    if (/UNIQUE constraint failed: domains.name/i.test(message)) {
+      return c.json({ message: "That domain is already assigned to another hosting account." }, 409);
+    }
+    return c.json({ message: "Unable to queue the hosting account. Check the username and domain are not already in use." }, 409);
+  }
+});
+
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 export default app;
