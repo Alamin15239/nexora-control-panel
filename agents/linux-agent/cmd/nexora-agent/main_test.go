@@ -66,7 +66,7 @@ func TestValidateRejectsUntrustedClientCertificate(t *testing.T) {
 	otherPub, otherPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatal(err) }
 	clientTemplate := &x509.Certificate{SerialNumber: bigIntForTest(2), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
-	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caCert, otherPub, caPriv)
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caCert, otherPub, otherPriv)
 	if err != nil { t.Fatal(err) }
 	keyDER, err := x509.MarshalPKCS8PrivateKey(otherPriv)
 	if err != nil { t.Fatal(err) }
