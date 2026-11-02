@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
 
 const COOKIE_NAME = "nexora_session";
 
@@ -29,11 +32,14 @@ async function proxy(
   const token = request.cookies.get(COOKIE_NAME)?.value;
   if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
-  const base = process.env.NEXORA_API_URL?.replace(/\/$/, "");
-  if (!base) return NextResponse.json({ message: "NEXORA_API_URL is not configured" }, { status: 503 });
+  const base = (process.env.NEXORA_API_URL?.trim() || DEFAULT_API_BASE).replace(/\/$/, "");
 
   try {
-    const upstream = await fetch(`${base}/v1/${path.map(encodeURIComponent).join("/")}`, {
+    const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, base);
+    if (apiUrl.protocol !== "https:" || !apiUrl.hostname.endsWith(".workers.dev")) {
+      return NextResponse.json({ message: "Invalid Nexora API URL configuration" }, { status: 503 });
+    }
+    const upstream = await fetch(apiUrl, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -49,7 +55,7 @@ async function proxy(
     if (upstream.status === 401) {
       response.cookies.set(COOKIE_NAME, "", {
         httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
+        secure: true,
         sameSite: "lax",
         path: "/",
         maxAge: 0,
