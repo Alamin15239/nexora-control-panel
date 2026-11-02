@@ -1,33 +1,50 @@
-import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const COOKIE_NAME = "nexora_session";
 const COOKIE_MAX_AGE = 15 * 60;
+const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
 
 function getApiBase(): string {
-  const env = getCloudflareContext().env as { NEXORA_API_URL?: string };
-  const base = env.NEXORA_API_URL?.trim().replace(/\/$/, "");
-  if (!base) throw new Error("NEXORA_API_URL is missing from the Cloudflare Worker environment");
+  // OpenNext exposes Worker vars through process.env when
+  // nodejs_compat_populate_process_env is enabled in wrangler.toml.
+  // Keep a known public API origin as a safe fallback so auth never
+  // accidentally fetches a relative URL or the dashboard Worker itself.
+  const configured = process.env.NEXORA_API_URL?.trim();
+  const base = (configured || DEFAULT_API_BASE).replace(/\/$/, "");
+  const parsed = new URL(base);
+  if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".workers.dev")) {
+    throw new Error("NEXORA_API_URL must be an HTTPS Cloudflare Worker URL");
+  }
   return base;
 }
 
 async function apiRequest(path: string, init: RequestInit): Promise<Response> {
   const base = getApiBase();
-  return fetch(`${base}/v1/auth/${path}`, {
+  return fetch(new URL(`/v1/auth/${path}`, base), {
     ...init,
     headers: { "content-type": "application/json", ...init.headers },
     cache: "no-store",
+    redirect: "error",
   });
 }
 
 async function readApiResponse(response: Response): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get("content-type") ?? "";
   const text = await response.text();
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error(`Authentication API returned HTTP ${response.status} with content-type "${contentType}" and body "${text.slice(0, 240)}"`);
+  }
   try {
-    return JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    throw new Error(`Authentication API returned a non-JSON response (HTTP ${response.status})`);
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("API JSON response was not an object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Authentication API returned invalid JSON (HTTP ${response.status}): ${error instanceof Error ? error.message : "parse error"}`);
   }
 }
 
@@ -55,7 +72,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
       data = await readApiResponse(upstream);
     } catch (error) {
       console.error("[Nexora auth proxy] Invalid API response:", error);
-      return NextResponse.json({ message: "The Nexora API returned an invalid response." }, { status: 502 });
+      return NextResponse.json({ message: "The Nexora API returned an invalid response. Check the dashboard Worker logs for the upstream response details." }, { status: 502 });
     }
 
     if (!upstream.ok) return NextResponse.json(data, { status: upstream.status });
