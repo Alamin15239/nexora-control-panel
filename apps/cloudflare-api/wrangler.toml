@@ -2,6 +2,9 @@ name = "nexora-api"
 main = "src/index.ts"
 compatibility_date = "2026-11-02"
 
+[vars]
+ALLOW_PUBLIC_REGISTRATION = "true"
+
 [observability]
 enabled = true
 
