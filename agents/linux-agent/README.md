@@ -55,7 +55,7 @@ For the systemd service, retain the unprivileged service user but permit only th
 ProtectSystem=false
 ProtectHome=false
 NoNewPrivileges=false
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SETFCAP CAP_AUDIT_WRITE
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SETFCAP CAP_AUDIT_WRITE CAP_SYS_CHROOT
 ```
 
 Then run `sudo systemctl daemon-reload && sudo systemctl restart nexora-agent`. The agent itself runs without effective root privileges; the exact sudoers rule is the only intended elevation path.
