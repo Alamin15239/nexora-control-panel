@@ -4,7 +4,7 @@ A multi-tenant hosting and application deployment platform built around Cloudfla
 
 ## Current architecture
 
-- Web: Next.js 15, React 19, TypeScript and Tailwind CSS.
+- Web: Next.js 15, React 19, TypeScript and Tailwind CSS, deployed to Cloudflare Workers using the OpenNext adapter.
 - API: NestJS with Prisma and PostgreSQL.
 - Current API foundation: NestJS, Prisma and PostgreSQL (migration to Cloudflare Workers and D1 is planned, not yet completed).
 - Existing Go Linux agent: validation-only foundation; it is not the selected execution model for Cloudflare-native hosting.
@@ -26,7 +26,7 @@ Dashboard metric cards and infrastructure status are still setup placeholders. T
 
 ## Cloudflare deployment
 
-Cloudflare is the selected infrastructure provider. See [the Cloudflare-first architecture](docs/cloudflare-first-architecture.md) for the target platform, free-tier constraints, migration plan and supported hosting model. The Google Cloud document is retained only as a historical alternative.
+Cloudflare is the selected deployment provider for both the dashboard and API. The dashboard is configured as the `nexora-dashboard` Worker using `apps/web/wrangler.toml` and the OpenNext adapter. The API is deployed separately as `nexora-api` and uses the `nexora-production` D1 database. Vercel is not required. See [the Cloudflare-first architecture](docs/cloudflare-first-architecture.md) for deployment details, free-tier constraints and supported hosting model. The Google Cloud document is retained only as a historical alternative.
 
 ## Development setup
 
@@ -54,7 +54,7 @@ API:
 - `ALLOW_PUBLIC_REGISTRATION`: `true` to enable self-service registration; otherwise registration is disabled.
 
 Web:
-- `NEXORA_API_URL`: internal/reachable base URL of the NestJS API, for example `http://localhost:4000`.
+- `NEXORA_API_URL`: base URL of the Cloudflare Worker API. Production is configured in `apps/web/wrangler.toml`; local development can use `.env.local`.
 
 Generate a session secret using `openssl rand -base64 48`. Keep all real credentials in deployment secret settings, never in Git.
 
