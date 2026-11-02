@@ -719,6 +719,44 @@ app.post("/v1/domains", async (c) => {
   return c.json({ domain: { id, name, document_root: root, is_primary: primary ? 1 : 0, hosting_account_id: account.id, username: account.username, account_status: account.status }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Domain saved. Server configuration is queued and awaits a connected Linux agent." }, 201);
 });
 
+app.post("/v1/domains/:id/retry", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  const domainId = c.req.param("id");
+  const domain = await c.env.DB.prepare(
+    `SELECT d.id, d.name, a.id AS account_id, a.server_id
+     FROM domains d
+     JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     WHERE d.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE'
+     LIMIT 1`,
+  ).bind(domainId, identity.organizationId).first<{ id: string; name: string; account_id: string; server_id: string }>();
+  if (!domain) return c.json({ message: "Domain or active hosting account not found" }, 404);
+
+  const job = await c.env.DB.prepare(
+    "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'ADD_DOMAIN' AND idempotency_key = ? LIMIT 1",
+  ).bind(domain.account_id, "add-domain:" + domain.id).first<{ id: string; status: string }>();
+  if (!job) return c.json({ message: "Provisioning job not found for this domain" }, 404);
+  if (job.status !== "FAILED") return c.json({ message: "Only failed domain jobs can be retried", status: job.status }, 409);
+
+  const now = new Date().toISOString();
+  const update = await c.env.DB.prepare(
+    `UPDATE provisioning_jobs
+     SET status = 'QUEUED', attempts = 0, started_at = NULL, finished_at = NULL,
+         lease_expires_at = NULL, claimed_by_node_id = NULL,
+         error_code = NULL, error_message = NULL, requested_at = ?
+     WHERE id = ? AND status = 'FAILED'`,
+  ).bind(now, job.id).run();
+  if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job status changed; refresh and try again" }, 409);
+
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.provisioning_retried', 'domain', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ jobId: job.id })).run();
+
+  return c.json({ domainId: domain.id, jobId: job.id, status: "QUEUED", message: "Domain provisioning has been queued again." });
+});
+
 type HostingDatabaseRow = {
   id: string; name: string; engine: string; status: string; created_at: string;
   hosting_account_id: string; account_username: string; plan_database_limit: number; users: number;
