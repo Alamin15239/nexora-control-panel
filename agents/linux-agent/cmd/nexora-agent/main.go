@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 type Config struct {
 	NodeID       string `json:"node_id"`
@@ -183,6 +183,8 @@ type provisionJob struct {
 		Username       string `json:"username"`
 		PrimaryDomain  string `json:"primaryDomain"`
 		DiskLimitBytes uint64 `json:"diskLimitBytes"`
+		Domain         string `json:"domain"`
+		DocumentRoot   string `json:"documentRoot"`
 	} `json:"account"`
 }
 
@@ -235,23 +237,35 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	success := false
 	errorCode := ""
 	errorMessage := ""
-	if job.Operation != "CREATE_HOSTING_ACCOUNT" {
+	if job.Operation != "CREATE_HOSTING_ACCOUNT" && job.Operation != "ADD_DOMAIN" {
 		errorCode = "UNSUPPORTED_OPERATION"
 		errorMessage = "This agent version does not support the requested operation"
 	} else {
-		payload, _ := json.Marshal(map[string]string{"operation": job.Operation, "username": job.Account.Username})
-		command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-		command.Stdin = bytes.NewReader(payload)
-		output, commandErr := command.CombinedOutput()
-		if commandErr == nil {
-			success = true
-			fmt.Printf("Provisioning job %s completed for account %s\n", job.ID, job.Account.Username)
-		} else {
-			errorCode = "PROVISIONER_FAILED"
-			errorMessage = strings.TrimSpace(string(output))
-			if errorMessage == "" { errorMessage = "The restricted Linux provisioning helper failed" }
-			if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
-			fmt.Fprintf(os.Stderr, "provisioning job %s failed: %s\n", job.ID, errorMessage)
+		payload := map[string]string{"operation": job.Operation, "username": job.Account.Username}
+		if job.Operation == "ADD_DOMAIN" {
+			if job.Account.Domain == "" || job.Account.DocumentRoot == "" {
+				errorCode = "INVALID_JOB_PAYLOAD"
+				errorMessage = "The domain job is missing its domain name or document root"
+			} else {
+				payload["domain"] = job.Account.Domain
+				payload["documentRoot"] = job.Account.DocumentRoot
+			}
+		}
+		if errorCode == "" {
+			encoded, _ := json.Marshal(payload)
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
+			output, commandErr := command.CombinedOutput()
+			if commandErr == nil {
+				success = true
+				fmt.Printf("Provisioning job %s (%s) completed for account %s\\n", job.ID, job.Operation, job.Account.Username)
+			} else {
+				errorCode = "PROVISIONER_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if errorMessage == "" { errorMessage = "The restricted Linux provisioning helper failed" }
+				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+				fmt.Fprintf(os.Stderr, "provisioning job %s failed: %s\\n", job.ID, errorMessage)
+			}
 		}
 	}
 
