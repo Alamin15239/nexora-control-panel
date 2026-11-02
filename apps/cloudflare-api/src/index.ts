@@ -856,7 +856,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes, " +
     "d.name AS domain, d.document_root AS documentRoot " +
     "FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id " +
-    "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND j.operation = 'ADD_DOMAIN' ORDER BY d2.created_at DESC LIMIT 1) " +
+    "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
     "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL)) LIMIT 1",
   ).bind(claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation)
