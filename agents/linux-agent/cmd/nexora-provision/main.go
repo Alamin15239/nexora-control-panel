@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -169,8 +170,13 @@ func fileManager(input request) error {
  if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
   return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
  }
+ if err := syscall.Chroot(root); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
+ if err := os.Chdir("/"); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
+ if err := syscall.Setgroups([]int{gid}); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to set account groups") }
+ if err := syscall.Setgid(gid); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop group privileges") }
+ if err := syscall.Setuid(uid); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop user privileges") }
  writeResult := func(value any) error { return json.NewEncoder(os.Stdout).Encode(value) }
- return fileManagerOperation(input, root, uid, gid, writeResult)
+ return fileManagerOperation(input, "/", uid, gid, writeResult)
 }
 
 func managedParentPath(value string) string { parent := filepath.ToSlash(filepath.Dir(value)); if parent == "." { return "" }; return parent }
@@ -248,7 +254,6 @@ func fileManagerOperation(input request, root string, uid, gid int, writeResult 
   if _, err = tmp.Write(data); err != nil { tmp.Close(); return fmt.Errorf("FILE_WRITE_FAILED: unable to write file content") }
   if err = tmp.Chmod(0640); err != nil { tmp.Close(); return fmt.Errorf("FILE_WRITE_FAILED: unable to set file permissions") }
   if err = tmp.Close(); err != nil { return fmt.Errorf("FILE_WRITE_FAILED: unable to close file") }
-  if err = os.Chown(tmpName, uid, gid); err != nil { return fmt.Errorf("FILE_PERMISSION_FAILED: unable to set file ownership") }
   if err = os.Rename(tmpName, path); err != nil { return fmt.Errorf("FILE_WRITE_FAILED: unable to replace file") }
   return writeResult(map[string]any{"success":true,"path":input.Path,"size":len(data)})
  case "CREATE_DIRECTORY":
@@ -258,7 +263,6 @@ func fileManagerOperation(input request, root string, uid, gid int, writeResult 
   _, parentInfo, err := safeManagedPath(root, managedParentPath(input.Path), true)
   if err != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: parent directory does not exist") }
   if err := os.Mkdir(path, 0750); err != nil { return fmt.Errorf("DIRECTORY_CREATE_FAILED: unable to create directory") }
-  if err := os.Chown(path, uid, gid); err != nil { _ = os.Remove(path); return fmt.Errorf("FILE_PERMISSION_FAILED: unable to set directory ownership") }
   return writeResult(map[string]any{"success":true,"path":input.Path})
  case "RENAME_PATH":
   oldPath, oldInfo, err := safeManagedPath(root, input.Path, false)
