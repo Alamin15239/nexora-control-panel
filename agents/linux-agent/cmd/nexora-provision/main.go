@@ -188,23 +188,41 @@ type managedFileEntry struct {
  ModifiedAt string `json:"modifiedAt"`
 }
 
+
+// openDirectoryChain opens each path component relative to the previously
+// opened directory. O_NOFOLLOW prevents symlink traversal at every level.
+func openDirectoryChain(root string, parts ...string) (int, error) {
+ fd, err := syscall.Open(root, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+ if err != nil { return -1, err }
+ for _, part := range parts {
+  if part == "" || part == "." || part == ".." || strings.Contains(part, string(filepath.Separator)) {
+   _ = syscall.Close(fd)
+   return -1, fmt.Errorf("invalid directory component")
+  }
+  nextFD, openErr := syscall.Openat(fd, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+  _ = syscall.Close(fd)
+  if openErr != nil { return -1, openErr }
+  fd = nextFD
+ }
+ return fd, nil
+}
+
 func fileManager(input request) error {
  account, group, err := verifiedAccount(input.Username)
  if err != nil { return err }
  uid, _ := strconv.Atoi(account.Uid)
  gid := mustGID(group.Gid)
- home := filepath.Join("/home", input.Username)
- root := filepath.Join(home, "public_html")
- for _, checked := range []string{"/home", home, root} {
-  checkedInfo, checkedErr := os.Lstat(checked)
-  if checkedErr != nil || !checkedInfo.IsDir() || checkedInfo.Mode()&os.ModeSymlink != 0 { return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe") }
- }
- rootInfo, err := os.Lstat(root)
- if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
-  return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
- }
+ rootFD, err := openDirectoryChain("/", "home", input.Username, "public_html")
+ if err != nil { return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe") }
  runtime.LockOSThread()
- if err := syscall.Chroot(root); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
+ if err := syscall.Fchdir(rootFD); err != nil {
+  _ = syscall.Close(rootFD)
+  return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root")
+ }
+ _ = syscall.Close(rootFD)
+ // Chroot to the already-open directory descriptor's working directory.
+ // This prevents a path replacement between validation and chroot.
+ if err := syscall.Chroot("."); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
  if err := os.Chdir("/"); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
  if err := syscall.Setgroups([]int{gid}); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to set account groups") }
  if err := syscall.Setgid(gid); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop group privileges") }
