@@ -53,7 +53,7 @@ async function verifyPassword(password: string, stored: string | null): Promise<
   if (!stored) return false;
   const [algorithm, iterationText, saltHex, expectedHex] = stored.split("$");
   const iterations = Number(iterationText);
-  if (algorithm !== "pbkdf2-sha256" || !Number.isInteger(iterations) || iterations < 100_000 || iterations > 1_000_000 ||
+  if (algorithm !== "pbkdf2-sha256" || !Number.isInteger(iterations) || iterations < 100_000 || iterations > PASSWORD_ITERATIONS ||
       !/^[a-f0-9]{32}$/.test(saltHex ?? "") || !/^[a-f0-9]{64}$/.test(expectedHex ?? "")) return false;
   const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map((part) => Number.parseInt(part, 16)));
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -167,8 +167,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     if (!validEmail(email) || !password) {
       return NextResponse.json({ message: "Email and password are required" }, { status: 400 });
     }
+    // Workspace is optional for accounts with a single active membership.
+    // Existing clients may still send an organization ID or slug.
     const organizationKey = typeof input.organizationId === "string" ? input.organizationId.trim() : "";
-    if (!organizationKey) return NextResponse.json({ message: "Workspace ID or slug is required" }, { status: 400 });
 
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
     const bucketKey = await sha256(`${email}| ${ip}`);
@@ -183,11 +184,20 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     const user = await db.prepare(
       "SELECT id, email, password_hash AS passwordHash, display_name AS displayName, status FROM users WHERE email = ? COLLATE NOCASE LIMIT 1",
     ).bind(email).first<{ id: string; email: string; passwordHash: string | null; displayName: string | null; status: string }>();
-    const membership = user?.status === "ACTIVE" ? await db.prepare(
-      `SELECT m.organization_id AS organizationId, m.role
-       FROM memberships m JOIN organizations o ON o.id = m.organization_id
-       WHERE m.user_id = ? AND o.status = 'ACTIVE' AND (o.id = ? OR o.slug = ?) LIMIT 1`,
-    ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: AuthRole }>() : null;
+    const membership = user?.status === "ACTIVE"
+      ? organizationKey
+        ? await db.prepare(
+            `SELECT m.organization_id AS organizationId, m.role
+             FROM memberships m JOIN organizations o ON o.id = m.organization_id
+             WHERE m.user_id = ? AND o.status = 'ACTIVE' AND (o.id = ? OR o.slug = ?) LIMIT 1`,
+          ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: AuthRole }>()
+        : await db.prepare(
+            `SELECT m.organization_id AS organizationId, m.role
+             FROM memberships m JOIN organizations o ON o.id = m.organization_id
+             WHERE m.user_id = ? AND o.status = 'ACTIVE'
+             ORDER BY m.created_at ASC LIMIT 1`,
+          ).bind(user.id).first<{ organizationId: string; role: AuthRole }>()
+      : null;
     const passwordValid = await verifyPassword(password, user?.passwordHash ?? null);
     if (!user || user.status !== "ACTIVE" || !membership || !passwordValid) {
       const expiredWindow = !limiter || now - Date.parse(limiter.windowStart) >= LOGIN_WINDOW_MS;
@@ -200,7 +210,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
          window_start = excluded.window_start, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at`,
       ).bind(crypto.randomUUID(), bucketKey, user?.id ?? null, attempts,
         expiredWindow ? new Date(now).toISOString() : limiter.windowStart, blockedUntil, new Date(now).toISOString()).run();
-      return NextResponse.json({ message: "Invalid email, password or workspace" }, { status: 401 });
+      return NextResponse.json({ message: "Invalid email or password" }, { status: 401 });
     }
 
     await db.prepare("DELETE FROM login_attempts WHERE bucket_key = ?").bind(bucketKey).run();
