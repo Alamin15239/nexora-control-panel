@@ -554,6 +554,37 @@ app.post("/v1/hosting-accounts", async (c) => {
   }
 });
 
+type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string };
+app.get("/v1/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare("SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id JOIN servers s ON s.id = a.server_id WHERE a.organization_id = ? ORDER BY d.created_at DESC").bind(identity.organizationId).all<DomainRecord>();
+  return c.json({ domains: result.results ?? [] });
+});
+app.post("/v1/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const accountId = typeof input.accountId === "string" ? input.accountId : "";
+  const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
+  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account) return c.json({ message: "Select a hosting account in this workspace." }, 404);
+  if (!validDomain(name)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
+  const suppliedRoot = typeof input.documentRoot === "string" ? input.documentRoot.trim() : "";
+  const root = suppliedRoot || "/home/" + account.username + "/public_html/" + name;
+  if (!root.startsWith("/home/" + account.username + "/") || root.includes("..") || root.length > 240) return c.json({ message: "Document root must be inside this account home directory." }, 400);
+  const id = crypto.randomUUID(); const jobId = crypto.randomUUID(); const primary = input.isPrimary === true;
+  const statements = [];
+  if (primary) statements.push(c.env.DB.prepare("UPDATE domains SET is_primary = 0 WHERE hosting_account_id = ?").bind(account.id));
+  statements.push(c.env.DB.prepare("INSERT INTO domains (id, hosting_account_id, name, document_root, is_primary) VALUES (?, ?, ?, ?, ?)").bind(id, account.id, name, root, primary ? 1 : 0));
+  statements.push(c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'ADD_DOMAIN', 'QUEUED', ?)").bind(jobId, account.id, "add-domain:" + id));
+  statements.push(c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'domain.create_requested', 'domain', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, id));
+  try { await c.env.DB.batch(statements); if (primary) await c.env.DB.prepare("UPDATE hosting_accounts SET primary_domain = ? WHERE id = ?").bind(name, account.id).run(); }
+  catch (error) { const message = error instanceof Error ? error.message : ""; if (/UNIQUE constraint failed: domains.name/i.test(message)) return c.json({ message: "This domain is already registered." }, 409); return c.json({ message: "Unable to save this domain." }, 500); }
+  return c.json({ domain: { id, name, document_root: root, is_primary: primary ? 1 : 0, hosting_account_id: account.id, username: account.username, account_status: account.status }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Domain saved. Server configuration is queued and awaits a connected Linux agent." }, 201);
+});
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 export default app;
