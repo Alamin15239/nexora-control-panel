@@ -92,3 +92,17 @@ func TestUpgradeLegacyDefaultIndexDoesNotFollowSymlinks(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if string(got) != legacyDefaultIndexHTML { t.Fatal("symlink target was modified") }
 }
+
+func TestOpenDirectoryChainRejectsSymlinkComponents(t *testing.T) {
+ root := t.TempDir()
+ real := filepath.Join(root, "real")
+ if err := os.Mkdir(real, 0750); err != nil { t.Fatal(err) }
+ if err := os.Symlink(real, filepath.Join(root, "linked")); err != nil { t.Fatal(err) }
+ fd, err := openDirectoryChain(root, "real")
+ if err != nil { t.Fatalf("expected real directory to open: %v", err) }
+ _ = syscall.Close(fd)
+ if fd, err := openDirectoryChain(root, "linked"); err == nil {
+  _ = syscall.Close(fd)
+  t.Fatal("expected symlink directory component to be rejected")
+ }
+}
