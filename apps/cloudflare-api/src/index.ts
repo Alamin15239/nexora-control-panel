@@ -378,6 +378,68 @@ app.post("/v1/servers/:id/enrollment-token", async (c) => {
   });
 });
 
+
+type HostingPlanRow = {
+  id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null;
+  website_limit: number; database_limit: number; mailbox_limit: number; active: number; created_at: string;
+};
+
+app.get("/v1/hosting-plans", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit,
+            database_limit, mailbox_limit, active, created_at
+     FROM hosting_plans WHERE organization_id = ? ORDER BY created_at DESC`,
+  ).bind(identity.organizationId).all<HostingPlanRow>();
+  return c.json({ plans: result.results ?? [] });
+});
+
+app.post("/v1/hosting-plans", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  const diskGb = Number(input.diskGb);
+  const bandwidthGb = input.bandwidthGb === "" || input.bandwidthGb == null ? null : Number(input.bandwidthGb);
+  const websiteLimit = Number(input.websiteLimit);
+  const databaseLimit = Number(input.databaseLimit);
+  const mailboxLimit = Number(input.mailboxLimit);
+  if (!name || name.length > 80) return c.json({ message: "Plan name is required (maximum 80 characters)" }, 400);
+  if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
+  if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
+  if (![websiteLimit, databaseLimit, mailboxLimit].every((v) => Number.isInteger(v) && v >= 0 && v <= 10000)) {
+    return c.json({ message: "Resource limits must be whole numbers between 0 and 10,000" }, 400);
+  }
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO hosting_plans
+         (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit, active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
+        websiteLimit, databaseLimit, mailboxLimit),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_plan.create', 'hosting_plan', ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
+    ]);
+    return c.json({ plan: { id, name, disk_limit_bytes: diskGb * 1024 ** 3,
+      bandwidth_limit_bytes: bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
+      website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit, active: 1 } }, 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/UNIQUE constraint failed: hosting_plans.organization_id, hosting_plans.name/i.test(message)) {
+      return c.json({ message: "A plan with this name already exists in your workspace" }, 409);
+    }
+    return c.json({ message: "Unable to create hosting plan" }, 500);
+  }
+});
+
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 export default app;
