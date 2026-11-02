@@ -115,7 +115,7 @@ func provisionAccount(username string) error {
 	index := filepath.Join(publicHTML, "index.html")
 	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 	if err == nil {
-		_, writeErr := file.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Hosting account ready</title></head><body><h1>Hosting account provisioned</h1><p>Website service configuration is not enabled yet.</p></body></html>\n")
+		_, writeErr := file.WriteString("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Website ready</title></head><body><main><h1>Your website is ready</h1><p>Your hosting account has been created successfully.</p><p>Upload your website files to this domain using Nexora File Manager. Replace this index.html file with your own website homepage.</p></main></body></html>\n")
 		closeErr := file.Close()
 		if writeErr != nil || closeErr != nil { return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write initial index page") }
 		if err := os.Chown(index, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("DEFAULT_PAGE_PERMISSION_FAILED: unable to set initial page ownership") }
