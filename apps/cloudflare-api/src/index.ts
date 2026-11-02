@@ -678,11 +678,16 @@ app.post("/v1/hosting-accounts", async (c) => {
   }
 });
 
-type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string };
+type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
 app.get("/v1/domains", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  const result = await c.env.DB.prepare("SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id JOIN servers s ON s.id = a.server_id WHERE a.organization_id = ? ORDER BY d.created_at DESC").bind(identity.organizationId).all<DomainRecord>();
+  const result = await c.env.DB.prepare(
+    "SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname, " +
+    "(SELECT j.status FROM provisioning_jobs j WHERE j.idempotency_key = 'add-domain:' || d.id AND j.operation = 'ADD_DOMAIN' LIMIT 1) AS job_status " +
+    "FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id JOIN servers s ON s.id = a.server_id " +
+    "WHERE a.organization_id = ? ORDER BY d.created_at DESC",
+  ).bind(identity.organizationId).all<DomainRecord>();
   return c.json({ domains: result.results ?? [] });
 });
 app.post("/v1/domains", async (c) => {
