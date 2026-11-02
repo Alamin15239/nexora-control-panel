@@ -40,7 +40,7 @@ sudo install -o root -g root -m 0755 /tmp/nexora-provision /usr/local/libexec/ne
 Install the single-command sudo rule and validate it:
 
 ```sh
-echo 'nexora-agent ALL=(root) NOPASSWD: /usr/local/libexec/nexora-provision' | sudo tee /etc/sudoers.d/nexora-agent >/dev/null
+echo 'nexora-agent ALL=(root) NOPASSWD: /usr/local/libexec/nexora-provision ""' | sudo tee /etc/sudoers.d/nexora-agent >/dev/null
 sudo chown root:root /etc/sudoers.d/nexora-agent
 sudo chmod 0440 /etc/sudoers.d/nexora-agent
 sudo visudo -cf /etc/sudoers.d/nexora-agent
