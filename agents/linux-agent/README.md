@@ -1,6 +1,6 @@
 # Nexora Linux Agent
 
-Restricted Linux node agent for Nexora Control. Version 0.5.0 supports authenticated hosting-account and Nginx domain provisioning jobs.
+Restricted Linux node agent for Nexora Control. Version 0.6.0 supports authenticated hosting-account provisioning, Nginx domain configuration, and sandboxed hosting File Manager jobs.
 
 ## Security model
 
@@ -10,9 +10,9 @@ Restricted Linux node agent for Nexora Control. Version 0.5.0 supports authentic
 - Requests outside the five-minute clock window and replayed nonces are rejected.
 - The agent validates HTTPS URLs and uses the platform TLS trust store.
 - The monitoring agent runs as the unprivileged `nexora-agent` user.
-- The agent accepts only the allowlisted `CREATE_HOSTING_ACCOUNT` and `ADD_DOMAIN` operations. It does not execute commands or scripts supplied by the control plane.
+- The agent accepts only the allowlisted `CREATE_HOSTING_ACCOUNT`, `ADD_DOMAIN`, and `FILE_MANAGER` job types. It does not execute commands or scripts supplied by the control plane.
 - Privileged account creation is delegated to a separate root-owned helper at `/usr/local/libexec/nexora-provision`, permitted through one exact sudoers command.
-- The helper validates account identities and domain names, creates non-login hosting users, and creates document roots with restrictive ownership and permissions. For `ADD_DOMAIN`, it rejects unsafe paths and symlinks, applies a read-only Nginx ACL, writes an Nginx virtual host, runs `nginx -t`, and reloads Nginx only after a successful test. The configuration update is rolled back if validation or reload fails.
+- The helper validates account identities and domain names, creates non-login hosting users, and creates document roots with restrictive ownership and permissions. For `ADD_DOMAIN`, it rejects unsafe paths and symlinks, applies a read-only Nginx ACL, writes an Nginx virtual host, runs `nginx -t`, and reloads Nginx only after a successful test. The configuration update is rolled back if validation or reload fails. File Manager operations run in a chroot rooted at the account's `public_html`, then drop to the account UID/GID. They reject symlink traversal and support bounded list, read, write, create-directory, rename and delete operations; each file transfer is limited to 256 KiB.
 - Domain provisioning configures HTTP Nginx virtual hosts only. It does not configure DNS, TLS, PHP, mail, databases, backups, or enforce plan quotas. Public reachability still requires correct DNS and firewall/network configuration.
 
 ## Commands
