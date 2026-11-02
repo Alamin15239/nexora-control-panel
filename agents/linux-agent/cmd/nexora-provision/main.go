@@ -158,7 +158,12 @@ func fileManager(input request) error {
  if err != nil { return err }
  uid, _ := strconv.Atoi(account.Uid)
  gid := mustGID(group.Gid)
- root := filepath.Join("/home", input.Username, "public_html")
+ home := filepath.Join("/home", input.Username)
+ root := filepath.Join(home, "public_html")
+ for _, checked := range []string{"/home", home, root} {
+  checkedInfo, checkedErr := os.Lstat(checked)
+  if checkedErr != nil || !checkedInfo.IsDir() || checkedInfo.Mode()&os.ModeSymlink != 0 { return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe") }
+ }
  rootInfo, err := os.Lstat(root)
  if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
   return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
@@ -166,6 +171,8 @@ func fileManager(input request) error {
  writeResult := func(value any) error { return json.NewEncoder(os.Stdout).Encode(value) }
  return fileManagerOperation(input, root, uid, gid, writeResult)
 }
+
+func managedParentPath(value string) string { parent := filepath.ToSlash(filepath.Dir(value)); if parent == "." { return "" }; return parent }
 
 func safeManagedPath(root, relative string, allowRoot bool) (string, os.FileInfo, error) {
  if relative == "" {
@@ -366,7 +373,7 @@ func fileManagerOperation(input request, root string, uid, gid int, writeResult 
   if err != nil { return err }
   if info != nil && !info.Mode().IsRegular() { return fmt.Errorf("NOT_A_FILE: only regular files can be edited") }
   if info == nil {
-   _, parentInfo, e := safeManagedPath(root, filepath.ToSlash(filepath.Dir(input.Path)), true)
+   _, parentInfo, e := safeManagedPath(root, managedParentPath(input.Path), true)
    if e != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: parent directory does not exist") }
   }
   tmp, err := os.CreateTemp(filepath.Dir(path), ".nexora-file-*")
@@ -395,7 +402,7 @@ func fileManagerOperation(input request, root string, uid, gid int, writeResult 
   newPath, newInfo, err := safeManagedPath(root, input.NewPath, false)
   if err != nil { return err }
   if newInfo != nil { return fmt.Errorf("PATH_EXISTS: destination already exists") }
-  _, parentInfo, err := safeManagedPath(root, filepath.ToSlash(filepath.Dir(input.NewPath)), true)
+  _, parentInfo, err := safeManagedPath(root, managedParentPath(input.NewPath), true)
   if err != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: destination directory does not exist") }
   if err := os.Rename(oldPath, newPath); err != nil { return fmt.Errorf("RENAME_FAILED: unable to rename selected item") }
   return writeResult(map[string]any{"success":true,"path":input.NewPath})
