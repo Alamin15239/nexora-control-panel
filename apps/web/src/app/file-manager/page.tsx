@@ -55,7 +55,7 @@ export default function FileManagerPage() {
     });
     const queued = await response.json() as JobResponse;
     if (!response.ok || !queued.job?.id) throw new Error(queued.message || "Unable to queue file operation");
-    for (let attempt = 0; attempt < 60; attempt++) {
+    for (let attempt = 0; attempt < 90; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 1000));
       const statusResponse = await fetch("/api/control/file-manager/jobs/" + encodeURIComponent(queued.job.id), { cache: "no-store" });
       const statusData = await statusResponse.json() as JobResponse;
