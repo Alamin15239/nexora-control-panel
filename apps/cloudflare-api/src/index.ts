@@ -743,7 +743,6 @@ app.get("/v1/file-manager/jobs/:id", async (c) => {
   let result: unknown = null;
   if (job.resultPayload) {
     try { result = JSON.parse(job.resultPayload); } catch { return c.json({ message: "Stored file operation result is invalid" }, 500); }
-    await c.env.DB.prepare("UPDATE provisioning_jobs SET result_payload = NULL WHERE id = ? AND operation = 'FILE_MANAGER' AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE organization_id = ?)").bind(job.id, identity.organizationId).run();
   }
   return c.json({ job: { id: job.id, status: job.status, operation: job.operation, errorMessage: job.errorMessage, requestedAt: job.requestedAt, finishedAt: job.finishedAt, result } });
 });
