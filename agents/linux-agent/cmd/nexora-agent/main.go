@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -97,8 +98,8 @@ func apiBase(value string) (string, error) {
 func enroll(api, serverID, configPath string) error {
 	base, err := apiBase(api); if err != nil { return err }
 	fmt.Fprint(os.Stderr, "Paste the one-time enrollment token, then press Enter: ")
-	line, err := io.ReadAll(io.LimitReader(os.Stdin, 512)); if err != nil { return err }
-	token := strings.TrimSpace(string(line)); if len(token) != 64 { return fmt.Errorf("enrollment token must be 32-byte hex") }
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n'); if err != nil && len(line) == 0 { return err }
+	token := strings.TrimSpace(line); if len(token) != 64 { return fmt.Errorf("enrollment token must be 32-byte hex") }
 	if _, err := hex.DecodeString(token); err != nil { return fmt.Errorf("invalid enrollment token") }
 	body, _ := json.Marshal(map[string]string{"serverId": serverID, "enrollmentToken": token})
 	req, err := http.NewRequest(http.MethodPost, base+"/v1/agent/enroll", bytes.NewReader(body)); if err != nil { return err }
@@ -181,8 +182,10 @@ func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample 
 	nonce := hex.EncodeToString(nonceBytes)
 	bodyHash:=sha256.Sum256(body)
 	canonical:=timestamp+"\n"+nonce+"\nPOST\n"+path+"\n"+hex.EncodeToString(bodyHash[:])
-	secret,_:=hex.DecodeString(cfg.Secret)
-	mac:=hmac.New(sha256.New,secret); _,_=mac.Write([]byte(canonical))
+	secret, _ := hex.DecodeString(cfg.Secret)
+	derived := sha256.Sum256(secret)
+	mac := hmac.New(sha256.New, []byte(hex.EncodeToString(derived[:])))
+	_, _ = mac.Write([]byte(canonical))
 	req,err:=http.NewRequestWithContext(ctx,http.MethodPost,strings.TrimRight(cfg.ControlPlane,"/")+path,bytes.NewReader(body)); if err!=nil{return err}
 	req.Header.Set("Content-Type","application/json"); req.Header.Set("X-Nexora-Node",cfg.NodeID)
 	req.Header.Set("X-Nexora-Timestamp",timestamp); req.Header.Set("X-Nexora-Nonce",nonce); req.Header.Set("X-Nexora-Signature",hex.EncodeToString(mac.Sum(nil)))
