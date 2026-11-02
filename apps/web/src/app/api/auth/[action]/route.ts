@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -7,21 +8,24 @@ const COOKIE_NAME = "nexora_session";
 const COOKIE_MAX_AGE = 15 * 60;
 const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
 
-function getApiBase(): string {
-  // Keep auth traffic pinned to the independently deployed API Worker.
-  // A dashboard-level variable must not silently redirect authentication
-  // requests to the dashboard Worker or an outdated endpoint.
-  return DEFAULT_API_BASE;
+type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
+
+function getApiService(): ApiServiceBinding {
+  const { env } = getCloudflareContext();
+  const service = (env as typeof env & { NEXORA_API?: ApiServiceBinding }).NEXORA_API;
+  if (!service) throw new Error("NEXORA_API service binding is missing from nexora-dashboard");
+  return service;
 }
 
 async function apiRequest(path: string, init: RequestInit): Promise<Response> {
-  const base = getApiBase();
-  return fetch(new URL(`/v1/auth/${path}`, base), {
+  const url = new URL(`/v1/auth/${path}`, DEFAULT_API_BASE);
+  const request = new Request(url, {
     ...init,
     headers: { "content-type": "application/json", ...init.headers },
     cache: "no-store",
     redirect: "error",
   });
+  return getApiService().fetch(request);
 }
 
 async function readApiResponse(response: Response): Promise<Record<string, unknown>> {
