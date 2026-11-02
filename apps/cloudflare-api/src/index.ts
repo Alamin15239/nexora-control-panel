@@ -1045,7 +1045,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     ).bind(new Date().toISOString(), claimed.id, auth.credential.nodeId).run();
     return c.json({ job: null });
   }
-  let requestPayload: unknown = null;\n  if (claimed.requestPayload) { try { requestPayload = JSON.parse(claimed.requestPayload); } catch { requestPayload = null; } }\n  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, requestPayload, account } });
+  let requestPayload: unknown = null;
+  if (claimed.requestPayload) { try { requestPayload = JSON.parse(claimed.requestPayload); } catch { requestPayload = null; } }\n  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, requestPayload, account } });
 });
 
 app.post("/v1/agent/jobs/:id/result", async (c) => {
@@ -1058,7 +1059,8 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
   if (typeof input.success !== "boolean") return c.json({ message: "A boolean success result is required" }, 400);
   const errorCode = typeof input.errorCode === "string" ? input.errorCode.slice(0, 80) : null;
-  const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;\n  const resultPayload = input.result && typeof input.result === "object" ? JSON.stringify(input.result) : null;
+  const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;
+  const resultPayload = input.result && typeof input.result === "object" ? JSON.stringify(input.result) : null;
   const jobId = c.req.param("id");
   const now = new Date().toISOString();
   const status = input.success ? "SUCCEEDED" : "FAILED";
