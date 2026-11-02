@@ -13,10 +13,6 @@ const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const PASSWORD_ITERATIONS = 310_000;
 
-function jsonError(c: Parameters<typeof app.get>[1] extends never ? never : any, status: number, message: string) {
-  return c.json({ message }, status);
-}
-
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
