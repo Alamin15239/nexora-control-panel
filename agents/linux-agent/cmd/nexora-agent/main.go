@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -192,10 +192,9 @@ func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample 
 }
 
 func randomHexString(n int) string {
-	b:=make([]byte,n); if _,err:=io.ReadFull(os.Stdin,b); err==nil { return hex.EncodeToString(b) }
-	// Crypto randomness is provided by the operating system.
-	for i:=range b { b[i]=byte(time.Now().UnixNano() >> (uint(i%8)*8)) ^ byte(i*31) }
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic("secure random source unavailable: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }
-
-var _ = runtime.GOOS
