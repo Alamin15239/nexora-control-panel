@@ -186,6 +186,7 @@ type provisionJob struct {
 		Domain         string `json:"domain"`
 		DocumentRoot   string `json:"documentRoot"`
 	} `json:"account"`
+	RequestPayload json.RawMessage `json:"requestPayload"`
 }
 
 func signedRequest(ctx context.Context, client *http.Client, cfg Config, method, path string, body []byte) (*http.Response, error) {
@@ -237,7 +238,31 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	success := false
 	errorCode := ""
 	errorMessage := ""
-	if job.Operation != "CREATE_HOSTING_ACCOUNT" && job.Operation != "ADD_DOMAIN" {
+	var resultPayload json.RawMessage
+	if job.Operation == "FILE_MANAGER" {
+		var payload map[string]any
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The file manager job payload is invalid"
+		} else {
+			payload["operation"] = "FILE_MANAGER"
+			payload["username"] = job.Account.Username
+			encoded, _ := json.Marshal(payload)
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
+			output, commandErr := command.CombinedOutput()
+			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
+				success = true
+				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
+			} else {
+				errorCode = "FILE_MANAGER_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if commandErr == nil { errorMessage = "The file manager returned an invalid result" }
+				if errorMessage == "" { errorMessage = "The restricted file manager operation failed" }
+				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+			}
+		}
+	} else if job.Operation != "CREATE_HOSTING_ACCOUNT" && job.Operation != "ADD_DOMAIN" {
 		errorCode = "UNSUPPORTED_OPERATION"
 		errorMessage = "This agent version does not support the requested operation"
 	} else {
@@ -264,15 +289,14 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				errorMessage = strings.TrimSpace(string(output))
 				if errorMessage == "" { errorMessage = "The restricted Linux provisioning helper failed" }
 				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
-				fmt.Fprintf(os.Stderr, "provisioning job %s failed: %s\\n", job.ID, errorMessage)
 			}
 		}
 	}
-
 	result, _ := json.Marshal(map[string]any{
 		"success": success,
 		"errorCode": errorCode,
 		"errorMessage": errorMessage,
+		"result": resultPayload,
 	})
 	resultPath := "/v1/agent/jobs/" + url.PathEscape(job.ID) + "/result"
 	resultResp, err := signedRequest(ctx, client, cfg, http.MethodPost, resultPath, result)
