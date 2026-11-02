@@ -27,10 +27,10 @@ func TestDomainPattern(t *testing.T) {
 func TestDocumentRootPattern(t *testing.T) {
 	valid := []string{"/home/client01/public_html", "/home/client_01/sites/example.com"}
 	for _, value := range valid {
-		if !documentRootPattern.MatchString(value) { t.Errorf("expected document root %q to be accepted", value) }
+		if !validDocumentRoot(value) { t.Errorf("expected document root %q to be accepted", value) }
 	}
 	invalid := []string{"/home/client01/public_html;include", "/home/client01/public_html with spaces", "/home/client01/../other", "/tmp/site", "/home/client01/public_html\\n"}
 	for _, value := range invalid {
-		if documentRootPattern.MatchString(value) { t.Errorf("expected document root %q to be rejected", value) }
+		if validDocumentRoot(value) { t.Errorf("expected document root %q to be rejected", value) }
 	}
 }
