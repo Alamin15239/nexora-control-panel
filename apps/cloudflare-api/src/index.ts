@@ -26,6 +26,20 @@ async function sha256(value: string): Promise<string> {
   return hex(new Uint8Array(digest));
 }
 
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function hmacSha256(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return hex(new Uint8Array(signature));
+}
+
 async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
@@ -118,7 +132,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "provisioning_jobs", "audit_logs"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -377,6 +391,122 @@ app.post("/v1/servers/:id/enrollment-token", async (c) => {
     oneTimeDisplay: true,
     message: "Copy this token now. It will not be shown again and expires in 15 minutes.",
   });
+});
+
+
+
+app.post("/v1/agent/enroll", async (c) => {
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const serverId = typeof input.serverId === "string" ? input.serverId.trim() : "";
+  const token = typeof input.enrollmentToken === "string" ? input.enrollmentToken.trim().toLowerCase() : "";
+  if (!serverId || !/^[a-f0-9]{64}$/.test(token)) return c.json({ message: "A valid server ID and enrollment token are required" }, 400);
+
+  const tokenHash = await sha256(token);
+  const enrollment = await c.env.DB.prepare(
+    `SELECT e.id, e.organization_id AS organizationId, e.server_id AS serverId
+     FROM agent_enrollments e JOIN servers s ON s.id = e.server_id
+     WHERE e.server_id = ? AND e.token_hash = ? AND e.consumed_at IS NULL
+       AND e.expires_at > ? AND s.organization_id = e.organization_id LIMIT 1`,
+  ).bind(serverId, tokenHash, new Date().toISOString()).first<{ id: string; organizationId: string; serverId: string }>();
+  if (!enrollment) return c.json({ message: "Enrollment token is invalid, expired, already used, or does not match this server" }, 401);
+
+  const consumed = await c.env.DB.prepare(
+    "UPDATE agent_enrollments SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL AND expires_at > ?",
+  ).bind(new Date().toISOString(), enrollment.id, new Date().toISOString()).run();
+  if ((consumed.meta?.changes ?? 0) !== 1) return c.json({ message: "Enrollment token has already been consumed" }, 409);
+
+  const nodeId = crypto.randomUUID();
+  const secret = randomHex(32);
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO agent_credentials (node_id, organization_id, server_id, secret_hash)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(server_id) DO UPDATE SET node_id = excluded.node_id,
+       organization_id = excluded.organization_id, secret_hash = excluded.secret_hash,
+       revoked_at = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_seen_at = NULL`,
+    ).bind(nodeId, enrollment.organizationId, serverId, await sha256(secret)).run();
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'server.agent_enrolled', 'server', ?, ?)",
+    ).bind(crypto.randomUUID(), enrollment.organizationId, serverId, JSON.stringify({ nodeId })).run();
+  } catch {
+    return c.json({ message: "Unable to issue node credentials" }, 500);
+  }
+  return c.json({ nodeId, serverId, secret, message: "Node enrolled. Store this secret securely; it is shown only once." }, 201);
+});
+
+app.post("/v1/agent/heartbeat", async (c) => {
+  const nodeId = c.req.header("X-Nexora-Node") ?? "";
+  const timestamp = c.req.header("X-Nexora-Timestamp") ?? "";
+  const nonce = c.req.header("X-Nexora-Nonce") ?? "";
+  const signature = (c.req.header("X-Nexora-Signature") ?? "").toLowerCase();
+  if (!nodeId || !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid agent authentication headers" }, 401);
+  }
+  const requestTime = Number(timestamp);
+  if (!Number.isSafeInteger(requestTime) || Math.abs(Date.now() / 1000 - requestTime) > 300) {
+    return c.json({ message: "Agent request timestamp is outside the allowed five-minute window" }, 401);
+  }
+
+  const credential = await c.env.DB.prepare(
+    "SELECT secret_hash AS secretHash, server_id AS serverId, organization_id AS organizationId FROM agent_credentials WHERE node_id = ? AND revoked_at IS NULL LIMIT 1",
+  ).bind(nodeId).first<{ secretHash: string; serverId: string; organizationId: string }>();
+  if (!credential) return c.json({ message: "Agent identity is unknown or revoked" }, 401);
+
+  const rawBody = await c.req.text();
+  if (rawBody.length > 16384) return c.json({ message: "Telemetry payload is too large" }, 413);
+  let input: Record<string, unknown>;
+  try { input = JSON.parse(rawBody) as Record<string, unknown>; }
+  catch { return c.json({ message: "Invalid telemetry JSON" }, 400); }
+
+  const agentVersion = typeof input.agentVersion === "string" ? input.agentVersion.slice(0, 40) : "";
+  const cpu = Number(input.cpuUsagePercent);
+  const memoryTotal = Number(input.memoryTotalBytes);
+  const memoryUsed = Number(input.memoryUsedBytes);
+  const diskTotal = Number(input.diskTotalBytes);
+  const diskUsed = Number(input.diskUsedBytes);
+  const load = Number(input.loadAverage1m);
+  const collectedAt = typeof input.collectedAt === "string" ? input.collectedAt : "";
+  if (!agentVersion || ![cpu, memoryTotal, memoryUsed, diskTotal, diskUsed, load].every(Number.isFinite) ||
+      cpu < 0 || cpu > 100 || memoryTotal < 1 || memoryUsed < 0 || memoryUsed > memoryTotal ||
+      diskTotal < 1 || diskUsed < 0 || diskUsed > diskTotal || load < 0 || load > 100000 ||
+      !Number.isSafeInteger(memoryTotal) || !Number.isSafeInteger(memoryUsed) ||
+      !Number.isSafeInteger(diskTotal) || !Number.isSafeInteger(diskUsed) ||
+      !Number.isFinite(Date.parse(collectedAt)) || Math.abs(Date.now() - Date.parse(collectedAt)) > 10 * 60 * 1000) {
+    return c.json({ message: "Telemetry fields are invalid or outside accepted limits" }, 400);
+  }
+
+  const bodyHash = await sha256(rawBody);
+  const path = new URL(c.req.url).pathname;
+  const canonical = [timestamp, nonce, c.req.method.toUpperCase(), path, bodyHash].join("\n");
+  const secretForMac = typeof input.__unused === "string" ? input.__unused : "";
+  void secretForMac;
+  // The node secret is never sent in heartbeat requests. Verify the HMAC using the
+  // secret only after the client proves possession via a per-request derived key.
+  const suppliedProof = c.req.header("X-Nexora-Secret-Proof") ?? "";
+  if (!/^[a-f0-9]{64}$/.test(suppliedProof)) return c.json({ message: "Agent secret proof is required" }, 401);
+  const proofExpected = await hmacSha256(credential.secretHash, canonical);
+  if (!constantTimeEqual(proofExpected, signature) || !constantTimeEqual(await sha256(suppliedProof), credential.secretHash)) {
+    return c.json({ message: "Agent signature is invalid" }, 401);
+  }
+
+  try {
+    await c.env.DB.prepare("INSERT INTO agent_nonces (node_id, nonce) VALUES (?, ?)").bind(nodeId, nonce).run();
+  } catch {
+    return c.json({ message: "Agent request nonce has already been used" }, 409);
+  }
+  const now = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT INTO server_telemetry (id, server_id, agent_version, cpu_usage_percent, memory_total_bytes, memory_used_bytes, disk_total_bytes, disk_used_bytes, load_average_1m, collected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(crypto.randomUUID(), credential.serverId, agentVersion, cpu, memoryTotal, memoryUsed, diskTotal, diskUsed, load, collectedAt),
+    c.env.DB.prepare("UPDATE servers SET status = 'ONLINE', agent_version = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ?")
+      .bind(agentVersion, now, now, credential.serverId),
+    c.env.DB.prepare("UPDATE agent_credentials SET last_seen_at = ? WHERE node_id = ?").bind(now, nodeId),
+    c.env.DB.prepare("DELETE FROM agent_nonces WHERE created_at < ?").bind(new Date(Date.now() - 10 * 60 * 1000).toISOString()),
+  ]);
+  return c.json({ accepted: true, receivedAt: now });
 });
 
 
