@@ -707,7 +707,7 @@ app.post("/v1/hosting-accounts/:id/files", async (c) => {
   if (!validManagedRelativePath(filePath, operation === "LIST_FILES")) return c.json({ message: "Invalid file path" }, 400);
   if (operation !== "LIST_FILES" && !filePath) return c.json({ message: "A file path is required" }, 400);
   if (operation === "RENAME_PATH" && !validManagedRelativePath(newPath)) return c.json({ message: "Invalid destination path" }, 400);
-  if (operation === "WRITE_FILE" && (!contentBase64 || contentBase64.length > 350000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64))) {
+  if (operation === "WRITE_FILE" && (typeof input.contentBase64 !== "string" || contentBase64.length > 350000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64))) {
     return c.json({ message: "File content must be valid Base64 and no larger than 256 KiB" }, 400);
   }
 
