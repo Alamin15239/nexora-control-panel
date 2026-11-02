@@ -1,43 +1,37 @@
 # Nexora Linux Agent
 
-The Linux agent is the restricted node-side component for managed hosting servers.
+Restricted Linux node agent for Nexora Control. Version 0.3.0 adds one-time enrollment and authenticated, read-only telemetry.
 
-## Current implementation
+## Security model
 
-Version `0.1.0` provides a Go CLI with:
+- Enrollment token is one-time and expires after 15 minutes.
+- The control plane stores only a SHA-256 hash of the per-node secret; the secret is returned once and stored locally with mode 0600.
+- Heartbeats use HMAC-SHA256 over timestamp, nonce, HTTP method, path, and body hash.
+- Requests outside the five-minute clock window and replayed nonces are rejected.
+- The agent validates HTTPS URLs and uses the platform TLS trust store.
+- The agent only reads Linux telemetry (/proc and filesystem statistics). It does not execute provisioning jobs, shell commands, or customer code.
 
-- `nexora-agent version`
-- `nexora-agent validate-config --config /path/to/agent.json`
-- HTTPS-only control-plane URL validation
-- CA PEM parsing and client certificate/private-key pair validation for the future mTLS connection
+## Commands
 
-It does **not** connect to the control plane, collect telemetry, or execute server operations yet. No privileged actions are implemented. This is intentional: the first network-enabled release must establish and verify node identity before exposing even read-only telemetry.
+```sh
+nexora-agent version
+nexora-agent enroll --api https://YOUR-NEXORA-API.workers.dev --server-id YOUR_SERVER_UUID --token-stdin
+nexora-agent run --config /etc/nexora/agent.json --interval 60s
+nexora-agent validate-config --config /etc/nexora/agent.json
+```
+
+For enrollment, paste the one-time token at the prompt; it is read from standard input rather than a command-line argument. Keep the config file private. The enrollment command writes it with owner-only permissions.
 
 ## Build and test
 
-From this directory:
-
 ```sh
 go test ./...
-go build -o dist/nexora-agent ./cmd/nexora-agent
-./dist/nexora-agent version
-./dist/nexora-agent validate-config --config ./config.example.json
+go vet ./...
+go build -trimpath -o dist/nexora-agent ./cmd/nexora-agent
 ```
 
-The example configuration contains placeholder paths and is not expected to validate until real certificates are provisioned.
+GitHub Actions builds Linux amd64 and arm64 binaries and uploads them as a workflow artifact.
 
-## Configuration
+## Current limitations
 
-See [config.example.json](./config.example.json). Keep private keys outside the repository, owned by root or the dedicated agent service account, with restrictive permissions (normally `0600`). Never commit node credentials.
-
-## Security contract for future releases
-
-- Unique, revocable node identity and mutual TLS.
-- Short-lived signed operation envelopes with expiry, nonce/replay protection and idempotency keys.
-- Strict allowlist and schema validation for each operation.
-- Bounded timeouts, output limits and resource limits.
-- No arbitrary shell command endpoint and no customer-controlled root commands.
-- Structured audit events; never log credentials or customer file contents.
-- Read-only health telemetry before any mutating provisioning feature is enabled.
-
-The agent must run with the least privilege possible. Any privileged helper must be a separate, narrowly scoped component with its own review and audit trail.
+The first agent release supports identity and monitoring only. Hosting account, database, DNS, SSL, email, backup and other provisioning operations remain disabled until narrowly scoped privileged helpers and signed job envelopes are independently implemented and audited. Do not run this agent as root for routine monitoring.
