@@ -24,6 +24,7 @@ type request struct {
 	Path string `json:"path,omitempty"`
 	NewPath string `json:"newPath,omitempty"`
 	ContentBase64 string `json:"contentBase64,omitempty"`
+	FileOperation string `json:"fileOperation,omitempty"`
 }
 
 var (
@@ -207,7 +208,7 @@ func safeManagedPath(root, relative string, allowRoot bool) (string, os.FileInfo
 }
 
 func fileManagerOperation(input request, root string, uid, gid int, writeResult func(any) error) error {
- switch input.Operation {
+ switch input.FileOperation {
  case "LIST_FILES":
   path, info, err := safeManagedPath(root, input.Path, true)
   if err != nil { return err }
