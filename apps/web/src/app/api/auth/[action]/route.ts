@@ -8,17 +8,10 @@ const COOKIE_MAX_AGE = 15 * 60;
 const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
 
 function getApiBase(): string {
-  // OpenNext exposes Worker vars through process.env when
-  // nodejs_compat_populate_process_env is enabled in wrangler.toml.
-  // Keep a known public API origin as a safe fallback so auth never
-  // accidentally fetches a relative URL or the dashboard Worker itself.
-  const configured = process.env.NEXORA_API_URL?.trim();
-  const base = (configured || DEFAULT_API_BASE).replace(/\/$/, "");
-  const parsed = new URL(base);
-  if (parsed.protocol !== "https:" || !parsed.hostname.endsWith(".workers.dev")) {
-    throw new Error("NEXORA_API_URL must be an HTTPS Cloudflare Worker URL");
-  }
-  return base;
+  // Keep auth traffic pinned to the independently deployed API Worker.
+  // A dashboard-level variable must not silently redirect authentication
+  // requests to the dashboard Worker or an outdated endpoint.
+  return DEFAULT_API_BASE;
 }
 
 async function apiRequest(path: string, init: RequestInit): Promise<Response> {
@@ -63,7 +56,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     try {
       upstream = await apiRequest(action, { method: "POST", body: JSON.stringify(body) });
     } catch (error) {
-      console.error("[Nexora auth proxy] API request failed:", error);
+      console.error("[Nexora auth proxy] API request failed:", { target: DEFAULT_API_BASE, reason: error instanceof Error ? error.message : String(error) });
       return NextResponse.json({ message: "Unable to connect to the Nexora API. Check the dashboard Worker API URL and deployment." }, { status: 503 });
     }
 
@@ -120,7 +113,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
   try {
     upstream = await apiRequest("me", { method: "GET", headers: { authorization: `Bearer ${token}` } });
   } catch (error) {
-    console.error("[Nexora auth proxy] Session request failed:", error);
+    console.error("[Nexora auth proxy] Session request failed:", { target: DEFAULT_API_BASE, reason: error instanceof Error ? error.message : String(error) });
     return NextResponse.json({ message: "Unable to connect to the Nexora API." }, { status: 503 });
   }
 
