@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type request struct {
@@ -19,6 +21,9 @@ type request struct {
 	Username     string `json:"username"`
 	Domain       string `json:"domain,omitempty"`
 	DocumentRoot string `json:"documentRoot,omitempty"`
+	Path string `json:"path,omitempty"`
+	NewPath string `json:"newPath,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
 }
 
 var (
@@ -40,6 +45,10 @@ func main() {
 		err = provisionAccount(input.Username)
 	case "ADD_DOMAIN":
 		err = addDomain(input.Username, input.Domain, input.DocumentRoot)
+	case "FILE_MANAGER":
+		err = fileManager(input)
+		if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
+		return
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
 	}
@@ -132,6 +141,273 @@ func addDomain(username, domain, documentRoot string) error {
 	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to set default web server access") }
 	if err := configureNginx(username, domain, documentRoot); err != nil { return err }
 	return nil
+}
+
+
+const maxManagedFileBytes = 256 * 1024
+
+type managedFileEntry struct {
+ Name string `json:"name"`
+ IsDir bool `json:"isDir"`
+ Size int64 `json:"size"`
+ ModifiedAt string `json:"modifiedAt"`
+}
+
+func fileManager(input request) error {
+ account, group, err := verifiedAccount(input.Username)
+ if err != nil { return err }
+ uid, _ := strconv.Atoi(account.Uid)
+ gid := mustGID(group.Gid)
+ root := filepath.Join("/home", input.Username, "public_html")
+ rootInfo, err := os.Lstat(root)
+ if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+  return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
+ }
+ writeResult := func(value any) error { return json.NewEncoder(os.Stdout).Encode(value) }
+ return fileManagerOperation(input, root, uid, gid, writeResult)
+}
+
+func safeManagedPath(root, relative string, allowRoot bool) (string, os.FileInfo, error) {
+ if relative == "" {
+  if allowRoot { info, err := os.Lstat(root); return root, info, err }
+  return "", nil, fmt.Errorf("INVALID_PATH: a file path is required")
+ }
+ if len(relative) > 1024 || strings.Contains(relative, "\\") || filepath.IsAbs(relative) {
+  return "", nil, fmt.Errorf("INVALID_PATH: file path is invalid")
+ }
+ parts := strings.Split(relative, "/")
+ current := root
+ for i, part := range parts {
+  if part == "" || part == "." || part == ".." || len(part) > 128 || !regexp.MustCompile(`^[A-Za-z0-9._ -]+package main
+
+import (
+	"bufio"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type request struct {
+	Operation    string `json:"operation"`
+	Username     string `json:"username"`
+	Domain       string `json:"domain,omitempty"`
+	DocumentRoot string `json:"documentRoot,omitempty"`
+	Path string `json:"path,omitempty"`
+	NewPath string `json:"newPath,omitempty"`
+	ContentBase64 string `json:"contentBase64,omitempty"`
+}
+
+var (
+	usernamePattern = regexp.MustCompile("^[a-z][a-z0-9_]{2,15}$")
+	domainPattern = regexp.MustCompile("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$")
+	documentRootPattern = regexp.MustCompile("^/home/[a-z][a-z0-9_]{2,15}/public_html(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$")
+)
+
+func main() {
+	if os.Geteuid() != 0 { fail("ROOT_REQUIRED", "The Nexora provisioning helper must run as root.") }
+	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
+	decoder.DisallowUnknownFields()
+	var input request
+	if err := decoder.Decode(&input); err != nil { fail("INVALID_REQUEST", "The provisioning request is invalid.") }
+	if !usernamePattern.MatchString(input.Username) { fail("INVALID_USERNAME", "The hosting username is invalid.") }
+	var err error
+	switch input.Operation {
+	case "CREATE_HOSTING_ACCOUNT":
+		err = provisionAccount(input.Username)
+	case "ADD_DOMAIN":
+		err = addDomain(input.Username, input.Domain, input.DocumentRoot)
+	case "FILE_MANAGER":
+		err = fileManager(input)
+		if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
+		return
+	default:
+		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
+	}
+	if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
+	fmt.Printf("Nexora operation %s completed for %s.\n", input.Operation, input.Username)
+}
+
+func fail(code, message string) { fmt.Fprintf(os.Stderr, "%s: %s\n", code, message); os.Exit(1) }
+
+func verifiedAccount(username string) (*user.User, *user.Group, error) {
+	home := filepath.Join("/home", username)
+	account, err := user.Lookup(username)
+	if err != nil { return nil, nil, fmt.Errorf("ACCOUNT_NOT_FOUND: hosting account does not exist") }
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil || uid < 1000 || filepath.Clean(account.HomeDir) != home {
+		return nil, nil, fmt.Errorf("ACCOUNT_CONFLICT: existing Linux user is not a verified hosting account")
+	}
+	group, err := user.LookupGroupId(account.Gid)
+	if err != nil { return nil, nil, fmt.Errorf("GROUP_LOOKUP_FAILED: unable to verify account group") }
+	passwd, err := exec.Command("/usr/bin/getent", "passwd", username).Output()
+	if err != nil { return nil, nil, fmt.Errorf("ACCOUNT_VERIFY_FAILED: unable to verify account login shell") }
+	fields := strings.Split(strings.TrimSpace(string(passwd)), ":")
+	if len(fields) != 7 || fields[6] != "/usr/sbin/nologin" {
+		return nil, nil, fmt.Errorf("ACCOUNT_CONFLICT: hosting users must use /usr/sbin/nologin")
+	}
+	return account, group, nil
+}
+
+func provisionAccount(username string) error {
+	home := filepath.Join("/home", username)
+	account, lookupErr := user.Lookup(username)
+	if lookupErr != nil {
+		var unknown user.UnknownUserError
+		if !errors.As(lookupErr, &unknown) { return fmt.Errorf("USER_LOOKUP_FAILED: unable to verify Linux account") }
+		args := []string{"--create-home", "--home-dir", home, "--shell", "/usr/sbin/nologin"}
+		if _, err := user.LookupGroup(username); err == nil { args = append(args, "--gid", username) } else { args = append(args, "--user-group") }
+		args = append(args, username)
+		if output, err := exec.Command("/usr/sbin/useradd", args...).CombinedOutput(); err != nil { return fmt.Errorf("USER_CREATE_FAILED: %s", safeOutput(string(output))) }
+		account, lookupErr = user.Lookup(username)
+		if lookupErr != nil { return fmt.Errorf("USER_LOOKUP_FAILED: account was created but could not be verified") }
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil || uid < 1000 || filepath.Clean(account.HomeDir) != home { return fmt.Errorf("ACCOUNT_CONFLICT: existing Linux user does not have the expected hosting identity") }
+	group, err := user.LookupGroupId(account.Gid)
+	if err != nil { return fmt.Errorf("GROUP_LOOKUP_FAILED: unable to verify account group") }
+	passwd, err := exec.Command("/usr/bin/getent", "passwd", username).Output()
+	if err != nil { return fmt.Errorf("ACCOUNT_VERIFY_FAILED: unable to verify account login shell") }
+	fields := strings.Split(strings.TrimSpace(string(passwd)), ":")
+	if len(fields) != 7 || fields[6] != "/usr/sbin/nologin" { return fmt.Errorf("ACCOUNT_CONFLICT: hosting users must use /usr/sbin/nologin") }
+	for _, path := range []string{"/home", home, filepath.Join(home, "public_html")} {
+		if info, e := os.Lstat(path); e == nil && info.Mode()&os.ModeSymlink != 0 { return fmt.Errorf("PATH_CONFLICT: refusing symbolic link in hosting home path") } else if e != nil && !errors.Is(e, os.ErrNotExist) { return fmt.Errorf("PATH_CHECK_FAILED: unable to verify hosting directory") }
+	}
+	if err := os.MkdirAll(home, 0750); err != nil { return fmt.Errorf("HOME_CREATE_FAILED: unable to create account home") }
+	if err := os.Chown(home, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("HOME_PERMISSION_FAILED: unable to set account ownership") }
+	if err := os.Chmod(home, 0750); err != nil { return fmt.Errorf("HOME_PERMISSION_FAILED: unable to set account permissions") }
+	publicHTML := filepath.Join(home, "public_html")
+	if err := os.MkdirAll(publicHTML, 0750); err != nil { return fmt.Errorf("DOCUMENT_ROOT_CREATE_FAILED: unable to create public_html") }
+	if err := os.Chown(publicHTML, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root ownership") }
+	if err := os.Chmod(publicHTML, 0750); err != nil { return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root permissions") }
+	if err := configurePHPFPM(username); err != nil { return err }
+	index := filepath.Join(publicHTML, "index.html")
+	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	if err == nil {
+		_, writeErr := file.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Hosting account ready</title></head><body><h1>Hosting account provisioned</h1><p>Website service configuration is not enabled yet.</p></body></html>\n")
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil { return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write initial index page") }
+		if err := os.Chown(index, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("DEFAULT_PAGE_PERMISSION_FAILED: unable to set initial page ownership") }
+	} else if !errors.Is(err, os.ErrExist) { return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to create initial index page") }
+	return nil
+}
+
+func addDomain(username, domain, documentRoot string) error {
+	if !domainPattern.MatchString(domain) || len(domain) > 253 { return fmt.Errorf("INVALID_DOMAIN: domain name is invalid") }
+	home := filepath.Join("/home", username)
+	if documentRoot == "" { documentRoot = filepath.Join(home, "public_html") }
+	if !validDocumentRoot(documentRoot) {
+		return fmt.Errorf("INVALID_DOCUMENT_ROOT: document root must be a clean absolute path")
+	}
+	rel, err := filepath.Rel(home, documentRoot)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("INVALID_DOCUMENT_ROOT: document root must be inside the hosting account home")
+	}
+	account, group, err := verifiedAccount(username)
+	if err != nil { return err }
+	uid, _ := strconv.Atoi(account.Uid)
+	gid := mustGID(group.Gid)
+	if err := ensureSafeDirectory(home, documentRoot, uid, gid); err != nil { return err }
+	if err := runFixed("/usr/bin/setfacl", "-m", "u:www-data:--x", home); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server home traversal") }
+	if err := runFixed("/usr/bin/setfacl", "-R", "-m", "u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server document access") }
+	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to set default web server access") }
+	if err := configureNginx(username, domain, documentRoot); err != nil { return err }
+	return nil
+}
+).MatchString(part) {
+   return "", nil, fmt.Errorf("INVALID_PATH: file path contains an invalid component")
+  }
+  current = filepath.Join(current, part)
+  info, err := os.Lstat(current)
+  if errors.Is(err, os.ErrNotExist) && i == len(parts)-1 { return current, nil, nil }
+  if err != nil { return "", nil, fmt.Errorf("FILE_NOT_FOUND: file or directory does not exist") }
+  if info.Mode()&os.ModeSymlink != 0 { return "", nil, fmt.Errorf("UNSAFE_PATH: symbolic links are not allowed in the File Manager") }
+  if i < len(parts)-1 && !info.IsDir() { return "", nil, fmt.Errorf("INVALID_PATH: a parent path is not a directory") }
+  if i == len(parts)-1 { return current, info, nil }
+ }
+ return "", nil, fmt.Errorf("INVALID_PATH: file path is invalid")
+}
+
+func fileManagerOperation(input request, root string, uid, gid int, writeResult func(any) error) error {
+ switch input.Operation {
+ case "LIST_FILES":
+  path, info, err := safeManagedPath(root, input.Path, true)
+  if err != nil { return err }
+  if info == nil || !info.IsDir() { return fmt.Errorf("NOT_A_DIRECTORY: selected path is not a directory") }
+  items, err := os.ReadDir(path)
+  if err != nil { return fmt.Errorf("DIRECTORY_READ_FAILED: unable to read directory") }
+  entries := make([]managedFileEntry, 0, len(items))
+  for _, item := range items {
+   entryInfo, err := item.Info()
+   if err != nil || item.Type()&os.ModeSymlink != 0 { continue }
+   entries = append(entries, managedFileEntry{Name:item.Name(), IsDir:entryInfo.IsDir(), Size:entryInfo.Size(), ModifiedAt:entryInfo.ModTime().UTC().Format(time.RFC3339)})
+  }
+  return writeResult(map[string]any{"path":input.Path,"entries":entries})
+ case "READ_FILE":
+  path, info, err := safeManagedPath(root, input.Path, false)
+  if err != nil { return err }
+  if info == nil || !info.Mode().IsRegular() { return fmt.Errorf("NOT_A_FILE: selected path is not a regular file") }
+  if info.Size() > maxManagedFileBytes { return fmt.Errorf("FILE_TOO_LARGE: files larger than 256 KiB cannot be opened in the editor") }
+  data, err := os.ReadFile(path)
+  if err != nil { return fmt.Errorf("FILE_READ_FAILED: unable to read selected file") }
+  return writeResult(map[string]any{"path":input.Path,"contentBase64":base64.StdEncoding.EncodeToString(data),"size":len(data)})
+ case "WRITE_FILE":
+  data, err := base64.StdEncoding.DecodeString(input.ContentBase64)
+  if err != nil || len(data) > maxManagedFileBytes { return fmt.Errorf("INVALID_FILE_CONTENT: file content is invalid or exceeds 256 KiB") }
+  path, info, err := safeManagedPath(root, input.Path, false)
+  if err != nil { return err }
+  if info != nil && !info.Mode().IsRegular() { return fmt.Errorf("NOT_A_FILE: only regular files can be edited") }
+  if info == nil {
+   _, parentInfo, e := safeManagedPath(root, filepath.ToSlash(filepath.Dir(input.Path)), true)
+   if e != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: parent directory does not exist") }
+  }
+  tmp, err := os.CreateTemp(filepath.Dir(path), ".nexora-file-*")
+  if err != nil { return fmt.Errorf("FILE_WRITE_FAILED: unable to create temporary file") }
+  tmpName := tmp.Name()
+  defer os.Remove(tmpName)
+  if _, err = tmp.Write(data); err != nil { tmp.Close(); return fmt.Errorf("FILE_WRITE_FAILED: unable to write file content") }
+  if err = tmp.Chmod(0640); err != nil { tmp.Close(); return fmt.Errorf("FILE_WRITE_FAILED: unable to set file permissions") }
+  if err = tmp.Close(); err != nil { return fmt.Errorf("FILE_WRITE_FAILED: unable to close file") }
+  if err = os.Chown(tmpName, uid, gid); err != nil { return fmt.Errorf("FILE_PERMISSION_FAILED: unable to set file ownership") }
+  if err = os.Rename(tmpName, path); err != nil { return fmt.Errorf("FILE_WRITE_FAILED: unable to replace file") }
+  return writeResult(map[string]any{"success":true,"path":input.Path,"size":len(data)})
+ case "CREATE_DIRECTORY":
+  path, info, err := safeManagedPath(root, input.Path, false)
+  if err != nil { return err }
+  if info != nil { return fmt.Errorf("PATH_EXISTS: a file or directory already exists at this path") }
+  _, parentInfo, err := safeManagedPath(root, filepath.ToSlash(filepath.Dir(input.Path)), true)
+  if err != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: parent directory does not exist") }
+  if err := os.Mkdir(path, 0750); err != nil { return fmt.Errorf("DIRECTORY_CREATE_FAILED: unable to create directory") }
+  if err := os.Chown(path, uid, gid); err != nil { _ = os.Remove(path); return fmt.Errorf("FILE_PERMISSION_FAILED: unable to set directory ownership") }
+  return writeResult(map[string]any{"success":true,"path":input.Path})
+ case "RENAME_PATH":
+  oldPath, oldInfo, err := safeManagedPath(root, input.Path, false)
+  if err != nil { return err }
+  if oldInfo == nil { return fmt.Errorf("FILE_NOT_FOUND: source does not exist") }
+  newPath, newInfo, err := safeManagedPath(root, input.NewPath, false)
+  if err != nil { return err }
+  if newInfo != nil { return fmt.Errorf("PATH_EXISTS: destination already exists") }
+  _, parentInfo, err := safeManagedPath(root, filepath.ToSlash(filepath.Dir(input.NewPath)), true)
+  if err != nil || parentInfo == nil || !parentInfo.IsDir() { return fmt.Errorf("INVALID_PATH: destination directory does not exist") }
+  if err := os.Rename(oldPath, newPath); err != nil { return fmt.Errorf("RENAME_FAILED: unable to rename selected item") }
+  return writeResult(map[string]any{"success":true,"path":input.NewPath})
+ case "DELETE_PATH":
+  path, info, err := safeManagedPath(root, input.Path, false)
+  if err != nil { return err }
+  if info == nil { return fmt.Errorf("FILE_NOT_FOUND: selected item does not exist") }
+  if err := os.RemoveAll(path); err != nil { return fmt.Errorf("DELETE_FAILED: unable to delete selected item") }
+  return writeResult(map[string]any{"success":true,"path":input.Path})
+ default:
+  return fmt.Errorf("INVALID_FILE_OPERATION: unsupported file manager operation")
+ }
 }
 
 func validDocumentRoot(path string) bool {
