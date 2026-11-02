@@ -115,8 +115,13 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
   }
 
   let input: Record<string, unknown>;
-  try { input = await request.json<Record<string, unknown>>(); }
-  catch { return NextResponse.json({ message: "Invalid request body" }, { status: 400 }); }
+  try {
+    const parsed: unknown = await request.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid body");
+    input = parsed as Record<string, unknown>;
+  } catch {
+    return NextResponse.json({ message: "Invalid request body" }, { status: 400 });
+  }
 
   try {
     const db = getDatabase();
