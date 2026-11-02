@@ -18,6 +18,11 @@ import (
 	"time"
 )
 
+const (
+	legacyDefaultIndexHTML = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Hosting account ready</title></head><body><h1>Hosting account provisioned</h1><p>Website service configuration is not enabled yet.</p></body></html>\n"
+	defaultIndexHTML = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Website ready</title></head><body><main><h1>Your website is ready</h1><p>Your hosting account has been created successfully.</p><p>Upload your website files to this domain using Nexora File Manager. Replace this index.html file with your own website homepage.</p></main></body></html>\n"
+)
+
 type request struct {
 	Operation    string `json:"operation"`
 	Username     string `json:"username"`
@@ -115,11 +120,37 @@ func provisionAccount(username string) error {
 	index := filepath.Join(publicHTML, "index.html")
 	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 	if err == nil {
-		_, writeErr := file.WriteString("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Website ready</title></head><body><main><h1>Your website is ready</h1><p>Your hosting account has been created successfully.</p><p>Upload your website files to this domain using Nexora File Manager. Replace this index.html file with your own website homepage.</p></main></body></html>\n")
+		_, writeErr := file.WriteString(defaultIndexHTML)
 		closeErr := file.Close()
 		if writeErr != nil || closeErr != nil { return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write initial index page") }
 		if err := os.Chown(index, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("DEFAULT_PAGE_PERMISSION_FAILED: unable to set initial page ownership") }
 	} else if !errors.Is(err, os.ErrExist) { return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to create initial index page") }
+	return nil
+}
+
+
+func upgradeLegacyDefaultIndex(documentRoot string, uid, gid int) error {
+	index := filepath.Join(documentRoot, "index.html")
+	info, err := os.Lstat(index)
+	if errors.Is(err, os.ErrNotExist) { return nil }
+	if err != nil { return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to inspect the default index page") }
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("DEFAULT_PAGE_CONFLICT: refusing to replace a non-regular index.html")
+	}
+	if info.Size() > 4096 { return nil }
+	data, err := os.ReadFile(index)
+	if err != nil { return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to read the default index page") }
+	if string(data) != legacyDefaultIndexHTML { return nil }
+
+	tmp, err := os.CreateTemp(documentRoot, ".nexora-index-*")
+	if err != nil { return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to create a replacement index page") }
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(defaultIndexHTML); err != nil { tmp.Close(); return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to write replacement index page") }
+	if err := tmp.Chmod(0640); err != nil { tmp.Close(); return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to set index page permissions") }
+	if err := tmp.Chown(uid, gid); err != nil { tmp.Close(); return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to set index page ownership") }
+	if err := tmp.Close(); err != nil { return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to close replacement index page") }
+	if err := os.Rename(tmpName, index); err != nil { return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to activate replacement index page") }
 	return nil
 }
 
@@ -139,6 +170,7 @@ func addDomain(username, domain, documentRoot string) error {
 	uid, _ := strconv.Atoi(account.Uid)
 	gid := mustGID(group.Gid)
 	if err := ensureSafeDirectory(home, documentRoot, uid, gid); err != nil { return err }
+	if err := upgradeLegacyDefaultIndex(documentRoot, uid, gid); err != nil { return err }
 	if err := runFixed("/usr/bin/setfacl", "-m", "u:www-data:--x", home); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server home traversal") }
 	if err := runFixed("/usr/bin/setfacl", "-R", "-m", "u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server document access") }
 	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to set default web server access") }
