@@ -14,6 +14,7 @@ export default function WebsitesDomainsPage() {
   const [form, setForm] = useState(blank);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [retryingId, setRetryingId] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -35,6 +36,18 @@ export default function WebsitesDomainsPage() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  async function retryDomain(domainId: string) {
+    setRetryingId(domainId); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/control/domains/${domainId}/retry`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to retry domain setup");
+      setNotice(data.message || "Domain setup queued again.");
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to retry domain setup"); }
+    finally { setRetryingId(""); }
+  }
 
   async function addDomain(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError(""); setNotice("");
@@ -72,7 +85,7 @@ export default function WebsitesDomainsPage() {
       </form>}
       <div className="grid gap-4 sm:grid-cols-3"><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Domains</p><p className="mt-2 text-3xl font-semibold">{domains.length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Primary domains</p><p className="mt-2 text-3xl font-semibold">{domains.filter(d=>d.is_primary===1).length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Awaiting server setup</p><p className="mt-2 text-3xl font-semibold">{domains.filter(d => d.job_status !== "SUCCEEDED").length}</p></div></div>
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Domain inventory</h2><p className="mt-1 text-xs text-slate-500">Domains registered in the current workspace.</p></div>
-        {loading?<div className="p-10 text-center text-sm text-slate-500">Loading domains…</div>:domains.length===0?<div className="p-12 text-center"><Globe2 size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No domains configured</h3><p className="mt-1 text-sm text-slate-500">Create a hosting account first, then attach its domain here.</p><Link href="/hosting-accounts" className="mt-4 inline-flex text-sm font-medium text-blue-700 hover:underline">Open hosting accounts</Link></div>:<div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Domain</th><th className="px-5 py-3 font-medium">Hosting account</th><th className="px-5 py-3 font-medium">Document root</th><th className="px-5 py-3 font-medium">DNS</th><th className="px-5 py-3 font-medium">Server setup</th><th className="px-5 py-3 font-medium">SSL</th></tr></thead><tbody className="divide-y divide-slate-100">{domains.map(d=><tr key={d.id}><td className="px-5 py-4"><p className="font-medium">{d.name}</p>{d.is_primary===1&&<span className="mt-1 inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">Primary</span>}</td><td className="px-5 py-4"><p>{d.username}</p><p className="mt-1 text-xs text-slate-500">{d.server_hostname} · {d.account_status}</p></td><td className="px-5 py-4 font-mono text-xs text-slate-600">{d.document_root}</td><td className="px-5 py-4"><span className={"rounded-full px-2.5 py-1 text-xs " + (d.job_status === "SUCCEEDED" ? "bg-emerald-50 text-emerald-700" : d.job_status === "FAILED" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700")}>{d.job_status === "SUCCEEDED" ? "Configured" : d.job_status === "FAILED" ? "Failed" : d.job_status === "RUNNING" ? "Configuring" : "Queued"}</span></td><td className="px-5 py-4"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Not issued</span></td></tr>)}</tbody></table></div>}
+        {loading?<div className="p-10 text-center text-sm text-slate-500">Loading domains…</div>:domains.length===0?<div className="p-12 text-center"><Globe2 size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No domains configured</h3><p className="mt-1 text-sm text-slate-500">Create a hosting account first, then attach its domain here.</p><Link href="/hosting-accounts" className="mt-4 inline-flex text-sm font-medium text-blue-700 hover:underline">Open hosting accounts</Link></div>:<div className="overflow-x-auto"><table className="w-full min-w-[850px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Domain</th><th className="px-5 py-3 font-medium">Hosting account</th><th className="px-5 py-3 font-medium">Document root</th><th className="px-5 py-3 font-medium">DNS</th><th className="px-5 py-3 font-medium">Server setup</th><th className="px-5 py-3 font-medium">SSL</th></tr></thead><tbody className="divide-y divide-slate-100">{domains.map(d=><tr key={d.id}><td className="px-5 py-4"><p className="font-medium">{d.name}</p>{d.is_primary===1&&<span className="mt-1 inline-flex rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">Primary</span>}</td><td className="px-5 py-4"><p>{d.username}</p><p className="mt-1 text-xs text-slate-500">{d.server_hostname} · {d.account_status}</p></td><td className="px-5 py-4 font-mono text-xs text-slate-600">{d.document_root}</td><td className="px-5 py-4"><div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-xs " + (d.job_status === "SUCCEEDED" ? "bg-emerald-50 text-emerald-700" : d.job_status === "FAILED" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700")}>{d.job_status === "SUCCEEDED" ? "Configured" : d.job_status === "FAILED" ? "Failed" : d.job_status === "RUNNING" ? "Configuring" : "Queued"}</span>{d.job_status === "FAILED" && <button onClick={() => void retryDomain(d.id)} disabled={retryingId !== ""} className="inline-flex items-center gap-1 rounded-lg border border-blue-200 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"><RefreshCw size={12}/>{retryingId === d.id ? "Retrying…" : "Retry"}</button>}</div></td><td className="px-5 py-4"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">Not issued</span></td></tr>)}</tbody></table></div>}
       </section>
       <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><CircleAlert size={14} className="mt-0.5 shrink-0"/> DNS records and SSL certificates are not configured by this screen yet. A connected hosting agent and DNS provider integration are required to verify DNS and install certificates.</p>
     </section>
