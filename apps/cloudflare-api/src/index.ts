@@ -838,7 +838,7 @@ async function authenticateAgentRequest(request: Request, db: D1Database, rawBod
 
 app.get("/v1/agent/jobs/next", async (c) => {
   const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, "");
-  if ("error" in auth) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
+  if (auth.error) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
   const now = new Date().toISOString();
   const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   const claimed = await c.env.DB.prepare(
@@ -871,7 +871,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const rawBody = await c.req.text();
   if (rawBody.length > 8192) return c.json({ message: "Job result payload is too large" }, 413);
   const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, rawBody);
-  if ("error" in auth) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
+  if (auth.error) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
   let input: Record<string, unknown>;
   try { input = JSON.parse(rawBody) as Record<string, unknown>; }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
