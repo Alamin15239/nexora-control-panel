@@ -4,7 +4,7 @@ Nexora's primary infrastructure platform is Cloudflare. The product will be desi
 
 ## Core architecture
 
-- **Web application:** Keep the current Vercel deployment while migrating the Next.js frontend to Cloudflare Workers with Static Assets/OpenNext only after compatibility testing. Cloudflare Workers Static Assets is the preferred target for static assets and supported full-stack Worker deployments.
+- **Web application:** Deploy the existing Next.js 15 dashboard to Cloudflare Workers using the OpenNext adapter. The app-specific configuration lives in `apps/web/open-next.config.ts` and `apps/web/wrangler.toml`; the Worker is named `nexora-dashboard`. Vercel is not part of the selected architecture. The dashboard calls the separately deployed `nexora-api` Worker through its same-origin server-side authentication and server-management proxies.
 - **API:** Move suitable API routes to Cloudflare Workers. Prefer a Worker-native API (for example, Hono) for new endpoints. Do not assume the existing NestJS + Prisma + PostgreSQL API can be deployed unchanged to Workers.
 - **Database:** Cloudflare D1 for tenant metadata and relational application data. Design schema and migrations for SQLite/D1 compatibility; replace Prisma/PostgreSQL-specific assumptions where necessary.
 - **Object storage:** Cloudflare R2 for customer uploads, website assets where suitable, backups and export files.
@@ -31,7 +31,7 @@ Workers Paid is currently listed at a minimum of $5 USD/month. Cloudflare Contai
 
 ## Migration from the existing codebase
 
-1. Keep the existing Vercel deployment stable while developing the Cloudflare-native backend in a separate package.
+1. Deploy the dashboard to Cloudflare Workers using the OpenNext adapter and validate production routes before moving traffic to its final custom domain.
 2. Inventory existing NestJS controllers, auth flows, tenant scoping, audit logs and Prisma schema.
 3. Define a D1-compatible schema and reviewed migrations; preserve organization isolation and role checks.
 4. Implement Worker API authentication, session revocation, rate limiting and audit logging before migrating privileged endpoints.
@@ -52,7 +52,7 @@ Workers Paid is currently listed at a minimum of $5 USD/month. Cloudflare Contai
 
 ## Current implementation status
 
-This is the target architecture, not evidence that the application has already migrated to Cloudflare. The existing project currently has a Next.js frontend, NestJS/Prisma/PostgreSQL API foundation and a Go Linux agent foundation. The API and Linux agent are not yet a Cloudflare-native hosting platform. The old Google Cloud plan is retained only as a historical alternative and is not the selected provider.
+The dashboard now has a Cloudflare Workers/OpenNext deployment configuration, and the `nexora-api` Worker with D1 is deployed separately. The Next.js dashboard still requires a successful Cloudflare build and production smoke test before its deployment can be considered verified. The original NestJS/Prisma/PostgreSQL API and Go Linux agent remain separate foundations; the API and Linux agent are not yet a complete Cloudflare-native hosting platform. The old Google Cloud plan is retained only as a historical alternative and is not the selected provider.
 
 ## Official references
 
