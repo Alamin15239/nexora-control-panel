@@ -2,13 +2,14 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, ArrowUpRight, Box, Cloud, Cpu, Database, Globe2, HardDrive, LayoutDashboard, LockKeyhole, Mail, Network, Plus, Server, Settings2, ShieldCheck, Users, Zap } from "lucide-react";
+import { Activity, ArrowUpRight, Box, Cloud, Cpu, Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole, Mail, Network, Plus, Server, Settings2, ShieldCheck, Users, Zap } from "lucide-react";
 
 const nav = [
   { label: "Overview", icon: LayoutDashboard, active: true },
   { label: "Servers", icon: Server },
   { label: "Hosting plans", icon: Box },
   { label: "Hosting accounts", icon: Users },
+  { label: "File Manager", icon: FolderOpen },
   { label: "Websites & domains", icon: Globe2 },
   { label: "Databases", icon: Database },
   { label: "Email", icon: Mail },
@@ -50,7 +51,7 @@ export default function Home() {
     <aside className="w-full border-b border-slate-200 bg-white px-5 py-5 lg:fixed lg:inset-y-0 lg:w-64 lg:border-b-0 lg:border-r">
       <div className="flex items-center gap-3 px-2"><div className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Cloud size={21}/></div><div><p className="font-semibold tracking-tight">Nexora <span className="text-blue-700">Control</span></p><p className="text-xs text-slate-500">Infrastructure platform</p></div></div>
       <p className="mt-9 hidden px-2 text-[11px] font-semibold uppercase tracking-widest text-slate-400 lg:block">Workspace</p>
-      <nav className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:grid-cols-1">{nav.map(({label, icon: Icon, active}) => <a key={label} href={label === "Servers" ? "/servers" : label === "Hosting plans" ? "/hosting-plans" : label === "Hosting accounts" ? "/hosting-accounts" : label === "Websites & domains" ? "/websites-domains" : label === "Databases" ? "/databases" : label === "Email" ? "/email" : label === "DNS management" ? "/dns" : label === "Backups" ? "/backups" : label === "Access & security" ? "/security" : label === "Settings" ? "/settings" : label === "Monitoring" ? "/monitoring" : "#"} className={"flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition " + (active ? "bg-blue-50 font-medium text-blue-700" : "text-slate-600 hover:bg-slate-50")}><Icon size={17}/>{label}</a>)}</nav>
+      <nav className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:grid-cols-1">{nav.map(({label, icon: Icon, active}) => <a key={label} href={label === "Servers" ? "/servers" : label === "Hosting plans" ? "/hosting-plans" : label === "Hosting accounts" ? "/hosting-accounts" : label === "File Manager" ? "/file-manager" : label === "Websites & domains" ? "/websites-domains" : label === "Databases" ? "/databases" : label === "Email" ? "/email" : label === "DNS management" ? "/dns" : label === "Backups" ? "/backups" : label === "Access & security" ? "/security" : label === "Settings" ? "/settings" : label === "Monitoring" ? "/monitoring" : "#"} className={"flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition " + (active ? "bg-blue-50 font-medium text-blue-700" : "text-slate-600 hover:bg-slate-50")}><Icon size={17}/>{label}</a>)}</nav>
       <p className="mt-8 hidden px-2 text-[11px] font-semibold uppercase tracking-widest text-slate-400 lg:block">System</p>
       <div className="mt-3 hidden space-y-1 lg:block"><a className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50" href="/security"><LockKeyhole size={17}/> Access & security</a><a className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50" href="/settings"><Settings2 size={17}/> Settings</a><a className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-600 hover:bg-slate-50" href="/monitoring"><Activity size={17}/> Monitoring</a></div>
       <div className="mt-10 hidden rounded-2xl bg-slate-50 p-4 lg:block"><div className="flex items-center gap-2 text-sm font-medium"><ShieldCheck size={16} className="text-emerald-600"/> Secure by design</div><p className="mt-2 text-xs leading-5 text-slate-500">Privileged operations will use authenticated agents and explicit operation policies.</p></div>
