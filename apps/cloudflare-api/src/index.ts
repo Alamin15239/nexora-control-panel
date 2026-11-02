@@ -681,7 +681,7 @@ app.post("/v1/hosting-accounts", async (c) => {
 
 function validManagedRelativePath(value: string, allowRoot = false): boolean {
   if (value === "") return allowRoot;
-  if (value.length > 1024 || value.startsWith("/") || value.includes("\\\\")) return false;
+  if (value.length > 1024 || value.startsWith("/") || value.includes("\\")) return false;
   return value.split("/").every(part =>
     part.length > 0 && part.length <= 128 && part !== "." && part !== ".." &&
     /^[A-Za-z0-9._ -]+$/.test(part)
