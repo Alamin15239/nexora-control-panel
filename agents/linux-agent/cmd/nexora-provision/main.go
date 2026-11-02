@@ -99,6 +99,7 @@ func provisionAccount(username string) error {
 	if err := os.MkdirAll(publicHTML, 0750); err != nil { return fmt.Errorf("DOCUMENT_ROOT_CREATE_FAILED: unable to create public_html") }
 	if err := os.Chown(publicHTML, uid, mustGID(group.Gid)); err != nil { return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root ownership") }
 	if err := os.Chmod(publicHTML, 0750); err != nil { return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root permissions") }
+	if err := configurePHPFPM(username); err != nil { return err }
 	index := filepath.Join(publicHTML, "index.html")
 	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 	if err == nil {
@@ -164,7 +165,7 @@ func configureNginx(username, domain, root string) error {
 	fileKey := strings.ReplaceAll(domain, ".", "_")
 	available := filepath.Join("/etc/nginx/sites-available", "nexora-"+fileKey)
 	enabled := filepath.Join("/etc/nginx/sites-enabled", "nexora-"+fileKey)
-	content := fmt.Sprintf("server {\n    listen 80;\n    server_name %s;\n\n    root %s;\n    index index.html index.htm;\n\n    access_log /var/log/nginx/nexora-%s.access.log;\n    error_log /var/log/nginx/nexora-%s.error.log;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n\n    location ~ /\\. {\n        deny all;\n    }\n}\n", domain, root, fileKey, fileKey)
+	content := fmt.Sprintf("server {\n    listen 80;\n    server_name %s;\n\n    root %s;\n    index index.php index.html index.htm;\n\n    access_log /var/log/nginx/nexora-%s.access.log;\n    error_log /var/log/nginx/nexora-%s.error.log;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n\n    location ~ \\\.php$ {\n        try_files $uri =404;\n        include fastcgi_params;\n        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n        fastcgi_pass unix:/run/php/nexora-%s.sock;\n    }\n\n    location ~ /\\\\. {\n        deny all;\n    }\n}\n", domain, root, fileKey, fileKey, username)
 	if err := os.MkdirAll("/etc/nginx/sites-available", 0755); err != nil { return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx configuration directory") }
 	if err := os.MkdirAll("/etc/nginx/sites-enabled", 0755); err != nil { return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx enabled directory") }
 	tmp, err := os.CreateTemp("/etc/nginx/sites-available", ".nexora-domain-*")
@@ -226,4 +227,54 @@ func safeOutput(value string) string {
 	if len(value) > 240 { value = value[:240] }
 	if value == "" { return "system command failed" }
 	return value
+}
+
+
+func configurePHPFPM(username string) error {
+	if _, err := os.Stat("/usr/bin/php-config"); err != nil {
+		if err := runFixed("/usr/bin/apt-get", "update"); err != nil { return fmt.Errorf("PHP_PACKAGE_INDEX_FAILED: %s", safeOutput(err.Error())) }
+		if err := runFixed("/usr/bin/apt-get", "install", "-y", "php-fpm", "php-cli"); err != nil { return fmt.Errorf("PHP_INSTALL_FAILED: %s", safeOutput(err.Error())) }
+	}
+	versionOutput, err := exec.Command("/usr/bin/php-config", "--version").Output()
+	if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect installed PHP version") }
+	version := strings.TrimSpace(string(versionOutput))
+	if !regexp.MustCompile(`^[0-9]+\\.[0-9]+$`).MatchString(version) { return fmt.Errorf("PHP_VERSION_FAILED: detected PHP version is invalid") }
+	poolDir := filepath.Join("/etc/php", version, "fpm", "pool.d")
+	if info, err := os.Stat(poolDir); err != nil || !info.IsDir() { return fmt.Errorf("PHP_POOL_DIRECTORY_MISSING: PHP-FPM pool directory is unavailable") }
+	poolPath := filepath.Join(poolDir, "nexora-"+username+".conf")
+	pool := fmt.Sprintf(`[nexora-%s]
+user = %s
+group = %s
+listen = /run/php/nexora-%s.sock
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 5
+pm.process_idle_timeout = 10s
+pm.max_requests = 500
+chdir = /
+clear_env = yes
+security.limit_extensions = .php
+php_admin_flag[allow_url_include] = off
+php_admin_value[open_basedir] = /home/%s:/tmp:/usr/share/php
+`, username, username, username, username, username)
+	if err := writeAtomicRootFile(poolPath, pool, 0640); err != nil { return fmt.Errorf("PHP_POOL_CONFIG_FAILED: %s", safeOutput(err.Error())) }
+	service := "php" + version + "-fpm"
+	if err := runFixed("/usr/bin/systemctl", "enable", "--now", service); err != nil { return fmt.Errorf("PHP_FPM_SERVICE_FAILED: %s", safeOutput(err.Error())) }
+	if err := runFixed("/usr/bin/systemctl", "restart", service); err != nil { return fmt.Errorf("PHP_FPM_RESTART_FAILED: %s", safeOutput(err.Error())) }
+	if _, err := os.Stat("/run/php/nexora-"+username+".sock"); err != nil { return fmt.Errorf("PHP_POOL_SOCKET_MISSING: dedicated PHP-FPM socket did not appear") }
+	return nil
+}
+
+func writeAtomicRootFile(path, content string, mode os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) { return fmt.Errorf("refusing to replace non-regular configuration file") } else if err != nil && !errors.Is(err, os.ErrNotExist) { return err }
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".nexora-php-*")
+	if err != nil { return err }
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.WriteString(content); err != nil { tmp.Close(); return err }
+	if err := tmp.Chmod(mode); err != nil { tmp.Close(); return err }
+	if err := tmp.Close(); err != nil { return err }
+	return os.Rename(tmpPath, path)
 }
