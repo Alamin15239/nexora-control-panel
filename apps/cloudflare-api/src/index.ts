@@ -693,7 +693,7 @@ app.get("/v1/domains/:id/dns-check", async (c) => {
 
   const name = domain.name.toLowerCase();
   const ip = domain.primary_ip;
-  const isIPv4 = /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(ip);
+  const isIPv4 = /^\d{1,3}(?:\\.\d{1,3}){3}$/.test(ip);
   const isPublicIPv4 = isIPv4 && (() => {
     const octets = ip.split(".").map(Number);
     if (octets.some((part) => part < 0 || part > 255)) return false;
