@@ -10,7 +10,7 @@ type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
 const COOKIE_NAME = "nexora_session";
 
 function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
-  if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains"].includes(parts[0])) return true;
+  if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
   if (parts.length === 2 && parts[0] === "servers" && /^[0-9a-f-]{36}$/i.test(parts[1])) {
     return method === "GET";
   }
@@ -18,6 +18,7 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "enrollment-token") {
     return method === "POST";
   }
+  if (parts.length === 3 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users") return true;
   return false;
 }
 
