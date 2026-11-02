@@ -24,7 +24,33 @@ type request struct {
 var (
 	usernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,15}$`)
 	domainPattern = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$`)
-	documentRootPattern = regexp.MustCompile(`^/home/[a-z][a-z0-9_]{2,15}/[A-Za-z0-9._/-]+$`)
+	documentRootPattern = regexp.MustCompile(`^/home/[a-z][a-z0-9_]{2,15}/public_html(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type request struct {
+	Operation    string `json:"operation"`
+	Username     string `json:"username"`
+	Domain       string `json:"domain,omitempty"`
+	DocumentRoot string `json:"documentRoot,omitempty"`
+}
+
+var (
+	usernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,15}$`)
+	domainPattern = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$`)
+	documentRootPattern = regexp.MustCompile()
 )
 
 func main() {
