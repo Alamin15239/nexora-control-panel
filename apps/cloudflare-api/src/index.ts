@@ -702,8 +702,12 @@ app.post("/v1/domains", async (c) => {
   if (!account) return c.json({ message: "Select an active hosting account in this workspace before adding a domain." }, 404);
   if (!validDomain(name)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
   const suppliedRoot = typeof input.documentRoot === "string" ? input.documentRoot.trim() : "";
-  const root = suppliedRoot || "/home/" + account.username + "/public_html/" + name;
-  if (!root.startsWith("/home/" + account.username + "/") || root.includes("..") || root.length > 240) return c.json({ message: "Document root must be inside this account home directory." }, 400);
+  const accountWebRoot = "/home/" + account.username + "/public_html";
+  const root = suppliedRoot || accountWebRoot + "/" + name;
+  if (!(root === accountWebRoot || root.startsWith(accountWebRoot + "/")) || root.includes("..") || root.length > 240 ||
+      !/^\/home\/[a-z][a-z0-9_]{2,15}\/public_html(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/.test(root)) {
+    return c.json({ message: "Document root must be inside this account's public_html directory and cannot contain hidden or unsafe path components." }, 400);
+  }
   const id = crypto.randomUUID(); const jobId = crypto.randomUUID(); const primary = input.isPrimary === true;
   const statements = [];
   if (primary) statements.push(c.env.DB.prepare("UPDATE domains SET is_primary = 0 WHERE hosting_account_id = ?").bind(account.id));
