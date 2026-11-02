@@ -5,6 +5,7 @@ on:
     paths:
       - "agents/linux-agent/**"
       - "scripts/setup-cloudflare-tunnel.sh"
+      - "scripts/start-cloudflare-quick-tunnel.sh"
       - "docs/cloudflare-tunnel-node.md"
       - ".github/workflows/linux-agent.yml"
   pull_request:
@@ -36,4 +37,6 @@ jobs:
       - name: Verify CLI
         run: /tmp/nexora-agent version
       - name: Validate Cloudflare Tunnel installer syntax
-        run: bash -n ../../scripts/setup-cloudflare-tunnel.sh
+        run: |
+          bash -n ../../scripts/setup-cloudflare-tunnel.sh
+          bash -n ../../scripts/start-cloudflare-quick-tunnel.sh
