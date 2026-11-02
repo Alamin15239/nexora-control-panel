@@ -168,6 +168,8 @@ func configureNginx(username, domain, root string) error {
 	content := fmt.Sprintf("server {\n    listen 80;\n    server_name %s;\n\n    root %s;\n    index index.php index.html index.htm;\n\n    access_log /var/log/nginx/nexora-%s.access.log;\n    error_log /var/log/nginx/nexora-%s.error.log;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n\n    location ~ [.]php$ {\n        try_files $uri =404;\n        include fastcgi_params;\n        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n        fastcgi_pass unix:/run/php/nexora-%s.sock;\n    }\n\n    location ~ /[.] {\n        deny all;\n    }\n}\n", domain, root, fileKey, fileKey, username)
 	if err := os.MkdirAll("/etc/nginx/sites-available", 0755); err != nil { return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx configuration directory") }
 	if err := os.MkdirAll("/etc/nginx/sites-enabled", 0755); err != nil { return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx enabled directory") }
+	duplicates, err := findDuplicateNexoraVhosts("/etc/nginx/sites-enabled", "/etc/nginx/sites-available", enabled, domain, root)
+	if err != nil { return fmt.Errorf("NGINX_CONFIG_CONFLICT: %s", safeOutput(err.Error())) }
 	tmp, err := os.CreateTemp("/etc/nginx/sites-available", ".nexora-domain-*")
 	if err != nil { return fmt.Errorf("NGINX_CONFIG_FAILED: unable to create temporary configuration") }
 	tmpName := tmp.Name()
@@ -194,12 +196,27 @@ func configureNginx(username, domain, root string) error {
 	if errors.Is(linkErr, os.ErrNotExist) {
 		if err := os.Symlink(available, enabled); err != nil { rollback(); return fmt.Errorf("NGINX_CONFIG_FAILED: unable to enable site") }
 	} else if linkErr != nil { rollback(); return fmt.Errorf("NGINX_CONFIG_FAILED: unable to inspect enabled site") }
+	removedDuplicates := make([]duplicateVhost, 0, len(duplicates))
+	for _, duplicate := range duplicates {
+		if err := os.Remove(duplicate.link); err != nil {
+			for _, removed := range removedDuplicates { _ = os.Symlink(removed.target, removed.link) }
+			if errors.Is(linkErr, os.ErrNotExist) { _ = os.Remove(enabled) }
+			rollback()
+			return fmt.Errorf("NGINX_CONFIG_FAILED: unable to disable duplicate Nexora site")
+		}
+		removedDuplicates = append(removedDuplicates, duplicate)
+	}
+	restoreDuplicates := func() {
+		for _, removed := range removedDuplicates { _ = os.Symlink(removed.target, removed.link) }
+	}
 	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
+		restoreDuplicates()
 		if errors.Is(linkErr, os.ErrNotExist) { _ = os.Remove(enabled) }
 		rollback()
 		return fmt.Errorf("NGINX_TEST_FAILED: %s", safeOutput(err.Error()))
 	}
 	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
+		restoreDuplicates()
 		if errors.Is(linkErr, os.ErrNotExist) { _ = os.Remove(enabled) }
 		rollback()
 		// The running Nginx master keeps its last valid configuration when a
@@ -213,6 +230,49 @@ func configureNginx(username, domain, root string) error {
 	_ = os.Remove(backup)
 	_ = username
 	return nil
+}
+
+type duplicateVhost struct {
+	link string
+	target string
+}
+
+func findDuplicateNexoraVhosts(enabledDir, availableDir, keepLink, domain, root string) ([]duplicateVhost, error) {
+	entries, err := os.ReadDir(enabledDir)
+	if err != nil { return nil, err }
+	var duplicates []duplicateVhost
+	for _, entry := range entries {
+		link := filepath.Join(enabledDir, entry.Name())
+		if link == keepLink { continue }
+		info, err := os.Lstat(link)
+		if err != nil { return nil, err }
+		if info.Mode()&os.ModeSymlink == 0 { continue }
+		target, err := filepath.EvalSymlinks(link)
+		if err != nil { continue }
+		rel, err := filepath.Rel(availableDir, target)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasPrefix(filepath.Base(target), "nexora-") { continue }
+		data, err := os.ReadFile(target)
+		if err != nil { continue }
+		if nginxConfigMatchesDomainRoot(string(data), domain, root) {
+			duplicates = append(duplicates, duplicateVhost{link: link, target: target})
+		}
+	}
+	return duplicates, nil
+}
+
+func nginxConfigMatchesDomainRoot(content, domain, root string) bool {
+	foundDomain, foundRoot := false, false
+	for _, line := range strings.Split(content, "\\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 { continue }
+		if fields[0] == "server_name" {
+			for _, name := range strings.Split(strings.TrimSuffix(fields[1], ";"), " ") {
+				if name == domain { foundDomain = true }
+			}
+		}
+		if fields[0] == "root" && strings.TrimSuffix(fields[1], ";") == root { foundRoot = true }
+	}
+	return foundDomain && foundRoot
 }
 
 func mustReadlink(path string) string { target, _ := os.Readlink(path); return target }
