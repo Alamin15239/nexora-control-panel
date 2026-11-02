@@ -420,16 +420,15 @@ app.post("/v1/agent/enroll", async (c) => {
   const nodeId = crypto.randomUUID();
   const secret = randomHex(32);
   try {
-    await c.env.DB.prepare(
-      `INSERT INTO agent_credentials (node_id, organization_id, server_id, secret_hash)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(server_id) DO UPDATE SET node_id = excluded.node_id,
-       organization_id = excluded.organization_id, secret_hash = excluded.secret_hash,
-       revoked_at = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), last_seen_at = NULL`,
-    ).bind(nodeId, enrollment.organizationId, serverId, await sha256(secret)).run();
-    await c.env.DB.prepare(
-      "INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'server.agent_enrolled', 'server', ?, ?)",
-    ).bind(crypto.randomUUID(), enrollment.organizationId, serverId, JSON.stringify({ nodeId })).run();
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM agent_credentials WHERE server_id = ?").bind(serverId),
+      c.env.DB.prepare(
+        "INSERT INTO agent_credentials (node_id, organization_id, server_id, secret_hash) VALUES (?, ?, ?, ?)",
+      ).bind(nodeId, enrollment.organizationId, serverId, await sha256(secret)),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'server.agent_enrolled', 'server', ?, ?)",
+      ).bind(crypto.randomUUID(), enrollment.organizationId, serverId, JSON.stringify({ nodeId })),
+    ]);
   } catch {
     return c.json({ message: "Unable to issue node credentials" }, 500);
   }
