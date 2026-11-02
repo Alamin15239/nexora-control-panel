@@ -7,6 +7,10 @@ upload_source_maps = true
 [vars]
 NEXORA_API_URL = "https://nexora-api.alamin-kha-saadfreeh.workers.dev"
 
+[[services]]
+binding = "NEXORA_API"
+service = "nexora-api"
+
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"
