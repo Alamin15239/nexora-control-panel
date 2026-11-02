@@ -716,7 +716,7 @@ app.post("/v1/hosting-accounts/:id/files", async (c) => {
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; server_id: string }>();
   if (!account) return c.json({ message: "Active hosting account not found" }, 404);
 
-  const requestPayload = JSON.stringify({ operation, path: filePath, ...(operation === "RENAME_PATH" ? { newPath } : {}), ...(operation === "WRITE_FILE" ? { contentBase64 } : {}) });
+  const requestPayload = JSON.stringify({ fileOperation: operation, path: filePath, ...(operation === "RENAME_PATH" ? { newPath } : {}), ...(operation === "WRITE_FILE" ? { contentBase64 } : {}) });
   const jobId = crypto.randomUUID();
   try {
     await c.env.DB.batch([
@@ -1068,7 +1068,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
     "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
-    input.success ? null : errorMessage || "The Linux agent could not provision this account",
+    input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
     jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId).run();
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
   const completedJob = await c.env.DB.prepare("SELECT operation FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
