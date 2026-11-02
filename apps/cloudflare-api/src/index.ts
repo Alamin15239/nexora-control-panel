@@ -8,7 +8,7 @@ type Bindings = {
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
 
 const app = new Hono<{ Bindings: Bindings }>();
-const SESSION_SECONDS = 15 * 60;
+const SESSION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const PASSWORD_ITERATIONS = 100_000;
