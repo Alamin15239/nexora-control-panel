@@ -24,6 +24,10 @@ The control plane is separate from customer workload servers. Privileged operati
 
 Dashboard metric cards and infrastructure status are still setup placeholders. The web interface does not yet provision or manage real hosting resources.
 
+## Google Cloud deployment
+
+Nexora's first infrastructure provider will be Google Cloud Platform, using Compute Engine for workload nodes. See [the Google Cloud deployment plan](docs/google-cloud-deployment.md) for the proposed control-plane, database, agent and security architecture.
+
 ## Development setup
 
 Requirements: Node.js 20+, pnpm 9+, Go 1.23+ and PostgreSQL.
