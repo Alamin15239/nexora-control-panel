@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const COOKIE_NAME = "nexora_session";
@@ -22,8 +22,8 @@ interface D1DatabaseLike {
 }
 type AuthRole = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
 
-function getDatabase(): D1DatabaseLike {
-  const { env } = getCloudflareContext();
+async function getDatabase(): Promise<D1DatabaseLike> {
+  const { env } = await getCloudflareContext({ async: true });
   const db = (env as typeof env & { DB?: D1DatabaseLike }).DB;
   if (!db) throw new Error("The dashboard DB binding is missing");
   return db;
@@ -102,7 +102,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     const token = request.cookies.get(COOKIE_NAME)?.value;
     if (token) {
       try {
-        const db = getDatabase();
+        const db = await getDatabase();
         await db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL")
           .bind(new Date().toISOString(), await sha256(token)).run();
       } catch (error) {
@@ -222,7 +222,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     if (action === "register" && /UNIQUE constraint failed: users\.email/i.test(reason)) {
       return NextResponse.json({ message: "An account with this email already exists" }, { status: 409 });
     }
-    return NextResponse.json({ message: "Authentication service is temporarily unavailable. Check the dashboard D1 binding and database migrations." }, { status: 503 });
+    return NextResponse.json({ message: `Authentication failed: ${reason}` }, { status: 503 });
   }
 }
 
