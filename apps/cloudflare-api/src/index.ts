@@ -679,6 +679,68 @@ app.post("/v1/hosting-accounts", async (c) => {
 });
 
 type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
+app.get("/v1/domains/:id/dns-check", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const domain = await c.env.DB.prepare(
+    `SELECT d.id, d.name, s.primary_ip
+     FROM domains d
+     JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     JOIN servers s ON s.id = a.server_id
+     WHERE d.id = ? AND a.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; primary_ip: string }>();
+  if (!domain) return c.json({ message: "Domain not found" }, 404);
+
+  const name = domain.name.toLowerCase();
+  const ip = domain.primary_ip;
+  const isIPv4 = /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(ip);
+  const isPublicIPv4 = isIPv4 && (() => {
+    const octets = ip.split(".").map(Number);
+    if (octets.some((part) => part < 0 || part > 255)) return false;
+    const [a, b] = octets;
+    return !(a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) ||
+      (a === 198 && (b === 18 || b === 19)));
+  })();
+  const reservedTest = name.endsWith(".test") || name.endsWith(".localhost") || name.endsWith(".invalid");
+  if (reservedTest) return c.json({
+    domain: name, status: "NOT_PUBLIC_DOMAIN", expectedAddress: ip,
+    isPublicAddress: isPublicIPv4,
+    records: [{ type: "A", name: "@", value: ip }],
+    message: "This is a reserved testing domain. It cannot be verified through public DNS or issued a publicly trusted SSL certificate.",
+  });
+  if (!isPublicIPv4) return c.json({
+    domain: name, status: "SERVER_IP_NOT_PUBLIC", expectedAddress: ip,
+    isPublicAddress: false,
+    records: [{ type: "A", name: "@", value: ip }],
+    message: "The registered server address is not a public IPv4 address. Assign a public IP before configuring public DNS.",
+  });
+
+  try {
+    const response = await fetch("https://dns.google/resolve?name=" + encodeURIComponent(name) + "&type=A", {
+      headers: { accept: "application/dns-json" },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) throw new Error("DNS resolver returned HTTP " + response.status);
+    const answer = await response.json() as { Answer?: Array<{ type?: number; data?: string }> };
+    const addresses = (answer.Answer ?? []).filter((record) => record.type === 1 && typeof record.data === "string").map((record) => record.data as string);
+    const verified = addresses.includes(ip);
+    return c.json({
+      domain: name, status: verified ? "VERIFIED" : "PENDING",
+      expectedAddress: ip, observedAddresses: addresses, isPublicAddress: true,
+      records: [{ type: "A", name: "@", value: ip }],
+      message: verified ? "The domain resolves to this server." : "Create or update the A record to point to the server IP, then check again.",
+    });
+  } catch {
+    return c.json({
+      domain: name, status: "CHECK_FAILED", expectedAddress: ip,
+      isPublicAddress: true, records: [{ type: "A", name: "@", value: ip }],
+      message: "The public DNS lookup could not be completed. Try again shortly.",
+    }, 502);
+  }
+});
+
 app.get("/v1/domains", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
