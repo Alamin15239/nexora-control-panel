@@ -1046,7 +1046,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     return c.json({ job: null });
   }
   let requestPayload: unknown = null;
-  if (claimed.requestPayload) { try { requestPayload = JSON.parse(claimed.requestPayload); } catch { requestPayload = null; } }\n  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, requestPayload, account } });
+  if (claimed.requestPayload) { try { requestPayload = JSON.parse(claimed.requestPayload); } catch { requestPayload = null; } }
+  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, requestPayload, account } });
 });
 
 app.post("/v1/agent/jobs/:id/result", async (c) => {
@@ -1081,7 +1082,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   }
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
     .bind(crypto.randomUUID(), auth.credential.organizationId,
-      input.success ? (completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : "hosting_account.provisioned") : (completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : "hosting_account.provisioning_failed"),
+      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : "hosting_account.provisioning_failed"),
       jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });
