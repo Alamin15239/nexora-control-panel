@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -23,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 type Config struct {
 	NodeID       string `json:"node_id"`
@@ -132,6 +133,7 @@ func run(configPath string, interval time.Duration) error {
 			previousTotal, previousIdle = total, idle
 			if err := sendHeartbeat(ctx, client, cfg, sample); err != nil { fmt.Fprintln(os.Stderr, "heartbeat:", err) }
 		} else { fmt.Fprintln(os.Stderr, "telemetry:", err) }
+		if err := processNextJob(ctx, client, cfg); err != nil { fmt.Fprintln(os.Stderr, "provisioning:", err) }
 		timer := time.NewTimer(interval)
 		select { case <-ctx.Done(): timer.Stop(); return nil; case <-timer.C: }
 	}
@@ -173,21 +175,99 @@ func memoryUsage() (uint64,uint64,error) {
 	return total,total-available,nil
 }
 
-func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample telemetry) error {
-	body, err := json.Marshal(sample); if err != nil { return err }
-	path := "/v1/agent/heartbeat"
-	timestamp := strconv.FormatInt(time.Now().Unix(),10)
+type provisionJob struct {
+	ID        string `json:"id"`
+	Operation string `json:"operation"`
+	Account   struct {
+		AccountID      string `json:"accountId"`
+		Username       string `json:"username"`
+		PrimaryDomain  string `json:"primaryDomain"`
+		DiskLimitBytes uint64 `json:"diskLimitBytes"`
+	} `json:"account"`
+}
+
+func signedRequest(ctx context.Context, client *http.Client, cfg Config, method, path string, body []byte) (*http.Response, error) {
+	if body == nil { body = []byte{} }
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := randomHexString(16)
-	bodyHash:=sha256.Sum256(body)
-	canonical:=timestamp+"\n"+nonce+"\nPOST\n"+path+"\n"+hex.EncodeToString(bodyHash[:])
+	bodyHash := sha256.Sum256(body)
+	canonical := timestamp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + hex.EncodeToString(bodyHash[:])
 	derived := sha256.Sum256([]byte(cfg.Secret))
 	mac := hmac.New(sha256.New, []byte(hex.EncodeToString(derived[:])))
 	_, _ = mac.Write([]byte(canonical))
-	req,err:=http.NewRequestWithContext(ctx,http.MethodPost,strings.TrimRight(cfg.ControlPlane,"/")+path,bytes.NewReader(body)); if err!=nil{return err}
-	req.Header.Set("Content-Type","application/json"); req.Header.Set("X-Nexora-Node",cfg.NodeID)
-	req.Header.Set("X-Nexora-Timestamp",timestamp); req.Header.Set("X-Nexora-Nonce",nonce); req.Header.Set("X-Nexora-Signature",hex.EncodeToString(mac.Sum(nil)))
-	resp,err:=client.Do(req); if err!=nil{return err}; defer resp.Body.Close()
-	if resp.StatusCode!=http.StatusOK { data,_:=io.ReadAll(io.LimitReader(resp.Body,4096)); return fmt.Errorf("control plane returned %s: %s",resp.Status,strings.TrimSpace(string(data))) }
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(cfg.ControlPlane, "/")+path, bytes.NewReader(body))
+	if err != nil { return nil, err }
+	req.Header.Set("X-Nexora-Node", cfg.NodeID)
+	req.Header.Set("X-Nexora-Timestamp", timestamp)
+	req.Header.Set("X-Nexora-Nonce", nonce)
+	req.Header.Set("X-Nexora-Signature", hex.EncodeToString(mac.Sum(nil)))
+	if method != http.MethodGet { req.Header.Set("Content-Type", "application/json") }
+	return client.Do(req)
+}
+
+func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample telemetry) error {
+	body, err := json.Marshal(sample)
+	if err != nil { return err }
+	resp, err := signedRequest(ctx, client, cfg, http.MethodPost, "/v1/agent/heartbeat", body)
+	if err != nil { return err }
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("control plane returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	return nil
+}
+
+func processNextJob(ctx context.Context, client *http.Client, cfg Config) error {
+	resp, err := signedRequest(ctx, client, cfg, http.MethodGet, "/v1/agent/jobs/next", nil)
+	if err != nil { return err }
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	if readErr != nil { return readErr }
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("job poll returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var envelope struct { Job *provisionJob `json:"job"` }
+	if err := json.Unmarshal(data, &envelope); err != nil { return fmt.Errorf("invalid job response: %w", err) }
+	if envelope.Job == nil { return nil }
+
+	job := envelope.Job
+	success := false
+	errorCode := ""
+	errorMessage := ""
+	if job.Operation != "CREATE_HOSTING_ACCOUNT" {
+		errorCode = "UNSUPPORTED_OPERATION"
+		errorMessage = "This agent version does not support the requested operation"
+	} else {
+		payload, _ := json.Marshal(map[string]string{"operation": job.Operation, "username": job.Account.Username})
+		command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+		command.Stdin = bytes.NewReader(payload)
+		output, commandErr := command.CombinedOutput()
+		if commandErr == nil {
+			success = true
+			fmt.Printf("Provisioning job %s completed for account %s\n", job.ID, job.Account.Username)
+		} else {
+			errorCode = "PROVISIONER_FAILED"
+			errorMessage = strings.TrimSpace(string(output))
+			if errorMessage == "" { errorMessage = "The restricted Linux provisioning helper failed" }
+			if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+			fmt.Fprintf(os.Stderr, "provisioning job %s failed: %s\n", job.ID, errorMessage)
+		}
+	}
+
+	result, _ := json.Marshal(map[string]any{
+		"success": success,
+		"errorCode": errorCode,
+		"errorMessage": errorMessage,
+	})
+	resultPath := "/v1/agent/jobs/" + url.PathEscape(job.ID) + "/result"
+	resultResp, err := signedRequest(ctx, client, cfg, http.MethodPost, resultPath, result)
+	if err != nil { return err }
+	defer resultResp.Body.Close()
+	if resultResp.StatusCode != http.StatusOK {
+		resultBody, _ := io.ReadAll(io.LimitReader(resultResp.Body, 4096))
+		return fmt.Errorf("job result was rejected: %s: %s", resultResp.Status, strings.TrimSpace(string(resultBody)))
+	}
 	return nil
 }
 
