@@ -12,13 +12,14 @@ function readSession(request: NextRequest): string {
 }
 
 async function upstream(path: string, init: RequestInit = {}) {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   return fetch(`${API_BASE.replace(/\/$/, "")}${path}`, {
     ...init,
     cache: "no-store",
-    headers: {
-      ...(init.body ? { "content-type": "application/json" } : {}),
-      ...init.headers,
-    },
+    headers,
   });
 }
 
