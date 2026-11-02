@@ -60,8 +60,6 @@ func TestValidateRejectsUntrustedClientCertificate(t *testing.T) {
 	caTemplate := &x509.Certificate{SerialNumber: bigIntForTest(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caPriv)
 	if err != nil { t.Fatal(err) }
-	caCert, err := x509.ParseCertificate(caDER)
-	if err != nil { t.Fatal(err) }
 
 	otherPub, otherPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatal(err) }
