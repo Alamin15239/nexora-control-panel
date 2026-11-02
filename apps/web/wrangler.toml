@@ -11,6 +11,11 @@ NEXORA_API_URL = "https://nexora-api.alamin-kha-saadfreeh.workers.dev"
 binding = "NEXORA_API"
 service = "nexora-api"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "nexora-production"
+database_id = "f819590a-ebef-429d-9ee8-d006a1f5df7f"
+
 [assets]
 directory = ".open-next/assets"
 binding = "ASSETS"
