@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -170,13 +171,14 @@ func fileManager(input request) error {
  if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
   return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
  }
+ runtime.LockOSThread()
  if err := syscall.Chroot(root); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
  if err := os.Chdir("/"); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root") }
  if err := syscall.Setgroups([]int{gid}); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to set account groups") }
  if err := syscall.Setgid(gid); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop group privileges") }
  if err := syscall.Setuid(uid); err != nil { return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop user privileges") }
  writeResult := func(value any) error { return json.NewEncoder(os.Stdout).Encode(value) }
- return fileManagerOperation(input, "/", uid, gid, writeResult)
+ return fileManagerOperation(input, "/", writeResult)
 }
 
 func managedParentPath(value string) string {
@@ -210,7 +212,7 @@ func safeManagedPath(root, relative string, allowRoot bool) (string, os.FileInfo
  return "", nil, fmt.Errorf("INVALID_PATH: file path is invalid")
 }
 
-func fileManagerOperation(input request, root string, uid, gid int, writeResult func(any) error) error {
+func fileManagerOperation(input request, root string, writeResult func(any) error) error {
  switch input.FileOperation {
  case "LIST_FILES":
   path, info, err := safeManagedPath(root, input.Path, true)
