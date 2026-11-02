@@ -24,6 +24,7 @@ type request struct {
 var (
 	usernamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,15}$`)
 	domainPattern = regexp.MustCompile(`^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$`)
+	documentRootPattern = regexp.MustCompile(`^/home/[a-z][a-z0-9_]{2,15}/[A-Za-z0-9._/-]+$`)
 )
 
 func main() {
