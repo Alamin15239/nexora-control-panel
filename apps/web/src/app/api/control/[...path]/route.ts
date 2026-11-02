@@ -32,7 +32,7 @@ async function proxy(
   const token = request.cookies.get(COOKIE_NAME)?.value;
   if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
-  const base = (process.env.NEXORA_API_URL?.trim() || DEFAULT_API_BASE).replace(/\/$/, "");
+  const base = DEFAULT_API_BASE;
 
   try {
     const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, base);
