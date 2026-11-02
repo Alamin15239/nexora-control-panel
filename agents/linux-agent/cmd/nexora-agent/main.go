@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -26,7 +27,7 @@ func main() {
 
 	switch os.Args[1] {
 	case "version":
-		fmt.Println("nexora-agent 0.1.0")
+		fmt.Println("nexora-agent 0.2.0")
 	case "validate-config":
 		fs := flag.NewFlagSet("validate-config", flag.ExitOnError)
 		configPath := fs.String("config", "/etc/nexora/agent.json", "path to agent JSON configuration")
@@ -59,8 +60,9 @@ func validate(path string) error {
 	if strings.TrimSpace(cfg.NodeID) == "" {
 		return fmt.Errorf("node_id is required")
 	}
-	if !strings.HasPrefix(cfg.ControlPlane, "https://") {
-		return fmt.Errorf("control_plane_url must use HTTPS")
+	parsed, err := url.Parse(cfg.ControlPlane)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("control_plane_url must be a valid HTTPS URL without embedded credentials")
 	}
 	if cfg.CACert == "" || cfg.ClientCert == "" || cfg.ClientKey == "" {
 		return fmt.Errorf("CA certificate and client certificate/key paths are required")
@@ -81,6 +83,13 @@ func validate(path string) error {
 	}
 	if len(cert.Certificate) == 0 {
 		return fmt.Errorf("client certificate chain is empty")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse client certificate: %w", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return fmt.Errorf("client certificate is not trusted for client authentication by configured CA: %w", err)
 	}
 	return nil
 }
