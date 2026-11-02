@@ -122,20 +122,52 @@ func enroll(api, serverID, configPath string) error {
 	return nil
 }
 
+const jobPollInterval = 2 * time.Second
+
 func run(configPath string, interval time.Duration) error {
-	cfg, err := loadConfig(configPath); if err != nil { return err }
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM); defer stop()
-	client := &http.Client{Timeout: 15*time.Second}
+	cfg, err := loadConfig(configPath)
+	if err != nil { return err }
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client := &http.Client{Timeout: 15 * time.Second}
 	var previousTotal, previousIdle uint64
+
+	sendTelemetry := func() {
+		sample, total, idle, collectErr := collect(previousTotal, previousIdle)
+		if collectErr != nil {
+			fmt.Fprintln(os.Stderr, "telemetry:", collectErr)
+			return
+		}
+		previousTotal, previousIdle = total, idle
+		if heartbeatErr := sendHeartbeat(ctx, client, cfg, sample); heartbeatErr != nil {
+			fmt.Fprintln(os.Stderr, "heartbeat:", heartbeatErr)
+		}
+	}
+	pollJobs := func() {
+		if jobErr := processNextJob(ctx, client, cfg); jobErr != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, "provisioning:", jobErr)
+		}
+	}
+
+	// Send an initial heartbeat and check for queued work immediately at startup.
+	sendTelemetry()
+	pollJobs()
+
+	heartbeatTicker := time.NewTicker(interval)
+	defer heartbeatTicker.Stop()
+	jobTicker := time.NewTicker(jobPollInterval)
+	defer jobTicker.Stop()
+
 	for {
-		sample, total, idle, err := collect(previousTotal, previousIdle)
-		if err == nil {
-			previousTotal, previousIdle = total, idle
-			if err := sendHeartbeat(ctx, client, cfg, sample); err != nil { fmt.Fprintln(os.Stderr, "heartbeat:", err) }
-		} else { fmt.Fprintln(os.Stderr, "telemetry:", err) }
-		if err := processNextJob(ctx, client, cfg); err != nil { fmt.Fprintln(os.Stderr, "provisioning:", err) }
-		timer := time.NewTimer(interval)
-		select { case <-ctx.Done(): timer.Stop(); return nil; case <-timer.C: }
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-heartbeatTicker.C:
+			sendTelemetry()
+		case <-jobTicker.C:
+			pollJobs()
+		}
 	}
 }
 
