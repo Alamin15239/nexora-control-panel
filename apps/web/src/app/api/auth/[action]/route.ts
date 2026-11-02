@@ -9,7 +9,7 @@ const COOKIE_MAX_AGE = 15 * 60;
 const SESSION_SECONDS = 15 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 8;
-const PASSWORD_ITERATIONS = 310_000;
+const PASSWORD_ITERATIONS = 100_000;
 
 interface D1StatementLike {
   bind(...values: unknown[]): D1StatementLike;
