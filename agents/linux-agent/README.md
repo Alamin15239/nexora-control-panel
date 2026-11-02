@@ -66,4 +66,4 @@ GitHub Actions runs `go test ./...` and builds both Linux binaries. The control-
 
 ## Current limitations
 
-The first provisioning operation creates a restricted Linux account and document-root directory only. Web-server virtual hosts, PHP runtimes, database engines, TLS, DNS, mail, backups, quota enforcement, suspension, and deletion require separate, narrowly scoped helpers and integration tests. Never replace this allowlist with arbitrary shell execution.
+The account-creation job creates a restricted Linux account, document root, and dedicated PHP-FPM pool. When a primary domain was supplied at account creation, the control plane queues a separate `ADD_DOMAIN` job after the account succeeds; that job applies the Nginx virtual host and read-only web-server ACL. Additional domains use the same separate operation. DNS and TLS, database engines, mail, backups, quota enforcement, suspension, and deletion remain separate capabilities. Never replace this allowlist with arbitrary shell execution.
