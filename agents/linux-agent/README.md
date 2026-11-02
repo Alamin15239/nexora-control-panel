@@ -52,7 +52,7 @@ For the systemd service, retain the unprivileged service user but permit only th
 
 ```ini
 [Service]
-ProtectSystem=full
+ProtectSystem=false
 ProtectHome=false
 NoNewPrivileges=false
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SETFCAP CAP_AUDIT_WRITE
