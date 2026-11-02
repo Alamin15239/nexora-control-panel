@@ -114,7 +114,7 @@ func addDomain(username, domain, documentRoot string) error {
 	if !domainPattern.MatchString(domain) || len(domain) > 253 { return fmt.Errorf("INVALID_DOMAIN: domain name is invalid") }
 	home := filepath.Join("/home", username)
 	if documentRoot == "" { documentRoot = filepath.Join(home, "public_html") }
-	if !filepath.IsAbs(documentRoot) || filepath.Clean(documentRoot) != documentRoot || !documentRootPattern.MatchString(documentRoot) {
+	if !validDocumentRoot(documentRoot) {
 		return fmt.Errorf("INVALID_DOCUMENT_ROOT: document root must be a clean absolute path")
 	}
 	rel, err := filepath.Rel(home, documentRoot)
@@ -131,6 +131,10 @@ func addDomain(username, domain, documentRoot string) error {
 	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to set default web server access") }
 	if err := configureNginx(username, domain, documentRoot); err != nil { return err }
 	return nil
+}
+
+func validDocumentRoot(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && documentRootPattern.MatchString(path)
 }
 
 func ensureSafeDirectory(home, target string, uid, gid int) error {
