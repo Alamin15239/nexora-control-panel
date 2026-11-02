@@ -588,7 +588,8 @@ app.get("/v1/hosting-accounts", async (c) => {
             a.server_id, s.hostname AS server_hostname,
             a.plan_id, p.name AS plan_name,
             (SELECT j.status FROM provisioning_jobs j
-             WHERE j.hosting_account_id = a.id ORDER BY j.requested_at DESC LIMIT 1) AS job_status
+             WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
+             ORDER BY j.requested_at DESC LIMIT 1) AS job_status
      FROM hosting_accounts a
      JOIN servers s ON s.id = a.server_id
      JOIN hosting_plans p ON p.id = a.plan_id
