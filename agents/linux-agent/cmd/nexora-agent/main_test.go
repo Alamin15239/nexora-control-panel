@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"math/big"
 	"encoding/pem"
 	"os"
 	"path/filepath"
@@ -62,7 +63,7 @@ func TestValidateRejectsUntrustedClientCertificate(t *testing.T) {
 	caCert, err := x509.ParseCertificate(caDER)
 	if err != nil { t.Fatal(err) }
 
-	otherPub, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatal(err) }
 	clientTemplate := &x509.Certificate{SerialNumber: bigIntForTest(2), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, caCert, otherPub, caPriv)
