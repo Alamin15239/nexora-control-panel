@@ -1,15 +1,19 @@
 # Nexora Linux Agent
 
-Restricted Linux node agent for Nexora Control. Version 0.3.0 adds one-time enrollment and authenticated, read-only telemetry.
+Restricted Linux node agent for Nexora Control. Version 0.4.0 adds authenticated provisioning-job polling and a narrowly scoped Linux hosting-account provisioner.
 
 ## Security model
 
 - Enrollment token is one-time and expires after 15 minutes.
 - The control plane stores only a SHA-256 hash of the per-node secret; the secret is returned once and stored locally with mode 0600.
-- Heartbeats use HMAC-SHA256 over timestamp, nonce, HTTP method, path, and body hash.
+- Heartbeats and job requests use HMAC-SHA256 over timestamp, nonce, HTTP method, path, and body hash.
 - Requests outside the five-minute clock window and replayed nonces are rejected.
 - The agent validates HTTPS URLs and uses the platform TLS trust store.
-- The agent only reads Linux telemetry (/proc and filesystem statistics). It does not execute provisioning jobs, shell commands, or customer code.
+- The monitoring agent runs as the unprivileged `nexora-agent` user.
+- The agent can request only the allowlisted `CREATE_HOSTING_ACCOUNT` operation. It does not execute commands or scripts supplied by the control plane.
+- Privileged account creation is delegated to a separate root-owned helper at `/usr/local/libexec/nexora-provision`, permitted through one exact sudoers command.
+- The helper validates the username, creates a non-login Linux user, and creates `/home/USERNAME/public_html` with restrictive ownership and permissions. Repeated execution is idempotent.
+- The first provisioner does not configure Nginx/Apache, PHP, DNS, TLS, mail, databases, backups, or enforce plan quotas. A successful job means the Linux hosting identity and document-root directory were created—not that a public website is live.
 
 ## Commands
 
@@ -20,18 +24,34 @@ nexora-agent run --config /etc/nexora/agent.json --interval 60s
 nexora-agent validate-config --config /etc/nexora/agent.json
 ```
 
-For enrollment, paste the one-time token at the prompt; it is read from standard input rather than a command-line argument. Keep the config file private. The enrollment command writes it with owner-only permissions.
+## Build and install
 
-## Build and test
+From `agents/linux-agent`:
 
 ```sh
 go test ./...
 go vet ./...
-go build -trimpath -o dist/nexora-agent ./cmd/nexora-agent
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
+sudo install -o root -g root -m 0755 /tmp/nexora-agent /usr/local/bin/nexora-agent
+sudo install -o root -g root -m 0755 /tmp/nexora-provision /usr/local/libexec/nexora-provision
 ```
 
-GitHub Actions builds Linux amd64 and arm64 binaries and uploads them as a workflow artifact.
+Install the single-command sudo rule and validate it:
+
+```sh
+echo 'nexora-agent ALL=(root) NOPASSWD: /usr/local/libexec/nexora-provision' | sudo tee /etc/sudoers.d/nexora-agent >/dev/null
+sudo chown root:root /etc/sudoers.d/nexora-agent
+sudo chmod 0440 /etc/sudoers.d/nexora-agent
+sudo visudo -cf /etc/sudoers.d/nexora-agent
+```
+
+The helper binary and sudoers rule must remain owned by root and must not be writable by the agent account.
+
+## Build and test
+
+GitHub Actions runs `go test ./...` and builds both Linux binaries. The control-plane API must have the latest D1 migrations applied before job delivery is available.
 
 ## Current limitations
 
-The first agent release supports identity and monitoring only. Hosting account, database, DNS, SSL, email, backup and other provisioning operations remain disabled until narrowly scoped privileged helpers and signed job envelopes are independently implemented and audited. Do not run this agent as root for routine monitoring.
+The first provisioning operation creates a restricted Linux account and document-root directory only. Web-server virtual hosts, PHP runtimes, database engines, TLS, DNS, mail, backups, quota enforcement, suspension, and deletion require separate, narrowly scoped helpers and integration tests. Never replace this allowlist with arbitrary shell execution.
