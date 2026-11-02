@@ -801,6 +801,106 @@ app.post("/v1/databases/:id/users", async (c) => {
   return c.json({ user: { id, username, privileges, status: "PENDING" }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Database user request queued. No password is stored in Nexora; credential creation is delegated to the hosting agent." }, 201);
 });
 
+
+type AgentCredential = { secretHash: string; serverId: string; organizationId: string };
+async function authenticateAgentRequest(request: Request, db: D1Database, rawBody: string) {
+  const nodeId = request.headers.get("X-Nexora-Node") ?? "";
+  const timestamp = request.headers.get("X-Nexora-Timestamp") ?? "";
+  const nonce = request.headers.get("X-Nexora-Nonce") ?? "";
+  const signature = (request.headers.get("X-Nexora-Signature") ?? "").toLowerCase();
+  if (!nodeId || !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) {
+    return { error: { status: 401, message: "Missing or invalid agent authentication headers" } } as const;
+  }
+  const requestTime = Number(timestamp);
+  if (!Number.isSafeInteger(requestTime) || Math.abs(Date.now() / 1000 - requestTime) > 300) {
+    return { error: { status: 401, message: "Agent request timestamp is outside the allowed five-minute window" } } as const;
+  }
+  const credential = await db.prepare(
+    "SELECT secret_hash AS secretHash, server_id AS serverId, organization_id AS organizationId FROM agent_credentials WHERE node_id = ? AND revoked_at IS NULL LIMIT 1",
+  ).bind(nodeId).first<AgentCredential>();
+  if (!credential) return { error: { status: 401, message: "Agent identity is unknown or revoked" } } as const;
+  const bodyHash = await sha256(rawBody);
+  const path = new URL(request.url).pathname;
+  const canonical = [timestamp, nonce, request.method.toUpperCase(), path, bodyHash].join("\n");
+  const expected = await hmacSha256(credential.secretHash, canonical);
+  if (!constantTimeEqual(expected, signature)) {
+    return { error: { status: 401, message: "Agent signature is invalid" } } as const;
+  }
+  try {
+    await db.prepare("INSERT INTO agent_nonces (node_id, nonce) VALUES (?, ?)").bind(nodeId, nonce).run();
+  } catch {
+    return { error: { status: 409, message: "Agent request nonce has already been used" } } as const;
+  }
+  await db.prepare("UPDATE agent_credentials SET last_seen_at = ? WHERE node_id = ?")
+    .bind(new Date().toISOString(), nodeId).run();
+  return { credential: { ...credential, nodeId } } as const;
+}
+
+app.get("/v1/agent/jobs/next", async (c) => {
+  const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, "");
+  if ("error" in auth) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
+  const now = new Date().toISOString();
+  const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const claimed = await c.env.DB.prepare(
+    "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
+    "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
+    "WHERE a.server_id = ? AND j.operation = 'CREATE_HOSTING_ACCOUNT' " +
+    "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
+    "ORDER BY j.requested_at ASC LIMIT 1) " +
+    "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
+    "RETURNING id, hosting_account_id AS hostingAccountId, operation, attempts",
+  ).bind(now, leaseUntil, auth.credential.nodeId, auth.credential.serverId, now, now)
+    .first<{ id: string; hostingAccountId: string; operation: string; attempts: number }>();
+  if (!claimed) return c.json({ job: null });
+  const account = await c.env.DB.prepare(
+    "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes " +
+    "FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id " +
+    "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? AND a.status = 'PENDING' LIMIT 1",
+  ).bind(claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId)
+    .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number }>();
+  if (!account) {
+    await c.env.DB.prepare(
+      "UPDATE provisioning_jobs SET status = 'FAILED', finished_at = ?, error_code = 'ACCOUNT_NOT_PROVISIONABLE', error_message = 'Hosting account is missing or not pending', lease_expires_at = NULL WHERE id = ? AND claimed_by_node_id = ?",
+    ).bind(new Date().toISOString(), claimed.id, auth.credential.nodeId).run();
+    return c.json({ job: null });
+  }
+  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, account } });
+});
+
+app.post("/v1/agent/jobs/:id/result", async (c) => {
+  const rawBody = await c.req.text();
+  if (rawBody.length > 8192) return c.json({ message: "Job result payload is too large" }, 413);
+  const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, rawBody);
+  if ("error" in auth) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
+  let input: Record<string, unknown>;
+  try { input = JSON.parse(rawBody) as Record<string, unknown>; }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  if (typeof input.success !== "boolean") return c.json({ message: "A boolean success result is required" }, 400);
+  const errorCode = typeof input.errorCode === "string" ? input.errorCode.slice(0, 80) : null;
+  const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;
+  const jobId = c.req.param("id");
+  const now = new Date().toISOString();
+  const status = input.success ? "SUCCEEDED" : "FAILED";
+  const update = await c.env.DB.prepare(
+    "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, lease_expires_at = NULL " +
+    "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
+    "AND operation = 'CREATE_HOSTING_ACCOUNT' " +
+    "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
+  ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
+    input.success ? null : errorMessage || "The Linux agent could not provision this account",
+    jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId).run();
+  if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = ?, updated_at = ? WHERE id = (SELECT hosting_account_id FROM provisioning_jobs WHERE id = ?) AND server_id = ?")
+      .bind(input.success ? "ACTIVE" : "FAILED", now, jobId, auth.credential.serverId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
+      .bind(crypto.randomUUID(), auth.credential.organizationId,
+        input.success ? "hosting_account.provisioned" : "hosting_account.provisioning_failed",
+        jobId, JSON.stringify({ serverId: auth.credential.serverId, errorCode: input.success ? null : errorCode })),
+  ]);
+  return c.json({ accepted: true, jobId, status });
+});
+
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 export default app;
