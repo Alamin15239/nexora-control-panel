@@ -125,11 +125,16 @@ export default function FileManagerPage() {
   async function saveFile() {
     setBusy(true); setError(""); setNotice("");
     try {
-      const encoded = toBase64(new TextEncoder().encode(editorContent));
+      const fileBytes = new TextEncoder().encode(editorContent);
+      const encoded = toBase64(fileBytes);
       await execute("WRITE_FILE", editorPath, { contentBase64: encoded });
+      const savedAt = new Date().toISOString();
+      setEntries(current => current.map(entry =>
+        (path ? path + "/" : "") + entry.name === editorPath
+          ? { ...entry, size: fileBytes.byteLength, modifiedAt: savedAt }
+          : entry
+      ));
       setNotice("File saved successfully.");
-      await loadDirectory(path);
-      setEditorPath(editorPath);
       setShowEditor(true);
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to save file"); }
     finally { setBusy(false); }
