@@ -480,14 +480,9 @@ app.post("/v1/agent/heartbeat", async (c) => {
   const bodyHash = await sha256(rawBody);
   const path = new URL(c.req.url).pathname;
   const canonical = [timestamp, nonce, c.req.method.toUpperCase(), path, bodyHash].join("\n");
-  const secretForMac = typeof input.__unused === "string" ? input.__unused : "";
-  void secretForMac;
-  // The node secret is never sent in heartbeat requests. Verify the HMAC using the
-  // secret only after the client proves possession via a per-request derived key.
-  const suppliedProof = c.req.header("X-Nexora-Secret-Proof") ?? "";
-  if (!/^[a-f0-9]{64}$/.test(suppliedProof)) return c.json({ message: "Agent secret proof is required" }, 401);
+  // The agent derives the HMAC key as hex(SHA-256(secret)); only that hash is stored here.
   const proofExpected = await hmacSha256(credential.secretHash, canonical);
-  if (!constantTimeEqual(proofExpected, signature) || !constantTimeEqual(await sha256(suppliedProof), credential.secretHash)) {
+  if (!constantTimeEqual(proofExpected, signature)) {
     return c.json({ message: "Agent signature is invalid" }, 401);
   }
 
