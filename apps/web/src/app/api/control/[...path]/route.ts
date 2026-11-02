@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
+type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
 
 const COOKIE_NAME = "nexora_session";
 
@@ -32,14 +34,15 @@ async function proxy(
   const token = request.cookies.get(COOKIE_NAME)?.value;
   if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
-  const base = DEFAULT_API_BASE;
-
   try {
-    const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, base);
+    const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, DEFAULT_API_BASE);
     if (apiUrl.protocol !== "https:" || !apiUrl.hostname.endsWith(".workers.dev")) {
       return NextResponse.json({ message: "Invalid Nexora API URL configuration" }, { status: 503 });
     }
-    const upstream = await fetch(apiUrl, {
+    const { env } = getCloudflareContext();
+    const apiService = (env as typeof env & { NEXORA_API?: ApiServiceBinding }).NEXORA_API;
+    if (!apiService) throw new Error("NEXORA_API service binding is missing from nexora-dashboard");
+    const upstream = await apiService.fetch(new Request(apiUrl, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -47,7 +50,7 @@ async function proxy(
       },
       ...(method === "POST" ? { body: await request.text() } : {}),
       cache: "no-store",
-    });
+    }));
     const response = new NextResponse(await upstream.text(), {
       status: upstream.status,
       headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
