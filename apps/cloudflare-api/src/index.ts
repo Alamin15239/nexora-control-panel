@@ -732,6 +732,7 @@ app.post("/v1/hosting-accounts/:id/files", async (c) => {
 app.get("/v1/file-manager/jobs/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
   const job = await c.env.DB.prepare(
     `SELECT j.id, j.status, j.operation, j.error_message AS errorMessage, j.result_payload AS resultPayload,
             j.requested_at AS requestedAt, j.finished_at AS finishedAt
@@ -742,6 +743,7 @@ app.get("/v1/file-manager/jobs/:id", async (c) => {
   let result: unknown = null;
   if (job.resultPayload) {
     try { result = JSON.parse(job.resultPayload); } catch { return c.json({ message: "Stored file operation result is invalid" }, 500); }
+    await c.env.DB.prepare("UPDATE provisioning_jobs SET result_payload = NULL WHERE id = ? AND operation = 'FILE_MANAGER' AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE organization_id = ?)").bind(job.id, identity.organizationId).run();
   }
   return c.json({ job: { id: job.id, status: job.status, operation: job.operation, errorMessage: job.errorMessage, requestedAt: job.requestedAt, finishedAt: job.finishedAt, result } });
 });
@@ -1041,7 +1043,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
-      "UPDATE provisioning_jobs SET status = 'FAILED', finished_at = ?, error_code = 'ACCOUNT_NOT_PROVISIONABLE', error_message = 'Hosting account is missing or not pending', lease_expires_at = NULL WHERE id = ? AND claimed_by_node_id = ?",
+      "UPDATE provisioning_jobs SET status = 'FAILED', finished_at = ?, error_code = 'ACCOUNT_NOT_PROVISIONABLE', error_message = 'Hosting account is missing or not pending', request_payload = NULL, lease_expires_at = NULL WHERE id = ? AND claimed_by_node_id = ?",
     ).bind(new Date().toISOString(), claimed.id, auth.credential.nodeId).run();
     return c.json({ job: null });
   }
@@ -1066,7 +1068,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const now = new Date().toISOString();
   const status = input.success ? "SUCCEEDED" : "FAILED";
   const update = await c.env.DB.prepare(
-    "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, result_payload = ?, lease_expires_at = NULL " +
+    "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
     "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
