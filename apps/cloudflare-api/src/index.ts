@@ -1078,8 +1078,30 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const completedJob = await c.env.DB.prepare("SELECT operation FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
     .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string }>();
   if (completedJob?.operation === "CREATE_HOSTING_ACCOUNT") {
-    await c.env.DB.prepare("UPDATE hosting_accounts SET status = ?, updated_at = ? WHERE id = (SELECT hosting_account_id FROM provisioning_jobs WHERE id = ?) AND server_id = ?")
-      .bind(input.success ? "ACTIVE" : "FAILED", now, jobId, auth.credential.serverId).run();
+    const accountId = await c.env.DB.prepare(
+      "SELECT hosting_account_id AS accountId FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1",
+    ).bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ accountId: string }>();
+    if (input.success && accountId) {
+      const primaryDomain = await c.env.DB.prepare(
+        "SELECT id FROM domains WHERE hosting_account_id = ? AND is_primary = 1 LIMIT 1",
+      ).bind(accountId.accountId).first<{ id: string }>();
+      const statements = [
+        c.env.DB.prepare("UPDATE hosting_accounts SET status = 'ACTIVE', updated_at = ? WHERE id = ? AND server_id = ?")
+          .bind(now, accountId.accountId, auth.credential.serverId),
+      ];
+      if (primaryDomain) {
+        const domainJobId = crypto.randomUUID();
+        statements.push(c.env.DB.prepare(
+          "INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) " +
+          "SELECT ?, ?, 'ADD_DOMAIN', 'QUEUED', ? WHERE NOT EXISTS " +
+          "(SELECT 1 FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'ADD_DOMAIN' AND idempotency_key = ?)",
+        ).bind(domainJobId, accountId.accountId, "add-domain:" + primaryDomain.id, accountId.accountId, "add-domain:" + primaryDomain.id));
+      }
+      await c.env.DB.batch(statements);
+    } else if (accountId) {
+      await c.env.DB.prepare("UPDATE hosting_accounts SET status = 'FAILED', updated_at = ? WHERE id = ? AND server_id = ?")
+        .bind(now, accountId.accountId, auth.credential.serverId).run();
+    }
   }
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
     .bind(crypto.randomUUID(), auth.credential.organizationId,
