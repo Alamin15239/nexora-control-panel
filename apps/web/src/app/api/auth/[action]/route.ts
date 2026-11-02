@@ -124,7 +124,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
   }
 
   try {
-    const db = getDatabase();
+    const db = await getDatabase();
     const email = normalizeEmail(input.email);
     const password = typeof input.password === "string" ? input.password : "";
 
@@ -233,7 +233,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
   if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
   try {
-    const db = getDatabase();
+    const db = await getDatabase();
     const identity = await db.prepare(
       `SELECT u.id, u.email, u.display_name AS displayName,
               o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
