@@ -264,6 +264,120 @@ app.post("/v1/auth/logout", async (c) => {
   return c.json({ success: true });
 });
 
+
+type ServerRow = {
+  id: string;
+  hostname: string;
+  primary_ip: string;
+  region: string | null;
+  agent_version: string | null;
+  status: string;
+  last_heartbeat_at: string | null;
+  created_at: string;
+};
+
+function validIp(value: string): boolean {
+  const ipv4 = value.split(".");
+  if (ipv4.length === 4 && ipv4.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)) return true;
+  if (!value.includes(":")) return false;
+  try { new URL(`http://[${value}]/`); return true; } catch { return false; }
+}
+
+function canManageServers(role: string): boolean {
+  return role === "OWNER" || role === "ADMIN";
+}
+
+app.get("/v1/servers", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT id, hostname, primary_ip, region, agent_version, status,
+            last_heartbeat_at, created_at
+     FROM servers WHERE organization_id = ? ORDER BY created_at DESC`,
+  ).bind(identity.organizationId).all<ServerRow>();
+  return c.json({ servers: result.results ?? [] });
+});
+
+app.get("/v1/servers/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const server = await c.env.DB.prepare(
+    `SELECT id, hostname, primary_ip, region, agent_version, status,
+            last_heartbeat_at, created_at
+     FROM servers WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<ServerRow>();
+  if (!server) return c.json({ message: "Server not found" }, 404);
+  return c.json({ server });
+});
+
+app.post("/v1/servers", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+
+  const hostname = typeof input.hostname === "string" ? input.hostname.trim().toLowerCase() : "";
+  const primaryIp = typeof input.primaryIp === "string" ? input.primaryIp.trim() : "";
+  const region = typeof input.region === "string" ? input.region.trim().slice(0, 80) : null;
+  if (!hostname || hostname.length > 253 || !/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(\.([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/.test(hostname)) {
+    return c.json({ message: "Enter a valid server hostname" }, 400);
+  }
+  if (!validIp(primaryIp)) return c.json({ message: "Enter a valid IPv4 or IPv6 address" }, 400);
+
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO servers (id, organization_id, hostname, primary_ip, region, status) VALUES (?, ?, ?, ?, ?, 'PENDING')",
+      ).bind(id, identity.organizationId, hostname, primaryIp, region),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'server.create', 'server', ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
+    ]);
+    return c.json({ server: { id, hostname, primaryIp, region, status: "PENDING" } }, 201);
+  } catch (error) {
+    return c.json({ message: "Unable to register server. Check whether the hostname or address is already in use." }, 409);
+  }
+});
+
+app.post("/v1/servers/:id/enrollment-token", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  const serverId = c.req.param("id");
+  const server = await c.env.DB.prepare(
+    "SELECT id FROM servers WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(serverId, identity.organizationId).first<{ id: string }>();
+  if (!server) return c.json({ message: "Server not found" }, 404);
+
+  const token = randomHex(32);
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO agent_enrollments (id, organization_id, server_id, token_hash, expires_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(server_id) DO UPDATE SET organization_id = excluded.organization_id,
+       token_hash = excluded.token_hash, expires_at = excluded.expires_at,
+       consumed_at = NULL, created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+    ).bind(crypto.randomUUID(), identity.organizationId, serverId, await sha256(token), expiresAt),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'server.enrollment_token.issue', 'server', ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, serverId),
+  ]);
+
+  return c.json({
+    serverId,
+    enrollmentToken: token,
+    expiresAt,
+    oneTimeDisplay: true,
+    message: "Copy this token now. It will not be shown again and expires in 15 minutes.",
+  });
+});
+
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
 export default app;
