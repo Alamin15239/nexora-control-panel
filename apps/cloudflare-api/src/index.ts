@@ -678,6 +678,74 @@ app.post("/v1/hosting-accounts", async (c) => {
   }
 });
 
+
+function validManagedRelativePath(value: string, allowRoot = false): boolean {
+  if (value === "") return allowRoot;
+  if (value.length > 1024 || value.startsWith("/") || value.includes("\\\\")) return false;
+  return value.split("/").every(part =>
+    part.length > 0 && part.length <= 128 && part !== "." && part !== ".." &&
+    /^[A-Za-z0-9._ -]+$/.test(part)
+  );
+}
+
+app.post("/v1/hosting-accounts/:id/files", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const rawBody = await c.req.text();
+  if (rawBody.length > 400000) return c.json({ message: "File operation request exceeds the 400 KB limit" }, 413);
+  let input: Record<string, unknown>;
+  try { input = JSON.parse(rawBody) as Record<string, unknown>; }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+
+  const operation = typeof input.operation === "string" ? input.operation : "";
+  const filePath = typeof input.path === "string" ? input.path : "";
+  const newPath = typeof input.newPath === "string" ? input.newPath : "";
+  const contentBase64 = typeof input.contentBase64 === "string" ? input.contentBase64 : "";
+  const supported = ["LIST_FILES", "READ_FILE", "WRITE_FILE", "CREATE_DIRECTORY", "RENAME_PATH", "DELETE_PATH"];
+  if (!supported.includes(operation)) return c.json({ message: "Unsupported file operation" }, 400);
+  if (!validManagedRelativePath(filePath, operation === "LIST_FILES")) return c.json({ message: "Invalid file path" }, 400);
+  if (operation !== "LIST_FILES" && !filePath) return c.json({ message: "A file path is required" }, 400);
+  if (operation === "RENAME_PATH" && !validManagedRelativePath(newPath)) return c.json({ message: "Invalid destination path" }, 400);
+  if (operation === "WRITE_FILE" && (!contentBase64 || contentBase64.length > 350000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64))) {
+    return c.json({ message: "File content must be valid Base64 and no larger than 256 KiB" }, 400);
+  }
+
+  const account = await c.env.DB.prepare(
+    "SELECT id, username, server_id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; server_id: string }>();
+  if (!account) return c.json({ message: "Active hosting account not found" }, 404);
+
+  const requestPayload = JSON.stringify({ operation, path: filePath, ...(operation === "RENAME_PATH" ? { newPath } : {}), ...(operation === "WRITE_FILE" ? { contentBase64 } : {}) });
+  const jobId = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'FILE_MANAGER', 'QUEUED', ?, ?)").bind(jobId, account.id, "file-manager:" + jobId, requestPayload),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'file_manager.operation_requested', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, account.id, JSON.stringify({ operation, path: filePath })),
+    ]);
+  } catch {
+    return c.json({ message: "Unable to queue the file operation" }, 500);
+  }
+  return c.json({ job: { id: jobId, status: "QUEUED", operation }, message: "File operation queued for the connected Linux agent." }, 202);
+});
+
+app.get("/v1/file-manager/jobs/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const job = await c.env.DB.prepare(
+    `SELECT j.id, j.status, j.operation, j.error_message AS errorMessage, j.result_payload AS resultPayload,
+            j.requested_at AS requestedAt, j.finished_at AS finishedAt
+     FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id
+     WHERE j.id = ? AND j.operation = 'FILE_MANAGER' AND a.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; status: string; operation: string; errorMessage: string | null; resultPayload: string | null; requestedAt: string; finishedAt: string | null }>();
+  if (!job) return c.json({ message: "File operation not found" }, 404);
+  let result: unknown = null;
+  if (job.resultPayload) {
+    try { result = JSON.parse(job.resultPayload); } catch { return c.json({ message: "Stored file operation result is invalid" }, 500); }
+  }
+  return c.json({ job: { id: job.id, status: job.status, operation: job.operation, errorMessage: job.errorMessage, requestedAt: job.requestedAt, finishedAt: job.finishedAt, result } });
+});
+
 type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
 app.get("/v1/domains/:id/dns-check", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
@@ -953,13 +1021,13 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN') " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER') " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
-    "RETURNING id, hosting_account_id AS hostingAccountId, operation, attempts",
+    "RETURNING id, hosting_account_id AS hostingAccountId, operation, attempts, request_payload AS requestPayload",
   ).bind(now, leaseUntil, auth.credential.nodeId, auth.credential.serverId, now, now)
-    .first<{ id: string; hostingAccountId: string; operation: string; attempts: number }>();
+    .first<{ id: string; hostingAccountId: string; operation: string; attempts: number; requestPayload: string | null }>();
   if (!claimed) return c.json({ job: null });
   const account = await c.env.DB.prepare(
     "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes, " +
@@ -968,8 +1036,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "JOIN provisioning_jobs j ON j.id = ? AND j.hosting_account_id = a.id " +
     "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
-    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL)) LIMIT 1",
-  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation)
+    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE')) LIMIT 1",
+  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation)
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
@@ -977,12 +1045,12 @@ app.get("/v1/agent/jobs/next", async (c) => {
     ).bind(new Date().toISOString(), claimed.id, auth.credential.nodeId).run();
     return c.json({ job: null });
   }
-  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, account } });
+  let requestPayload: unknown = null;\n  if (claimed.requestPayload) { try { requestPayload = JSON.parse(claimed.requestPayload); } catch { requestPayload = null; } }\n  return c.json({ job: { id: claimed.id, operation: claimed.operation, attempts: claimed.attempts, leaseExpiresAt: leaseUntil, requestPayload, account } });
 });
 
 app.post("/v1/agent/jobs/:id/result", async (c) => {
   const rawBody = await c.req.text();
-  if (rawBody.length > 8192) return c.json({ message: "Job result payload is too large" }, 413);
+  if (rawBody.length > 400000) return c.json({ message: "Job result payload is too large" }, 413);
   const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, rawBody);
   if (auth.error) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
   let input: Record<string, unknown>;
@@ -990,14 +1058,14 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
   if (typeof input.success !== "boolean") return c.json({ message: "A boolean success result is required" }, 400);
   const errorCode = typeof input.errorCode === "string" ? input.errorCode.slice(0, 80) : null;
-  const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;
+  const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;\n  const resultPayload = input.result && typeof input.result === "object" ? JSON.stringify(input.result) : null;
   const jobId = c.req.param("id");
   const now = new Date().toISOString();
   const status = input.success ? "SUCCEEDED" : "FAILED";
   const update = await c.env.DB.prepare(
-    "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, lease_expires_at = NULL " +
+    "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN') " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account",
