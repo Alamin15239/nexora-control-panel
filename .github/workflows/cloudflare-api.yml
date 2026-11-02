@@ -1,0 +1,35 @@
+name: Cloudflare API CI
+
+on:
+  push:
+    paths:
+      - "apps/cloudflare-api/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/cloudflare-api.yml"
+  pull_request:
+    paths:
+      - "apps/cloudflare-api/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/cloudflare-api.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cloudflare-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Typecheck Cloudflare Worker
+        run: pnpm --filter @nexora/cloudflare-api typecheck
