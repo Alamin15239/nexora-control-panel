@@ -865,27 +865,35 @@ app.post("/v1/domains/:id/retry", async (c) => {
   ).bind(domainId, identity.organizationId).first<{ id: string; name: string; account_id: string; server_id: string }>();
   if (!domain) return c.json({ message: "Domain or active hosting account not found" }, 404);
 
+  const idempotencyKey = "add-domain:" + domain.id;
   const job = await c.env.DB.prepare(
     "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'ADD_DOMAIN' AND idempotency_key = ? LIMIT 1",
-  ).bind(domain.account_id, "add-domain:" + domain.id).first<{ id: string; status: string }>();
-  if (!job) return c.json({ message: "Provisioning job not found for this domain" }, 404);
-  if (job.status !== "FAILED") return c.json({ message: "Only failed domain jobs can be retried", status: job.status }, 409);
+  ).bind(domain.account_id, idempotencyKey).first<{ id: string; status: string }>();
 
   const now = new Date().toISOString();
-  const update = await c.env.DB.prepare(
-    `UPDATE provisioning_jobs
-     SET status = 'QUEUED', attempts = 0, started_at = NULL, finished_at = NULL,
-         lease_expires_at = NULL, claimed_by_node_id = NULL,
-         error_code = NULL, error_message = NULL, requested_at = ?
-     WHERE id = ? AND status = 'FAILED'`,
-  ).bind(now, job.id).run();
-  if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job status changed; refresh and try again" }, 409);
+  let jobId = job?.id ?? "";
+  if (!job) {
+    jobId = crypto.randomUUID();
+    await c.env.DB.prepare(
+      "INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'ADD_DOMAIN', 'QUEUED', ?)",
+    ).bind(jobId, domain.account_id, idempotencyKey).run();
+  } else {
+    if (job.status !== "FAILED") return c.json({ message: "Only failed or missing domain setup can be queued again", status: job.status }, 409);
+    const update = await c.env.DB.prepare(
+      `UPDATE provisioning_jobs
+       SET status = 'QUEUED', attempts = 0, started_at = NULL, finished_at = NULL,
+           lease_expires_at = NULL, claimed_by_node_id = NULL,
+           error_code = NULL, error_message = NULL, requested_at = ?
+       WHERE id = ? AND status = 'FAILED'`,
+    ).bind(now, job.id).run();
+    if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job status changed; refresh and try again" }, 409);
+  }
 
   await c.env.DB.prepare(
     "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.provisioning_retried', 'domain', ?, ?)",
-  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ jobId: job.id })).run();
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ jobId, created: !job })).run();
 
-  return c.json({ domainId: domain.id, jobId: job.id, status: "QUEUED", message: "Domain provisioning has been queued again." });
+  return c.json({ domainId: domain.id, jobId, status: "QUEUED", message: "Domain website configuration has been queued for the connected Linux agent." });
 });
 
 type HostingDatabaseRow = {
