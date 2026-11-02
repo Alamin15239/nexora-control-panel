@@ -139,7 +139,10 @@ export default function FileManagerPage() {
     setBusy(true); setError("");
     try {
       const result = await execute("READ_FILE", filePath);
-      const blob = new Blob([fromBase64(result.contentBase64 ?? "")], { type: "application/octet-stream" });
+      const downloadBytes = fromBase64(result.contentBase64 ?? "");
+      const downloadBuffer = new ArrayBuffer(downloadBytes.byteLength);
+      new Uint8Array(downloadBuffer).set(downloadBytes);
+      const blob = new Blob([downloadBuffer], { type: "application/octet-stream" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
