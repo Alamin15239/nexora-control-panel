@@ -5,14 +5,21 @@ import "testing"
 func TestUsernamePattern(t *testing.T) {
 	valid := []string{"web001", "client_01", "abc"}
 	for _, value := range valid {
-		if !usernamePattern.MatchString(value) {
-			t.Errorf("expected %q to be accepted", value)
-		}
+		if !usernamePattern.MatchString(value) { t.Errorf("expected %q to be accepted", value) }
 	}
 	invalid := []string{"ab", "1client", "Client01", "client-name", "client.name", "client;id", "sixteen_char_name"}
 	for _, value := range invalid {
-		if usernamePattern.MatchString(value) {
-			t.Errorf("expected %q to be rejected", value)
-		}
+		if usernamePattern.MatchString(value) { t.Errorf("expected %q to be rejected", value) }
+	}
+}
+
+func TestDomainPattern(t *testing.T) {
+	valid := []string{"example.com", "sub.example.co.uk", "nxoratest01.test", "a1.example-domain.com"}
+	for _, value := range valid {
+		if !domainPattern.MatchString(value) { t.Errorf("expected domain %q to be accepted", value) }
+	}
+	invalid := []string{"", "localhost", "-bad.example.com", "bad-.example.com", "bad..example.com", "bad;domain.com", "example.com/path", "example .com", "example.com\n"}
+	for _, value := range invalid {
+		if domainPattern.MatchString(value) { t.Errorf("expected domain %q to be rejected", value) }
 	}
 }
