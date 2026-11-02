@@ -180,7 +180,6 @@ func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample 
 	nonce := randomHexString(16)
 	bodyHash:=sha256.Sum256(body)
 	canonical:=timestamp+"\n"+nonce+"\nPOST\n"+path+"\n"+hex.EncodeToString(bodyHash[:])
-	secret, _ := hex.DecodeString(cfg.Secret)
 	derived := sha256.Sum256([]byte(cfg.Secret))
 	mac := hmac.New(sha256.New, []byte(hex.EncodeToString(derived[:])))
 	_, _ = mac.Write([]byte(canonical))
