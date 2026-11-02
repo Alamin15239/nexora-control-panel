@@ -48,6 +48,18 @@ sudo visudo -cf /etc/sudoers.d/nexora-agent
 
 The helper binary and sudoers rule must remain owned by root and must not be writable by the agent account.
 
+For the systemd service, retain the unprivileged service user but permit only the capability set needed by the fixed root helper. Create `/etc/systemd/system/nexora-agent.service.d/override.conf` with:
+
+```ini
+[Service]
+ProtectSystem=full
+ProtectHome=false
+NoNewPrivileges=false
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SETFCAP CAP_AUDIT_WRITE
+```
+
+Then run `sudo systemctl daemon-reload && sudo systemctl restart nexora-agent`. The agent itself runs without effective root privileges; the exact sudoers rule is the only intended elevation path.
+
 ## Build and test
 
 GitHub Actions runs `go test ./...` and builds both Linux binaries. The control-plane API must have the latest D1 migrations applied before job delivery is available.
