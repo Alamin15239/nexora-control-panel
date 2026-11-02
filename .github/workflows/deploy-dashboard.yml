@@ -11,7 +11,6 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - "pnpm-lock.yaml"
-      - ".github/workflows/deploy-dashboard.yml"
 
 permissions:
   contents: read
