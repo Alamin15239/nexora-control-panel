@@ -34,13 +34,10 @@ export default function LoginPage() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "Authentication failed");
-      if (mode === "register") {
-        setMessage(`Workspace created. Your workspace slug is ${data.organization.slug}. Save it for future sign-ins.`);
-        setForm((current) => ({ ...current, organizationId: data.organization.slug }));
-        setMode("login");
-        return;
-      }
-      router.push("/");
+      // Registration also creates a server-side session and sets the
+      // HttpOnly nexora_session cookie in the auth proxy. Continue directly
+      // to the protected dashboard instead of asking the new owner to sign in again.
+      router.replace("/");
       router.refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Something went wrong");
