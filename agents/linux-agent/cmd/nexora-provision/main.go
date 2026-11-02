@@ -179,9 +179,6 @@ func fileManager(input request) error {
  return fileManagerOperation(input, "/", uid, gid, writeResult)
 }
 
-func managedParentPath(value string) string { parent := filepath.ToSlash(filepath.Dir(value)); if parent == "." { return "" }; return parent }
-
-
 func managedParentPath(value string) string {
  parent := filepath.ToSlash(filepath.Dir(value))
  if parent == "." { return "" }
