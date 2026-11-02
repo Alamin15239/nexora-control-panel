@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestUsernamePattern(t *testing.T) {
 	valid := []string{"web001", "client_01", "abc"}
@@ -33,4 +37,27 @@ func TestDocumentRootPattern(t *testing.T) {
 	for _, value := range invalid {
 		if validDocumentRoot(value) { t.Errorf("expected document root %q to be rejected", value) }
 	}
+}
+
+func TestSafeManagedPathRejectsTraversalAndSymlinks(t *testing.T) {
+ root := t.TempDir()
+ if err := os.Mkdir(filepath.Join(root, "assets"), 0750); err != nil { t.Fatal(err) }
+ if err := os.WriteFile(filepath.Join(root, "assets", "site.css"), []byte("body{}"), 0640); err != nil { t.Fatal(err) }
+ if _, info, err := safeManagedPath(root, "assets/site.css", false); err != nil || info == nil || !info.Mode().IsRegular() {
+  t.Fatalf("expected a regular file, got info=%v err=%v", info, err)
+ }
+ for _, value := range []string{"../etc/passwd", "/etc/passwd", "assets/../../etc/passwd", "assets\\\\site.css"} {
+  if _, _, err := safeManagedPath(root, value, false); err == nil {
+   t.Errorf("expected unsafe path %q to be rejected", value)
+  }
+ }
+ if err := os.Symlink("/etc/passwd", filepath.Join(root, "assets", "escape")); err != nil { t.Fatal(err) }
+ if _, _, err := safeManagedPath(root, "assets/escape", false); err == nil {
+  t.Fatal("expected symbolic link to be rejected")
+ }
+}
+
+func TestManagedParentPath(t *testing.T) {
+ if got := managedParentPath("index.html"); got != "" { t.Fatalf("root-level parent = %q, want empty", got) }
+ if got := managedParentPath("assets/site.css"); got != "assets" { t.Fatalf("nested parent = %q, want assets", got) }
 }
