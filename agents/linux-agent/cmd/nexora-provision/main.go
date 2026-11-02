@@ -196,13 +196,18 @@ func configureNginx(username, domain, root string) error {
 	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
 		if errors.Is(linkErr, os.ErrNotExist) { _ = os.Remove(enabled) }
 		rollback()
-		return fmt.Errorf("NGINX_TEST_FAILED: Nginx rejected the new configuration")
+		return fmt.Errorf("NGINX_TEST_FAILED: %s", safeOutput(err.Error()))
 	}
 	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
 		if errors.Is(linkErr, os.ErrNotExist) { _ = os.Remove(enabled) }
 		rollback()
-		_ = runFixed("/usr/sbin/nginx", "-t")
-		return fmt.Errorf("NGINX_RELOAD_FAILED: Nginx configuration was restored; reload failed")
+		// The running Nginx master keeps its last valid configuration when a
+		// reload fails. Verify that the restored on-disk configuration is valid
+		// and retain both diagnostics for the agent's provisioning-job record.
+		if testErr := runFixed("/usr/sbin/nginx", "-t"); testErr != nil {
+			return fmt.Errorf("NGINX_RELOAD_FAILED: %s; restored configuration test also failed: %s", safeOutput(err.Error()), safeOutput(testErr.Error()))
+		}
+		return fmt.Errorf("NGINX_RELOAD_FAILED: %s; previous configuration restored", safeOutput(err.Error()))
 	}
 	_ = os.Remove(backup)
 	_ = username
