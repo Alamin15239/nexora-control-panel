@@ -28,6 +28,8 @@ jobs:
       - name: Test
         run: go test ./...
       - name: Build
-        run: go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
+        run: |
+          go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
+          go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
       - name: Verify CLI
         run: /tmp/nexora-agent version
