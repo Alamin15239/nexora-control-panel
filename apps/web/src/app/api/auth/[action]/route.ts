@@ -5,8 +5,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const COOKIE_NAME = "nexora_session";
-const COOKIE_MAX_AGE = 15 * 60;
-const SESSION_SECONDS = 15 * 60;
+const COOKIE_MAX_AGE = SESSION_SECONDS;
+const SESSION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const PASSWORD_ITERATIONS = 100_000;
