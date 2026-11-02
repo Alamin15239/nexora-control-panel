@@ -262,12 +262,12 @@ func findDuplicateNexoraVhosts(enabledDir, availableDir, keepLink, domain, root 
 
 func nginxConfigMatchesDomainRoot(content, domain, root string) bool {
 	foundDomain, foundRoot := false, false
-	for _, line := range strings.Split(content, "\\n") {
+	for _, line := range strings.Split(content, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) < 2 { continue }
 		if fields[0] == "server_name" {
-			for _, name := range strings.Split(strings.TrimSuffix(fields[1], ";"), " ") {
-				if name == domain { foundDomain = true }
+			for _, name := range fields[1:] {
+				if strings.TrimSuffix(name, ";") == domain { foundDomain = true }
 			}
 		}
 		if fields[0] == "root" && strings.TrimSuffix(fields[1], ";") == root { foundRoot = true }
