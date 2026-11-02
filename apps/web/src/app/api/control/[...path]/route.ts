@@ -27,6 +27,8 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
     return method === "POST";
   }
   if (parts.length === 3 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users") return true;
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "files") return method === "POST";
+  if (parts.length === 3 && parts[0] === "file-manager" && parts[1] === "jobs" && /^[0-9a-f-]{36}$/i.test(parts[2])) return method === "GET";
   return false;
 }
 
