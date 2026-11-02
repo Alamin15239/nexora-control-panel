@@ -1,16 +1,16 @@
 # Nexora Control
 
-An independently developed hosting control plane and Linux server management platform. The long-term objective is a self-hosted alternative to cPanel/WHM, with a multi-tenant SaaS control plane and customer workload nodes.
+A multi-tenant hosting and application deployment platform built around Cloudflare's serverless and edge infrastructure. Nexora's selected direction is a Cloudflare-native alternative for supported web workloads, not a traditional unrestricted Linux VPS/cPanel service.
 
 ## Current architecture
 
 - Web: Next.js 15, React 19, TypeScript and Tailwind CSS.
 - API: NestJS with Prisma and PostgreSQL.
-- Linux agent: Go CLI foundation.
-- Database schema: users, organizations, memberships, servers, agent enrollment, telemetry, hosting plans/accounts, domains, provisioning jobs, audit logs, persisted sessions and login-attempt tracking.
-- Planned infrastructure: Redis/BullMQ, Nginx, PHP-FPM, DNS, mail, SSL automation and encrypted backups.
+- Current API foundation: NestJS, Prisma and PostgreSQL (migration to Cloudflare Workers and D1 is planned, not yet completed).
+- Existing Go Linux agent: validation-only foundation; it is not the selected execution model for Cloudflare-native hosting.
+- Target infrastructure: Workers, D1, R2, KV, Durable Objects, Queues, Cron Triggers and Cloudflare DNS/Custom Domains.
 
-The control plane is separate from customer workload servers. Privileged operations must use authenticated, allowlisted server-agent operations. Never execute arbitrary user-supplied shell commands as root.
+Nexora's target model is Cloudflare-native deployment and resource orchestration. Cloudflare Workers are not general-purpose Linux VPS instances and do not provide unrestricted SSH, arbitrary root processes or standard PHP-FPM hosting.
 
 ## Current implemented functionality
 
@@ -24,9 +24,9 @@ The control plane is separate from customer workload servers. Privileged operati
 
 Dashboard metric cards and infrastructure status are still setup placeholders. The web interface does not yet provision or manage real hosting resources.
 
-## Google Cloud deployment
+## Cloudflare deployment
 
-Nexora's first infrastructure provider will be Google Cloud Platform, using Compute Engine for workload nodes. See [the Google Cloud deployment plan](docs/google-cloud-deployment.md) for the proposed control-plane, database, agent and security architecture.
+Cloudflare is the selected infrastructure provider. See [the Cloudflare-first architecture](docs/cloudflare-first-architecture.md) for the target platform, free-tier constraints, migration plan and supported hosting model. The Google Cloud document is retained only as a historical alternative.
 
 ## Development setup
 
