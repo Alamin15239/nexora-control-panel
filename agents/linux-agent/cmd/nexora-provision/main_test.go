@@ -61,3 +61,34 @@ func TestManagedParentPath(t *testing.T) {
  if got := managedParentPath("index.html"); got != "" { t.Fatalf("root-level parent = %q, want empty", got) }
  if got := managedParentPath("assets/site.css"); got != "assets" { t.Fatalf("nested parent = %q, want assets", got) }
 }
+
+func TestUpgradeLegacyDefaultIndexOnlyReplacesKnownPlaceholder(t *testing.T) {
+	root := t.TempDir()
+	index := filepath.Join(root, "index.html")
+	if err := os.WriteFile(index, []byte(legacyDefaultIndexHTML), 0640); err != nil { t.Fatal(err) }
+	if err := upgradeLegacyDefaultIndex(root, os.Getuid(), os.Getgid()); err != nil { t.Fatal(err) }
+	got, err := os.ReadFile(index)
+	if err != nil { t.Fatal(err) }
+	if string(got) != defaultIndexHTML { t.Fatalf("legacy placeholder was not upgraded: %q", string(got)) }
+
+	custom := []byte("<h1>Customer website</h1>")
+	if err := os.WriteFile(index, custom, 0640); err != nil { t.Fatal(err) }
+	if err := upgradeLegacyDefaultIndex(root, os.Getuid(), os.Getgid()); err != nil { t.Fatal(err) }
+	got, err = os.ReadFile(index)
+	if err != nil { t.Fatal(err) }
+	if string(got) != string(custom) { t.Fatalf("customer index was modified: %q", string(got)) }
+}
+
+func TestUpgradeLegacyDefaultIndexDoesNotFollowSymlinks(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "customer.html")
+	if err := os.WriteFile(target, []byte(legacyDefaultIndexHTML), 0640); err != nil { t.Fatal(err) }
+	index := filepath.Join(root, "index.html")
+	if err := os.Symlink(target, index); err != nil { t.Fatal(err) }
+	if err := upgradeLegacyDefaultIndex(root, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("expected symlink index.html to be rejected")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil { t.Fatal(err) }
+	if string(got) != legacyDefaultIndexHTML { t.Fatal("symlink target was modified") }
+}
