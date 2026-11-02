@@ -177,13 +177,11 @@ func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample 
 	body, err := json.Marshal(sample); if err != nil { return err }
 	path := "/v1/agent/heartbeat"
 	timestamp := strconv.FormatInt(time.Now().Unix(),10)
-	nonceBytes := make([]byte,16)
-	if _,err:=io.ReadFull(strings.NewReader(randomHexString(16)),nonceBytes); err!=nil { return err }
-	nonce := hex.EncodeToString(nonceBytes)
+	nonce := randomHexString(16)
 	bodyHash:=sha256.Sum256(body)
 	canonical:=timestamp+"\n"+nonce+"\nPOST\n"+path+"\n"+hex.EncodeToString(bodyHash[:])
 	secret, _ := hex.DecodeString(cfg.Secret)
-	derived := sha256.Sum256(secret)
+	derived := sha256.Sum256([]byte(cfg.Secret))
 	mac := hmac.New(sha256.New, []byte(hex.EncodeToString(derived[:])))
 	_, _ = mac.Write([]byte(canonical))
 	req,err:=http.NewRequestWithContext(ctx,http.MethodPost,strings.TrimRight(cfg.ControlPlane,"/")+path,bytes.NewReader(body)); if err!=nil{return err}
