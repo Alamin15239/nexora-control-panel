@@ -294,7 +294,7 @@ export default function FileManagerPage() {
           </div>}
         {busy && <div className="border-t border-slate-100 px-5 py-3 text-xs text-blue-700">Waiting for the connected Linux agent…</div>}
       </section>
-      <p className="text-xs leading-5 text-slate-400">Security boundary: operations are restricted to the selected account's public_html directory. Symlinks are excluded, and individual file transfers are limited to 256 KiB in this initial version.</p>
+      <p className="text-xs leading-5 text-slate-400">Security boundary: operations are restricted to the selected account&apos;s public_html directory. Symlinks are excluded, and individual file transfers are limited to 256 KiB in this initial version.</p>
     </section>
   </main>;
 }
