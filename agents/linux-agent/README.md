@@ -1,6 +1,6 @@
 # Nexora Linux Agent
 
-Restricted Linux node agent for Nexora Control. Version 0.4.0 adds authenticated provisioning-job polling and a narrowly scoped Linux hosting-account provisioner.
+Restricted Linux node agent for Nexora Control. Version 0.5.0 supports authenticated hosting-account and Nginx domain provisioning jobs.
 
 ## Security model
 
@@ -10,10 +10,10 @@ Restricted Linux node agent for Nexora Control. Version 0.4.0 adds authenticated
 - Requests outside the five-minute clock window and replayed nonces are rejected.
 - The agent validates HTTPS URLs and uses the platform TLS trust store.
 - The monitoring agent runs as the unprivileged `nexora-agent` user.
-- The agent can request only the allowlisted `CREATE_HOSTING_ACCOUNT` operation. It does not execute commands or scripts supplied by the control plane.
+- The agent accepts only the allowlisted `CREATE_HOSTING_ACCOUNT` and `ADD_DOMAIN` operations. It does not execute commands or scripts supplied by the control plane.
 - Privileged account creation is delegated to a separate root-owned helper at `/usr/local/libexec/nexora-provision`, permitted through one exact sudoers command.
-- The helper validates the username, creates a non-login Linux user, and creates `/home/USERNAME/public_html` with restrictive ownership and permissions. Repeated execution is idempotent.
-- The first provisioner does not configure Nginx/Apache, PHP, DNS, TLS, mail, databases, backups, or enforce plan quotas. A successful job means the Linux hosting identity and document-root directory were created—not that a public website is live.
+- The helper validates account identities and domain names, creates non-login hosting users, and creates document roots with restrictive ownership and permissions. For `ADD_DOMAIN`, it rejects unsafe paths and symlinks, applies a read-only Nginx ACL, writes an Nginx virtual host, runs `nginx -t`, and reloads Nginx only after a successful test. The configuration update is rolled back if validation or reload fails.
+- Domain provisioning configures HTTP Nginx virtual hosts only. It does not configure DNS, TLS, PHP, mail, databases, backups, or enforce plan quotas. Public reachability still requires correct DNS and firewall/network configuration.
 
 ## Commands
 
