@@ -6,6 +6,7 @@ on:
       - "agents/linux-agent/**"
       - "scripts/setup-cloudflare-tunnel.sh"
       - "scripts/start-cloudflare-quick-tunnel.sh"
+      - "scripts/update-linux-agent.sh"
       - "docs/cloudflare-tunnel-node.md"
       - ".github/workflows/linux-agent.yml"
   pull_request:
@@ -40,3 +41,4 @@ jobs:
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
           bash -n ../../scripts/start-cloudflare-quick-tunnel.sh
+          bash -n ../../scripts/update-linux-agent.sh
