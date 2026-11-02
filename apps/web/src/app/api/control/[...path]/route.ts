@@ -18,6 +18,10 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "retry") {
     return method === "POST";
   }
+  if (parts.length === 3 && parts[0] === "domains" &&
+      /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "dns-check") {
+    return method === "GET";
+  }
   if (parts.length === 3 && parts[0] === "servers" &&
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "enrollment-token") {
     return method === "POST";
