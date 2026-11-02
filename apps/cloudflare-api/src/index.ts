@@ -693,8 +693,8 @@ app.post("/v1/domains", async (c) => {
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const accountId = typeof input.accountId === "string" ? input.accountId : "";
   const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
-  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
-  if (!account) return c.json({ message: "Select a hosting account in this workspace." }, 404);
+  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account) return c.json({ message: "Select an active hosting account in this workspace before adding a domain." }, 404);
   if (!validDomain(name)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
   const suppliedRoot = typeof input.documentRoot === "string" ? input.documentRoot.trim() : "";
   const root = suppliedRoot || "/home/" + account.username + "/public_html/" + name;
@@ -844,7 +844,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation = 'CREATE_HOSTING_ACCOUNT' " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN') " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -853,11 +853,14 @@ app.get("/v1/agent/jobs/next", async (c) => {
     .first<{ id: string; hostingAccountId: string; operation: string; attempts: number }>();
   if (!claimed) return c.json({ job: null });
   const account = await c.env.DB.prepare(
-    "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes " +
+    "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes, " +
+    "d.name AS domain, d.document_root AS documentRoot " +
     "FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id " +
-    "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? AND a.status = 'PENDING' LIMIT 1",
-  ).bind(claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId)
-    .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number }>();
+    "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND j.operation = 'ADD_DOMAIN' ORDER BY d2.created_at DESC LIMIT 1) " +
+    "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
+    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL)) LIMIT 1",
+  ).bind(claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation)
+    .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
       "UPDATE provisioning_jobs SET status = 'FAILED', finished_at = ?, error_code = 'ACCOUNT_NOT_PROVISIONABLE', error_message = 'Hosting account is missing or not pending', lease_expires_at = NULL WHERE id = ? AND claimed_by_node_id = ?",
@@ -884,20 +887,22 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const update = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation = 'CREATE_HOSTING_ACCOUNT' " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account",
     jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId).run();
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE hosting_accounts SET status = ?, updated_at = ? WHERE id = (SELECT hosting_account_id FROM provisioning_jobs WHERE id = ?) AND server_id = ?")
-      .bind(input.success ? "ACTIVE" : "FAILED", now, jobId, auth.credential.serverId),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
-      .bind(crypto.randomUUID(), auth.credential.organizationId,
-        input.success ? "hosting_account.provisioned" : "hosting_account.provisioning_failed",
-        jobId, JSON.stringify({ serverId: auth.credential.serverId, errorCode: input.success ? null : errorCode })),
-  ]);
+  const completedJob = await c.env.DB.prepare("SELECT operation FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
+    .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string }>();
+  if (completedJob?.operation === "CREATE_HOSTING_ACCOUNT") {
+    await c.env.DB.prepare("UPDATE hosting_accounts SET status = ?, updated_at = ? WHERE id = (SELECT hosting_account_id FROM provisioning_jobs WHERE id = ?) AND server_id = ?")
+      .bind(input.success ? "ACTIVE" : "FAILED", now, jobId, auth.credential.serverId).run();
+  }
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
+    .bind(crypto.randomUUID(), auth.credential.organizationId,
+      input.success ? (completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : "hosting_account.provisioned") : (completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : "hosting_account.provisioning_failed"),
+      jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });
 
