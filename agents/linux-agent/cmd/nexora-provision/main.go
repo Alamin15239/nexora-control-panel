@@ -154,6 +154,37 @@ func upgradeLegacyDefaultIndex(documentRoot string, uid, gid int) error {
 	return nil
 }
 
+// createDefaultIndexForEmptyDomain creates a starter homepage only when the
+// newly provisioned document root is completely empty. Existing customer files
+// and index pages are never overwritten.
+func createDefaultIndexForEmptyDomain(documentRoot string, uid, gid int) error {
+	entries, err := os.ReadDir(documentRoot)
+	if err != nil {
+		return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to inspect the document root")
+	}
+	if len(entries) != 0 {
+		return nil
+	}
+
+	index := filepath.Join(documentRoot, "index.html")
+	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+	if errors.Is(err, os.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to create the initial domain homepage")
+	}
+	_, writeErr := file.WriteString(defaultIndexHTML)
+	chmodErr := file.Chmod(0640)
+	chownErr := file.Chown(uid, gid)
+	closeErr := file.Close()
+	if writeErr != nil || chmodErr != nil || chownErr != nil || closeErr != nil {
+		_ = os.Remove(index)
+		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write or secure the initial domain homepage")
+	}
+	return nil
+}
+
 func addDomain(username, domain, documentRoot string) error {
 	if !domainPattern.MatchString(domain) || len(domain) > 253 { return fmt.Errorf("INVALID_DOMAIN: domain name is invalid") }
 	home := filepath.Join("/home", username)
@@ -171,6 +202,7 @@ func addDomain(username, domain, documentRoot string) error {
 	gid := mustGID(group.Gid)
 	if err := ensureSafeDirectory(home, documentRoot, uid, gid); err != nil { return err }
 	if err := upgradeLegacyDefaultIndex(documentRoot, uid, gid); err != nil { return err }
+	if err := createDefaultIndexForEmptyDomain(documentRoot, uid, gid); err != nil { return err }
 	if err := runFixed("/usr/bin/setfacl", "-m", "u:www-data:--x", home); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server home traversal") }
 	if err := runFixed("/usr/bin/setfacl", "-R", "-m", "u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to grant web server document access") }
 	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil { return fmt.Errorf("ACL_FAILED: unable to set default web server access") }
