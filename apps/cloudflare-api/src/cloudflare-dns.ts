@@ -1,6 +1,7 @@
 type DnsBindings = {
   CLOUDFLARE_DNS_API_TOKEN?: string;
   CLOUDFLARE_ZONE_ID?: string;
+  CLOUDFLARE_ZONE_NAME?: string;
 };
 
 type CloudflareDnsRecord = {
@@ -24,7 +25,7 @@ async function cloudflareDnsRequest<T>(
   body?: Record<string, unknown>,
 ): Promise<T> {
   if (!env.CLOUDFLARE_DNS_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {
-    throw new Error("DNS automation is not configured. Add CLOUDFLARE_DNS_API_TOKEN with Zone:Read and DNS:Edit permissions.");
+    throw new Error("DNS automation is not configured. Add CLOUDFLARE_DNS_API_TOKEN with DNS:Edit permission for the Nexora zone.");
   }
   const response = await fetch("https://api.cloudflare.com/client/v4" + path, {
     method,
@@ -59,11 +60,8 @@ export async function ensureSaasDnsRecord(
 ): Promise<SaasDnsProvisioningResult> {
   const hostname = rawHostname.trim().toLowerCase().replace(/\.$/, "");
   const target = rawTarget.trim().toLowerCase().replace(/\.$/, "");
-  const zone = await cloudflareDnsRequest<{ name: string }>(
-    env,
-    "/zones/" + encodeURIComponent(env.CLOUDFLARE_ZONE_ID!) ,
-  );
-  const zoneName = zone.name.toLowerCase();
+  const zoneName = (env.CLOUDFLARE_ZONE_NAME || "").trim().toLowerCase();
+  if (!zoneName) throw new Error("Set CLOUDFLARE_ZONE_NAME in the Worker configuration.");
   if (hostname === zoneName || !hostname.endsWith("." + zoneName)) {
     return {
       status: "CUSTOMER_DNS_REQUIRED",
