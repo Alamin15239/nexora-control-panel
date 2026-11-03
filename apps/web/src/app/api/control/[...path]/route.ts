@@ -27,6 +27,11 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "cloudflare-hostname") {
     return true;
   }
+  if (parts.length === 4 && parts[0] === "domains" &&
+      /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "cloudflare-hostname" &&
+      parts[3] === "revalidate") {
+    return method === "POST";
+  }
   if (parts.length === 3 && parts[0] === "servers" &&
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "enrollment-token") {
     return method === "POST";
