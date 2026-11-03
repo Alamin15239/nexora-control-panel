@@ -1019,7 +1019,6 @@ app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
       const created = await cloudflareHostnameRequest(c.env, null, "POST", {
         hostname: domain.name,
         ssl: { method: "txt", type: "dv", settings: { min_tls_version: "1.2" } },
-        custom_metadata: { nexora_domain_id: domain.id, nexora_organization_id: identity.organizationId },
       });
       const id = created.result?.id;
       if (!id) throw new Error("Cloudflare created the hostname but did not return its identifier.");
