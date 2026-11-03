@@ -314,6 +314,7 @@ func fileManagerOperation(input request, root string, writeResult func(any) erro
   if err := os.Mkdir(path, 0750); err != nil { return fmt.Errorf("DIRECTORY_CREATE_FAILED: unable to create directory") }
   return writeResult(map[string]any{"success":true,"path":input.Path})
  case "RENAME_PATH":
+  if input.Path == "" || input.NewPath == "" { return fmt.Errorf("INVALID_PATH: the document root cannot be renamed") }
   oldPath, oldInfo, err := safeManagedPath(root, input.Path, false)
   if err != nil { return err }
   if oldInfo == nil { return fmt.Errorf("FILE_NOT_FOUND: source does not exist") }
@@ -325,6 +326,7 @@ func fileManagerOperation(input request, root string, writeResult func(any) erro
   if err := os.Rename(oldPath, newPath); err != nil { return fmt.Errorf("RENAME_FAILED: unable to rename selected item") }
   return writeResult(map[string]any{"success":true,"path":input.NewPath})
  case "DELETE_PATH":
+  if input.Path == "" { return fmt.Errorf("INVALID_PATH: the document root cannot be deleted") }
   path, info, err := safeManagedPath(root, input.Path, false)
   if err != nil { return err }
   if info == nil { return fmt.Errorf("FILE_NOT_FOUND: selected item does not exist") }
