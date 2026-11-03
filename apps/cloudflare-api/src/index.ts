@@ -166,6 +166,30 @@ app.post("/v1/auth/register", async (c) => {
     return c.json({ message: "Password must be between 12 and 128 characters" }, 400);
   }
 
+  // Limit workspace creation by source IP to reduce automated public sign-up abuse.
+  const registrationIp = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const registrationBucket = await sha256("register|" + registrationIp);
+  const registrationLimit = await c.env.DB.prepare(
+    "SELECT attempts, window_start AS windowStart, blocked_until AS blockedUntil FROM login_attempts WHERE bucket_key = ?",
+  ).bind(registrationBucket).first<{ attempts: number; windowStart: string; blockedUntil: string | null }>();
+  const registrationNow = Date.now();
+  if (registrationLimit?.blockedUntil && Date.parse(registrationLimit.blockedUntil) > registrationNow) {
+    return c.json({ message: "Too many workspace registrations from this network. Try again later." }, 429);
+  }
+  const registrationWindowExpired = !registrationLimit || registrationNow - Date.parse(registrationLimit.windowStart) >= 60 * 60 * 1000;
+  const registrationAttempts = registrationWindowExpired ? 1 : registrationLimit.attempts + 1;
+  const registrationBlockedUntil = registrationAttempts >= 5
+    ? new Date(registrationNow + 60 * 60 * 1000).toISOString()
+    : null;
+  await c.env.DB.prepare(
+    `INSERT INTO login_attempts (id, bucket_key, attempts, window_start, blocked_until, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(bucket_key) DO UPDATE SET attempts = excluded.attempts,
+     window_start = excluded.window_start, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at`,
+  ).bind(crypto.randomUUID(), registrationBucket, registrationAttempts,
+    registrationWindowExpired ? new Date(registrationNow).toISOString() : registrationLimit.windowStart,
+    registrationBlockedUntil, new Date(registrationNow).toISOString()).run();
+
   const userId = crypto.randomUUID();
   const organizationId = crypto.randomUUID();
   const membershipId = crypto.randomUUID();
