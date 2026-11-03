@@ -42,6 +42,14 @@ async function proxy(
     return NextResponse.json({ message: "Not found" }, { status: 404 });
   }
 
+  if (method === "POST") {
+    const origin = request.headers.get("origin");
+    let sameOrigin = false;
+    try { sameOrigin = !!origin && new URL(origin).origin === request.nextUrl.origin; }
+    catch { sameOrigin = false; }
+    if (!sameOrigin) return NextResponse.json({ message: "Cross-origin request rejected" }, { status: 403 });
+  }
+
   const token = request.cookies.get(COOKIE_NAME)?.value;
   if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
