@@ -3,8 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"strings"
+	"syscall"
 	"testing"
 )
 
