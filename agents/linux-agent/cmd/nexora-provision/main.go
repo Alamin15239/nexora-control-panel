@@ -525,19 +525,12 @@ func safeOutput(value string) string {
 }
 
 
-func configurePHPFPM(username string) error {
-	if _, err := os.Stat("/usr/bin/php"); err != nil {
-		if err := runFixed("/usr/bin/apt-get", "update"); err != nil { return fmt.Errorf("PHP_PACKAGE_INDEX_FAILED: %s", safeOutput(err.Error())) }
-		if err := runFixed("/usr/bin/apt-get", "install", "-y", "php-fpm", "php-cli"); err != nil { return fmt.Errorf("PHP_INSTALL_FAILED: %s", safeOutput(err.Error())) }
-	}
-	versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
-	if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect installed PHP version") }
-	version := strings.TrimSpace(string(versionOutput))
-	if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) { return fmt.Errorf("PHP_VERSION_FAILED: detected PHP version is invalid") }
-	poolDir := filepath.Join("/etc/php", version, "fpm", "pool.d")
-	if info, err := os.Stat(poolDir); err != nil || !info.IsDir() { return fmt.Errorf("PHP_POOL_DIRECTORY_MISSING: PHP-FPM pool directory is unavailable") }
-	poolPath := filepath.Join(poolDir, "nexora-"+username+".conf")
-	pool := fmt.Sprintf(`[nexora-%s]
+const phpFPMDisabledFunctions = "exec,shell_exec,system,passthru,proc_open,popen,pcntl_exec"
+
+// phpFPMPoolConfig keeps account-specific PHP restrictions in the dedicated
+// FPM pool rather than changing the server-wide PHP configuration.
+func phpFPMPoolConfig(username string) string {
+	return fmt.Sprintf(`[nexora-%s]
 user = %s
 group = %s
 listen = /run/php/nexora-%s.sock
@@ -552,8 +545,24 @@ chdir = /
 clear_env = yes
 security.limit_extensions = .php
 php_admin_flag[allow_url_include] = off
+php_admin_value[disable_functions] = %s
 php_admin_value[open_basedir] = /home/%s:/tmp:/usr/share/php
-`, username, username, username, username, username)
+`, username, username, username, username, phpFPMDisabledFunctions, username)
+}
+
+func configurePHPFPM(username string) error {
+	if _, err := os.Stat("/usr/bin/php"); err != nil {
+		if err := runFixed("/usr/bin/apt-get", "update"); err != nil { return fmt.Errorf("PHP_PACKAGE_INDEX_FAILED: %s", safeOutput(err.Error())) }
+		if err := runFixed("/usr/bin/apt-get", "install", "-y", "php-fpm", "php-cli"); err != nil { return fmt.Errorf("PHP_INSTALL_FAILED: %s", safeOutput(err.Error())) }
+	}
+	versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
+	if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect installed PHP version") }
+	version := strings.TrimSpace(string(versionOutput))
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) { return fmt.Errorf("PHP_VERSION_FAILED: detected PHP version is invalid") }
+	poolDir := filepath.Join("/etc/php", version, "fpm", "pool.d")
+	if info, err := os.Stat(poolDir); err != nil || !info.IsDir() { return fmt.Errorf("PHP_POOL_DIRECTORY_MISSING: PHP-FPM pool directory is unavailable") }
+	poolPath := filepath.Join(poolDir, "nexora-"+username+".conf")
+	pool := phpFPMPoolConfig(username)
 	if err := writeAtomicRootFile(poolPath, pool, 0640); err != nil { return fmt.Errorf("PHP_POOL_CONFIG_FAILED: %s", safeOutput(err.Error())) }
 	service := "php" + version + "-fpm"
 	if err := runFixed("/usr/bin/systemctl", "enable", "--now", service); err != nil { return fmt.Errorf("PHP_FPM_SERVICE_FAILED: %s", safeOutput(err.Error())) }
