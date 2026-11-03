@@ -85,29 +85,29 @@ export default function DatabasesPage() {
       <button onClick={() => { void load(); if (selected) void loadUsers(selected); }} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"><RefreshCw size={15}/> Refresh</button>
     </div></header>
     <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
-      <div><p className="text-sm font-medium text-blue-700">Customer resources</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Databases</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Create customer database requests and manage database-user access policies.</p></div>
+      <div><p className="text-sm font-medium text-blue-700">Customer resources</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Databases</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">View database records and access policies. Provisioning controls remain unavailable until the Linux database service is installed and secured.</p></div>
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
       <div className="grid gap-4 sm:grid-cols-3"><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Databases</p><p className="mt-2 text-3xl font-semibold">{databases.length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Active</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="ACTIVE").length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Pending provisioning</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="PENDING").length}</p></div></div>
       <div className="grid gap-6 xl:grid-cols-2">
         <form onSubmit={createDatabase} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-slate-500">Database creation is queued for the selected hosting account.</p>
+          <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-amber-700">Unavailable: database-engine provisioning is not installed on the connected Linux agent yet.</p>
           <div className="mt-5 space-y-4">
             <label className="block text-xs font-medium text-slate-600">Database name<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={name} onChange={e=>setName(e.target.value.toLowerCase())} placeholder="customer_db" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
             <label className="block text-xs font-medium text-slate-600">Hosting account<select required value={accountId} onChange={e=>setAccountId(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select account</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.username} · {a.status}</option>)}</select></label>
             <label className="block text-xs font-medium text-slate-600">Database engine<select value={engine} onChange={e=>setEngine(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="MYSQL">MySQL</option><option value="MARIADB">MariaDB</option><option value="POSTGRESQL">PostgreSQL</option></select></label>
           </div>
-          <button disabled={busy || !accounts.length} className="mt-5 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{busy?"Please wait…":"Queue database creation"}</button>
+          <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database provisioning unavailable</button>
           {!accounts.length && <p className="mt-3 text-xs text-amber-700">Create a hosting account before adding a database.</p>}
         </form>
         <form onSubmit={createUser} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-slate-500">Create a user request with least-privilege access for one database.</p>
+          <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-amber-700">Unavailable: secure database-user creation and password delivery are not implemented yet.</p>
           <div className="mt-5 space-y-4">
             <label className="block text-xs font-medium text-slate-600">Database<select required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
             <label className="block text-xs font-medium text-slate-600">Database username<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
             <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
           </div>
-          <button disabled={busy || !selected || !privileges.length} className="mt-5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">Queue database user</button>
+          <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database-user provisioning unavailable</button>
         </form>
       </div>
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -117,7 +117,7 @@ export default function DatabasesPage() {
       <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>
         {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{u.status}</span></div>)}</div>}
       </section>
-      <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><ShieldCheck size={14} className="mt-0.5 shrink-0"/> Requests remain pending until a connected Linux agent provisions them. Nexora does not store database passwords; credential creation and delivery require a secure agent workflow.</p>
+      <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><ShieldCheck size={14} className="mt-0.5 shrink-0"/> Database inventory is read-only until a database service is installed. Database passwords must be generated and delivered through a one-time secure workflow; they must never be stored in job results or ordinary audit logs.</p>
     </section>
   </main>;
 }
