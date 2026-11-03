@@ -77,8 +77,8 @@ async function issueSession(db: D1DatabaseLike, userId: string, organizationId: 
   const token = randomHex(32);
   const expiresAt = new Date(Date.now() + SESSION_SECONDS * 1000).toISOString();
   await db.prepare(
-    "INSERT INTO auth_sessions (id, user_id, token_id, token_hash, expires_at) VALUES (?, ?, ?, ?, ?)",
-  ).bind(crypto.randomUUID(), userId, crypto.randomUUID(), await sha256(token), expiresAt).run();
+    "INSERT INTO auth_sessions (id, user_id, organization_id, token_id, token_hash, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+  ).bind(crypto.randomUUID(), userId, organizationId, crypto.randomUUID(), await sha256(token), expiresAt).run();
   return { accessToken: token, tokenType: "Bearer", expiresIn: SESSION_SECONDS, organizationId, role };
 }
 function sessionCookie(response: NextResponse, token: string) {
@@ -93,6 +93,12 @@ function clearSessionCookie(response: NextResponse) {
 }
 
 export async function POST(request: NextRequest, context: { params: Promise<{ action: string }> }) {
+  const origin = request.headers.get("origin");
+  let sameOrigin = false;
+  try { sameOrigin = !!origin && new URL(origin).origin === request.nextUrl.origin; }
+  catch { sameOrigin = false; }
+  if (!sameOrigin) return NextResponse.json({ message: "Cross-origin request rejected" }, { status: 403 });
+
   const { action } = await context.params;
   if (!["login", "register", "logout"].includes(action)) {
     return NextResponse.json({ message: "Not found" }, { status: 404 });
@@ -138,6 +144,29 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
       if (password.length < 12 || password.length > 128) {
         return NextResponse.json({ message: "Password must be between 12 and 128 characters" }, { status: 400 });
       }
+
+      const registrationIp = request.headers.get("CF-Connecting-IP") ?? "unknown";
+      const registrationBucket = await sha256("register|" + registrationIp);
+      const registrationLimit = await db.prepare(
+        "SELECT attempts, window_start AS windowStart, blocked_until AS blockedUntil FROM login_attempts WHERE bucket_key = ?",
+      ).bind(registrationBucket).first<{ attempts: number; windowStart: string; blockedUntil: string | null }>();
+      const registrationNow = Date.now();
+      if (registrationLimit?.blockedUntil && Date.parse(registrationLimit.blockedUntil) > registrationNow) {
+        return NextResponse.json({ message: "Too many workspace registrations from this network. Try again later." }, { status: 429 });
+      }
+      const registrationWindowExpired = !registrationLimit || registrationNow - Date.parse(registrationLimit.windowStart) >= 60 * 60 * 1000;
+      const registrationAttempts = registrationWindowExpired ? 1 : registrationLimit.attempts + 1;
+      const registrationBlockedUntil = registrationAttempts >= 5
+        ? new Date(registrationNow + 60 * 60 * 1000).toISOString()
+        : null;
+      await db.prepare(
+        `INSERT INTO login_attempts (id, bucket_key, attempts, window_start, blocked_until, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(bucket_key) DO UPDATE SET attempts = excluded.attempts,
+         window_start = excluded.window_start, blocked_until = excluded.blocked_until, updated_at = excluded.updated_at`,
+      ).bind(crypto.randomUUID(), registrationBucket, registrationAttempts,
+        registrationWindowExpired ? new Date(registrationNow).toISOString() : registrationLimit.windowStart,
+        registrationBlockedUntil, new Date(registrationNow).toISOString()).run();
 
       const userId = crypto.randomUUID();
       const organizationId = crypto.randomUUID();
@@ -250,8 +279,8 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
               m.role
        FROM auth_sessions s
        JOIN users u ON u.id = s.user_id
-       JOIN memberships m ON m.user_id = u.id
-       JOIN organizations o ON o.id = m.organization_id
+       JOIN memberships m ON m.user_id = u.id AND m.organization_id = s.organization_id
+       JOIN organizations o ON o.id = s.organization_id
        WHERE s.token_hash = ? AND s.revoked_at IS NULL
          AND s.expires_at > ? AND u.status = 'ACTIVE' AND o.status = 'ACTIVE'
        LIMIT 1`,
