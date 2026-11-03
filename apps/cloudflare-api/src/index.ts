@@ -979,7 +979,8 @@ app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; hostnameId: string | null; organizationId: string }>();
   if (!domain) return c.json({ message: "Domain not found" }, 404);
 
-  const target = (c.env.CLOUDFLARE_SAAS_TARGET || "customers.nexoraedge.digital").trim().toLowerCase();
+  const target = (c.env.CLOUDFLARE_SAAS_TARGET || "").trim().toLowerCase();
+  if (!target) return c.json({ message: "Cloudflare for SaaS is not fully configured. Set CLOUDFLARE_SAAS_TARGET to the exact CNAME target shown in your Cloudflare for SaaS settings." }, 503);
   if (!validDomain(target)) return c.json({ message: "The configured Cloudflare SaaS CNAME target is invalid." }, 503);
   try {
     let current: CloudflareHostnameResponse;
