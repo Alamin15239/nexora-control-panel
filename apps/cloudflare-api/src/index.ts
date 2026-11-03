@@ -3,6 +3,9 @@ import { Hono } from "hono";
 type Bindings = {
   DB: D1Database;
   ALLOW_PUBLIC_REGISTRATION?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ZONE_ID?: string;
+  CLOUDFLARE_SAAS_TARGET?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -883,6 +886,147 @@ app.post("/v1/domains", async (c) => {
   try { await c.env.DB.batch(statements); }
   catch (error) { const message = error instanceof Error ? error.message : ""; if (/UNIQUE constraint failed: domains.name/i.test(message)) return c.json({ message: "This domain is already registered." }, 409); return c.json({ message: "Unable to save this domain." }, 500); }
   return c.json({ domain: { id, name, document_root: root, is_primary: primary ? 1 : 0, hosting_account_id: account.id, username: account.username, account_status: account.status }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Domain saved. Server configuration is queued and awaits a connected Linux agent." }, 201);
+});
+
+
+type CloudflareHostnameResponse = {
+  success?: boolean;
+  errors?: Array<{ message?: string }>;
+  result?: {
+    id?: string;
+    hostname?: string;
+    status?: string;
+    ssl?: { status?: string; method?: string; validation_records?: unknown[] };
+    ownership_verification?: { name?: string; type?: string; value?: string };
+    ownership_verification_http?: { http_url?: string; http_body?: string };
+    verification_errors?: string[];
+  };
+};
+
+async function cloudflareHostnameRequest(
+  env: Bindings,
+  hostnameId: string | null,
+  method: "GET" | "POST",
+  body?: Record<string, unknown>,
+): Promise<CloudflareHostnameResponse> {
+  if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {
+    throw new Error("Cloudflare custom hostname integration is not configured. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID as Worker secrets.");
+  }
+  const endpoint = hostnameId
+    ? `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(env.CLOUDFLARE_ZONE_ID)}/custom_hostnames/${encodeURIComponent(hostnameId)}`
+    : `https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(env.CLOUDFLARE_ZONE_ID)}/custom_hostnames`;
+  const response = await fetch(endpoint, {
+    method,
+    headers: {
+      authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+      accept: "application/json",
+      ...(body ? { "content-type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(12000),
+  });
+  const payload = await response.json() as CloudflareHostnameResponse;
+  if (!response.ok || payload.success !== true || !payload.result) {
+    const detail = payload.errors?.map((item) => item.message).filter(Boolean).join("; ");
+    throw new Error(detail || `Cloudflare API returned HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+async function saveCloudflareHostnameState(
+  db: D1Database,
+  domainId: string,
+  response: CloudflareHostnameResponse,
+  target: string,
+) {
+  const result = response.result!;
+  const validation = {
+    ownershipVerification: result.ownership_verification ?? null,
+    ownershipVerificationHttp: result.ownership_verification_http ?? null,
+    sslValidationRecords: result.ssl?.validation_records ?? [],
+    verificationErrors: result.verification_errors ?? [],
+  };
+  await db.prepare(
+    `UPDATE domains SET cloudflare_custom_hostname_id = ?,
+       cloudflare_hostname_status = ?, cloudflare_ssl_status = ?,
+       cloudflare_validation_records = ?, cloudflare_cname_target = ?,
+       cloudflare_last_checked_at = ?, cloudflare_error = NULL, updated_at = ?
+     WHERE id = ?`,
+  ).bind(
+    result.id ?? null, result.status ?? "pending", result.ssl?.status ?? "pending",
+    JSON.stringify(validation), target, new Date().toISOString(), new Date().toISOString(), domainId,
+  ).run();
+  return {
+    id: result.id ?? null,
+    hostname: result.hostname ?? null,
+    hostnameStatus: result.status ?? "pending",
+    sslStatus: result.ssl?.status ?? "pending",
+    cnameTarget: target,
+    validation,
+    ready: result.status === "active" && result.ssl?.status === "active",
+  };
+}
+
+app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const domain = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.cloudflare_custom_hostname_id AS hostnameId,
+            a.organization_id AS organizationId
+     FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     WHERE d.id = ? AND a.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; hostnameId: string | null; organizationId: string }>();
+  if (!domain) return c.json({ message: "Domain not found" }, 404);
+
+  const target = (c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital").trim().toLowerCase();
+  if (!validDomain(target)) return c.json({ message: "The configured Cloudflare SaaS CNAME target is invalid." }, 503);
+  try {
+    let current: CloudflareHostnameResponse;
+    if (domain.hostnameId) {
+      current = await cloudflareHostnameRequest(c.env, domain.hostnameId, "GET");
+    } else {
+      const created = await cloudflareHostnameRequest(c.env, null, "POST", {
+        hostname: domain.name,
+        ssl: { method: "txt", type: "dv", settings: { min_tls_version: "1.2" } },
+        custom_metadata: { nexora_domain_id: domain.id, nexora_organization_id: identity.organizationId },
+      });
+      const id = created.result?.id;
+      if (!id) throw new Error("Cloudflare created the hostname but did not return its identifier.");
+      // Cloudflare may omit validation records from POST; retrieve the full record.
+      current = await cloudflareHostnameRequest(c.env, id, "GET");
+    }
+    const state = await saveCloudflareHostnameState(c.env.DB, domain.id, current, target);
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.cloudflare_hostname_synced', 'domain', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ hostnameStatus: state.hostnameStatus, sslStatus: state.sslStatus })).run();
+    return c.json({ cloudflare: state, message: state.ready ? "Hostname and SSL certificate are active." : "Cloudflare hostname registered. Complete the displayed DNS validation steps, then refresh its status." }, domain.hostnameId ? 200 : 201);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Cloudflare hostname operation failed";
+    await c.env.DB.prepare("UPDATE domains SET cloudflare_error = ?, cloudflare_last_checked_at = ? WHERE id = ?")
+      .bind(message.slice(0, 500), new Date().toISOString(), domain.id).run();
+    return c.json({ message }, 502);
+  }
+});
+
+app.get("/v1/domains/:id/cloudflare-hostname", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const domain = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.cloudflare_custom_hostname_id AS hostnameId,
+            d.cloudflare_cname_target AS cnameTarget, d.cloudflare_error AS cloudflareError
+     FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     WHERE d.id = ? AND a.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; hostnameId: string | null; cnameTarget: string | null; cloudflareError: string | null }>();
+  if (!domain) return c.json({ message: "Domain not found" }, 404);
+  if (!domain.hostnameId) return c.json({ cloudflare: { hostnameStatus: "NOT_CREATED", sslStatus: "NOT_CREATED", cnameTarget: c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital", error: domain.cloudflareError } });
+  try {
+    const current = await cloudflareHostnameRequest(c.env, domain.hostnameId, "GET");
+    const state = await saveCloudflareHostnameState(c.env.DB, domain.id, current, domain.cnameTarget || c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital");
+    return c.json({ cloudflare: state });
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Unable to refresh Cloudflare status" }, 502);
+  }
 });
 
 app.post("/v1/domains/:id/retry", async (c) => {
