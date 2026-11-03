@@ -107,3 +107,51 @@ func TestOpenDirectoryChainRejectsSymlinkComponents(t *testing.T) {
   t.Fatal("expected symlink directory component to be rejected")
  }
 }
+
+func TestCreateDefaultIndexForEmptyDomainRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := createDefaultIndexForEmptyDomain(root, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != defaultIndexHTML {
+		t.Fatalf("unexpected starter homepage: %q", string(got))
+	}
+}
+
+func TestCreateDefaultIndexPreservesExistingCustomerFiles(t *testing.T) {
+	root := t.TempDir()
+	customFile := filepath.Join(root, "app.php")
+	if err := os.WriteFile(customFile, []byte("<?php echo 'customer';"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDefaultIndexForEmptyDomain(root, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "index.html")); !os.IsNotExist(err) {
+		t.Fatalf("starter homepage should not be created in a non-empty document root; stat error=%v", err)
+	}
+	got, err := os.ReadFile(customFile)
+	if err != nil || string(got) != "<?php echo 'customer';" {
+		t.Fatalf("customer file was changed: %q err=%v", string(got), err)
+	}
+}
+
+func TestCreateDefaultIndexDoesNotOverwriteExistingHomepage(t *testing.T) {
+	root := t.TempDir()
+	index := filepath.Join(root, "index.html")
+	custom := []byte("<h1>Existing customer homepage</h1>")
+	if err := os.WriteFile(index, custom, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDefaultIndexForEmptyDomain(root, os.Getuid(), os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(index)
+	if err != nil || string(got) != string(custom) {
+		t.Fatalf("existing homepage was changed: %q err=%v", string(got), err)
+	}
+}
