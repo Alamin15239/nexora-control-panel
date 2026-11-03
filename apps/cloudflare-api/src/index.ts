@@ -592,6 +592,35 @@ app.post("/v1/hosting-plans", async (c) => {
 });
 
 
+app.post("/v1/hosting-plans/:id/website-limit", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const websiteLimit = Number(input.websiteLimit);
+  if (!Number.isInteger(websiteLimit) || websiteLimit < 1 || websiteLimit > 10000) {
+    return c.json({ message: "Website limit must be a whole number between 1 and 10,000." }, 400);
+  }
+
+  const planId = c.req.param("id");
+  const plan = await c.env.DB.prepare(
+    "SELECT id, name, website_limit FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(planId, identity.organizationId).first<{ id: string; name: string; website_limit: number }>();
+  if (!plan) return c.json({ message: "Hosting plan not found in this workspace." }, 404);
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_plans SET website_limit = ?, updated_at = ? WHERE id = ? AND organization_id = ?")
+      .bind(websiteLimit, new Date().toISOString(), planId, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_plan.website_limit_updated', 'hosting_plan', ?, ?)")
+      .bind(crypto.randomUUID(), identity.organizationId, identity.id, planId, JSON.stringify({ previous: plan.website_limit, current: websiteLimit })),
+  ]);
+  return c.json({ plan: { id: plan.id, name: plan.name, website_limit: websiteLimit } });
+});
+
+
 type HostingAccountRow = {
   id: string; username: string; primary_domain: string | null; status: string;
   created_at: string; server_id: string; server_hostname: string;
