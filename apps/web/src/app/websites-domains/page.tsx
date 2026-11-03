@@ -6,7 +6,7 @@ import { ArrowLeft, CircleAlert, Globe2, Plus, RefreshCw } from "lucide-react";
 
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Domain = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null; cloudflare_custom_hostname_id?: string | null; cloudflare_hostname_status?: string | null; cloudflare_ssl_status?: string | null; cloudflare_cname_target?: string | null; cloudflare_error?: string | null };
-type CloudflareState = { hostnameStatus?: string; sslStatus?: string; cnameTarget?: string; ready?: boolean; validation?: { ownershipVerification?: { name?: string; type?: string; value?: string } | null; sslValidationRecords?: Array<{ txt_name?: string; txt_value?: string; cname?: string; cname_target?: string; status?: string }> }; error?: string };
+type CloudflareState = { hostnameStatus?: string; sslStatus?: string; cnameTarget?: string; ready?: boolean; validation?: { ownershipVerification?: { name?: string; type?: string; value?: string } | null; sslValidationRecords?: Array<{ txt_name?: string; txt_value?: string; cname?: string; cname_target?: string; status?: string }>; sslValidationErrors?: unknown[] }; error?: string };
 type DnsCheck = { status: string; expectedAddress?: string; observedAddresses?: string[]; message: string; records?: Array<{ type: string; name: string; value: string }> };
 const blank = { name: "", accountId: "", documentRoot: "", isPrimary: false };
 
