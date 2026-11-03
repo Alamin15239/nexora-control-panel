@@ -846,7 +846,11 @@ app.post("/v1/domains", async (c) => {
   statements.push(c.env.DB.prepare("INSERT INTO domains (id, hosting_account_id, name, document_root, is_primary) VALUES (?, ?, ?, ?, ?)").bind(id, account.id, name, root, primary ? 1 : 0));
   statements.push(c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'ADD_DOMAIN', 'QUEUED', ?)").bind(jobId, account.id, "add-domain:" + id));
   statements.push(c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'domain.create_requested', 'domain', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, id));
-  try { await c.env.DB.batch(statements); if (primary) await c.env.DB.prepare("UPDATE hosting_accounts SET primary_domain = ? WHERE id = ?").bind(name, account.id).run(); }
+  if (primary) {
+    statements.push(c.env.DB.prepare("UPDATE hosting_accounts SET primary_domain = ?, updated_at = ? WHERE id = ? AND organization_id = ?")
+      .bind(name, new Date().toISOString(), account.id, identity.organizationId));
+  }
+  try { await c.env.DB.batch(statements); }
   catch (error) { const message = error instanceof Error ? error.message : ""; if (/UNIQUE constraint failed: domains.name/i.test(message)) return c.json({ message: "This domain is already registered." }, 409); return c.json({ message: "Unable to save this domain." }, 500); }
   return c.json({ domain: { id, name, document_root: root, is_primary: primary ? 1 : 0, hosting_account_id: account.id, username: account.username, account_status: account.status }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Domain saved. Server configuration is queued and awaits a connected Linux agent." }, 201);
 });
