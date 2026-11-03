@@ -4,6 +4,7 @@ compatibility_date = "2026-11-02"
 
 [vars]
 ALLOW_PUBLIC_REGISTRATION = "true"
+CLOUDFLARE_ZONE_NAME = "nexoraedge.digital"
 
 [observability]
 enabled = true
