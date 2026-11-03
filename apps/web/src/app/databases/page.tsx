@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Database, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
 
@@ -20,7 +20,6 @@ export default function DatabasesPage() {
   const [username, setUsername] = useState("");
   const [privileges, setPrivileges] = useState<string[]>(["SELECT", "INSERT", "UPDATE", "DELETE"]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -54,30 +53,6 @@ export default function DatabasesPage() {
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { void loadUsers(selected); }, [selected, loadUsers]);
 
-  async function createDatabase(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy(true); setError(""); setNotice("");
-    try {
-      const response = await fetch("/api/control/databases", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, accountId, engine }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Unable to queue database");
-      setNotice(data.message); setName(""); await load();
-      if (data.database?.id) setSelected(data.database.id);
-    } catch (e) { setError(e instanceof Error ? e.message : "Unable to create database"); }
-    finally { setBusy(false); }
-  }
-
-  async function createUser(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!selected) return;
-    setBusy(true); setError(""); setNotice("");
-    try {
-      const response = await fetch(`/api/control/databases/${selected}/users`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, privileges }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Unable to queue database user");
-      setNotice(data.message); setUsername(""); await loadUsers(selected); await load();
-    } catch (e) { setError(e instanceof Error ? e.message : "Unable to add database user"); }
-    finally { setBusy(false); }
-  }
-
   const current = databases.find(d => d.id === selected);
   return <main className="min-h-screen bg-slate-50 text-slate-900">
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
@@ -90,22 +65,22 @@ export default function DatabasesPage() {
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
       <div className="grid gap-4 sm:grid-cols-3"><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Databases</p><p className="mt-2 text-3xl font-semibold">{databases.length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Active</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="ACTIVE").length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Pending provisioning</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="PENDING").length}</p></div></div>
       <div className="grid gap-6 xl:grid-cols-2">
-        <form onSubmit={createDatabase} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-amber-700">Unavailable: database-engine provisioning is not installed on the connected Linux agent yet.</p>
           <div className="mt-5 space-y-4">
-            <label className="block text-xs font-medium text-slate-600">Database name<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={name} onChange={e=>setName(e.target.value.toLowerCase())} placeholder="customer_db" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
-            <label className="block text-xs font-medium text-slate-600">Hosting account<select required value={accountId} onChange={e=>setAccountId(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select account</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.username} · {a.status}</option>)}</select></label>
-            <label className="block text-xs font-medium text-slate-600">Database engine<select value={engine} onChange={e=>setEngine(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="MYSQL">MySQL</option><option value="MARIADB">MariaDB</option><option value="POSTGRESQL">PostgreSQL</option></select></label>
+            <label className="block text-xs font-medium text-slate-600">Database name<input disabled required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={name} onChange={e=>setName(e.target.value.toLowerCase())} placeholder="customer_db" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
+            <label className="block text-xs font-medium text-slate-600">Hosting account<select disabled required value={accountId} onChange={e=>setAccountId(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select account</option>{accounts.map(a=><option key={a.id} value={a.id}>{a.username} · {a.status}</option>)}</select></label>
+            <label className="block text-xs font-medium text-slate-600">Database engine<select disabled value={engine} onChange={e=>setEngine(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="MYSQL">MySQL</option><option value="MARIADB">MariaDB</option><option value="POSTGRESQL">PostgreSQL</option></select></label>
           </div>
           <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database provisioning unavailable</button>
           {!accounts.length && <p className="mt-3 text-xs text-amber-700">Create a hosting account before adding a database.</p>}
         </form>
-        <form onSubmit={createUser} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-amber-700">Unavailable: secure database-user creation and password delivery are not implemented yet.</p>
           <div className="mt-5 space-y-4">
-            <label className="block text-xs font-medium text-slate-600">Database<select required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
-            <label className="block text-xs font-medium text-slate-600">Database username<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
-            <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
+            <label className="block text-xs font-medium text-slate-600">Database<select disabled required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
+            <label className="block text-xs font-medium text-slate-600">Database username<input disabled required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
+            <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" disabled checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
           </div>
           <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database-user provisioning unavailable</button>
         </form>
