@@ -649,9 +649,10 @@ app.post("/v1/hosting-accounts", async (c) => {
   if (!server) return c.json({ message: "Select a server in your active workspace." }, 404);
 
   const plan = await c.env.DB.prepare(
-    "SELECT id, name, active FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1",
-  ).bind(planId, identity.organizationId).first<{ id: string; name: string; active: number }>();
+    "SELECT id, name, active, website_limit FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(planId, identity.organizationId).first<{ id: string; name: string; active: number; website_limit: number }>();
   if (!plan || plan.active !== 1) return c.json({ message: "Select an active hosting plan in your workspace." }, 404);
+  if (primaryDomain && plan.website_limit < 1) return c.json({ message: "This hosting plan does not include a website slot." }, 409);
 
   const id = crypto.randomUUID();
   const jobId = crypto.randomUUID();
@@ -853,8 +854,14 @@ app.post("/v1/domains", async (c) => {
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const accountId = typeof input.accountId === "string" ? input.accountId : "";
   const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
-  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
+  const account = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.status, p.website_limit,
+            (SELECT COUNT(*) FROM domains d WHERE d.hosting_account_id = a.id) AS website_count
+     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string; website_limit: number; website_count: number }>();
   if (!account) return c.json({ message: "Select an active hosting account in this workspace before adding a domain." }, 404);
+  if (account.website_count >= account.website_limit) return c.json({ message: "This hosting plan has reached its website limit." }, 409);
   if (!validDomain(name)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
   const suppliedRoot = typeof input.documentRoot === "string" ? input.documentRoot.trim() : "";
   const accountWebRoot = "/home/" + account.username + "/public_html";
