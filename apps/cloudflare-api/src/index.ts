@@ -842,7 +842,7 @@ app.get("/v1/domains", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const result = await c.env.DB.prepare(
-    "SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname, " +
+    "SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, d.cloudflare_custom_hostname_id, d.cloudflare_hostname_status, d.cloudflare_ssl_status, d.cloudflare_cname_target, d.cloudflare_error, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname, " +
     "(SELECT j.status FROM provisioning_jobs j WHERE j.idempotency_key = 'add-domain:' || d.id AND j.operation = 'ADD_DOMAIN' LIMIT 1) AS job_status " +
     "FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id JOIN servers s ON s.id = a.server_id " +
     "WHERE a.organization_id = ? ORDER BY d.created_at DESC",
@@ -993,6 +993,11 @@ app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
       });
       const id = created.result?.id;
       if (!id) throw new Error("Cloudflare created the hostname but did not return its identifier.");
+      // Persist the identifier before the follow-up GET so a transient read failure
+      // cannot cause a retry to create a duplicate custom hostname.
+      await c.env.DB.prepare(
+        "UPDATE domains SET cloudflare_custom_hostname_id = ?, cloudflare_hostname_status = ?, cloudflare_ssl_status = ?, cloudflare_cname_target = ?, cloudflare_last_checked_at = ?, cloudflare_error = NULL WHERE id = ?",
+      ).bind(id, created.result?.status ?? "pending", created.result?.ssl?.status ?? "pending", target, new Date().toISOString(), domain.id).run();
       // Cloudflare may omit validation records from POST; retrieve the full record.
       current = await cloudflareHostnameRequest(c.env, id, "GET");
     }
