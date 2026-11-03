@@ -979,7 +979,7 @@ app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; hostnameId: string | null; organizationId: string }>();
   if (!domain) return c.json({ message: "Domain not found" }, 404);
 
-  const target = (c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital").trim().toLowerCase();
+  const target = (c.env.CLOUDFLARE_SAAS_TARGET || "customers.nexoraedge.digital").trim().toLowerCase();
   if (!validDomain(target)) return c.json({ message: "The configured Cloudflare SaaS CNAME target is invalid." }, 503);
   try {
     let current: CloudflareHostnameResponse;
@@ -1024,10 +1024,10 @@ app.get("/v1/domains/:id/cloudflare-hostname", async (c) => {
      WHERE d.id = ? AND a.organization_id = ? LIMIT 1`,
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; hostnameId: string | null; cnameTarget: string | null; cloudflareError: string | null }>();
   if (!domain) return c.json({ message: "Domain not found" }, 404);
-  if (!domain.hostnameId) return c.json({ cloudflare: { hostnameStatus: "NOT_CREATED", sslStatus: "NOT_CREATED", cnameTarget: c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital", error: domain.cloudflareError } });
+  if (!domain.hostnameId) return c.json({ cloudflare: { hostnameStatus: "NOT_CREATED", sslStatus: "NOT_CREATED", cnameTarget: c.env.CLOUDFLARE_SAAS_TARGET || "customers.nexoraedge.digital", error: domain.cloudflareError } });
   try {
     const current = await cloudflareHostnameRequest(c.env, domain.hostnameId, "GET");
-    const state = await saveCloudflareHostnameState(c.env.DB, domain.id, current, domain.cnameTarget || c.env.CLOUDFLARE_SAAS_TARGET || "proxy-fallback.nexoraedge.digital");
+    const state = await saveCloudflareHostnameState(c.env.DB, domain.id, current, domain.cnameTarget || c.env.CLOUDFLARE_SAAS_TARGET || "customers.nexoraedge.digital");
     return c.json({ cloudflare: state });
   } catch (error) {
     return c.json({ message: error instanceof Error ? error.message : "Unable to refresh Cloudflare status" }, 502);
