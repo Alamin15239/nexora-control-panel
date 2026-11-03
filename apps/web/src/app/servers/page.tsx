@@ -81,18 +81,9 @@ export default function ServersPage() {
 
   useEffect(() => { void loadServers(); }, [loadServers]);
 
-  async function openTelemetry(serverId: string) {
-    if (selectedServerId === serverId) {
-      setSelectedServerId("");
-      setTelemetry(null);
-      setTelemetryError("");
-      return;
-    }
-
-    setSelectedServerId(serverId);
-    setTelemetry(null);
-    setTelemetryError("");
+  const refreshTelemetry = useCallback(async (serverId: string) => {
     setTelemetryLoading(true);
+    setTelemetryError("");
     try {
       const response = await fetch(`/api/control/servers/${serverId}/telemetry`, { cache: "no-store" });
       const data = await response.json();
@@ -103,7 +94,28 @@ export default function ServersPage() {
     } finally {
       setTelemetryLoading(false);
     }
+  }, []);
+
+  async function openTelemetry(serverId: string) {
+    if (selectedServerId === serverId) {
+      setSelectedServerId("");
+      setTelemetry(null);
+      setTelemetryError("");
+      return;
+    }
+
+    setSelectedServerId(serverId);
+    setTelemetry(null);
+    await refreshTelemetry(serverId);
   }
+
+  useEffect(() => {
+    if (!selectedServerId) return;
+    const interval = window.setInterval(() => {
+      void refreshTelemetry(selectedServerId);
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [selectedServerId, refreshTelemetry]);
 
   async function createServer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -210,7 +222,7 @@ export default function ServersPage() {
             <h2 className="mt-1 text-lg font-semibold">{servers.find((server) => server.id === selectedServerId)?.hostname || "Selected server"}</h2>
             <p className="mt-1 text-xs text-slate-500">Latest signed agent readings and the most recent 60 samples.</p>
           </div>
-          <button onClick={() => void openTelemetry(selectedServerId)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Refresh metrics</button>
+          <button onClick={() => void refreshTelemetry(selectedServerId)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Refresh metrics</button>
         </div>
 
         {telemetryLoading && <p className="py-8 text-center text-sm text-slate-500">Loading real server measurements…</p>}
