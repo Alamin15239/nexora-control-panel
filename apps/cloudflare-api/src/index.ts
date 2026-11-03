@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { ensureSaasDnsRecord } from "./cloudflare-dns";
 
 type Bindings = {
   DB: D1Database;
   ALLOW_PUBLIC_REGISTRATION?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_DNS_API_TOKEN?: string;
   CLOUDFLARE_ZONE_ID?: string;
   CLOUDFLARE_SAAS_TARGET?: string;
 };
@@ -1031,10 +1033,16 @@ app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
       current = await cloudflareHostnameRequest(c.env, id, "GET");
     }
     const state = await saveCloudflareHostnameState(c.env.DB, domain.id, current, target);
+    let dnsProvisioning: Awaited<ReturnType<typeof ensureSaasDnsRecord>>;
+    try {
+      dnsProvisioning = await ensureSaasDnsRecord(c.env, domain.name, target);
+    } catch (dnsError) {
+      dnsProvisioning = { status: "MANUAL_REQUIRED", hostname: domain.name, target, message: dnsError instanceof Error ? dnsError.message : "DNS automation failed" };
+    }
     await c.env.DB.prepare(
       "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.cloudflare_hostname_synced', 'domain', ?, ?)",
     ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ hostnameStatus: state.hostnameStatus, sslStatus: state.sslStatus })).run();
-    return c.json({ cloudflare: state, message: state.ready ? "Hostname and SSL certificate are active." : "Cloudflare hostname registered. Complete the displayed DNS validation steps, then refresh its status." }, domain.hostnameId ? 200 : 201);
+    return c.json({ cloudflare: state, dnsProvisioning, message: state.ready ? "Hostname and SSL certificate are active." : "Cloudflare hostname registered. Complete any required DNS validation, then refresh its status." }, domain.hostnameId ? 200 : 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Cloudflare hostname operation failed";
     await c.env.DB.prepare("UPDATE domains SET cloudflare_error = ?, cloudflare_last_checked_at = ? WHERE id = ?")
