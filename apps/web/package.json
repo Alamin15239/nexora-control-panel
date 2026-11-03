@@ -16,6 +16,7 @@
   "dependencies": {
     "@opennextjs/cloudflare": "^1.20.15",
     "@swc/helpers": "0.5.15",
+    "client-only": "0.0.1",
     "lucide-react": "^0.468.0",
     "next": "^15.5.27",
     "react": "^19.0.0",
