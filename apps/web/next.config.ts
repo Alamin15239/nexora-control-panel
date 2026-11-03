@@ -1,12 +1,18 @@
-import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
-  // pnpm stores workspace dependencies at the repository root. Include that
-  // directory in Next.js output tracing so OpenNext receives complete packages.
-  outputFileTracingRoot: path.resolve(process.cwd(), "../.."),
+  // pnpm's symlinked Next.js package can be incompletely traced by nft.
+  // Include the runtime modules OpenNext needs while keeping standalone output
+  // rooted at apps/web/.next/standalone (the layout OpenNext expects).
+  outputFileTracingIncludes: {
+    "/*": [
+      "node_modules/next/dist/server/**/*",
+      "node_modules/next/dist/shared/**/*",
+      "node_modules/next/dist/compiled/**/*",
+    ],
+  },
 };
 
 export default nextConfig;
