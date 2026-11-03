@@ -32,6 +32,12 @@ async function jsonResponse(response: Response) {
 }
 
 export async function POST(request: NextRequest, context: { params: Promise<{ segments: string[] }> }) {
+  const origin = request.headers.get("origin");
+  let sameOrigin = false;
+  try { sameOrigin = !!origin && new URL(origin).origin === request.nextUrl.origin; }
+  catch { sameOrigin = false; }
+  if (!sameOrigin) return NextResponse.json({ message: "Cross-origin request rejected" }, { status: 403 });
+
   const { segments } = await context.params;
   const action = segments.join("/");
   if (!["login", "register", "logout"].includes(action)) {
