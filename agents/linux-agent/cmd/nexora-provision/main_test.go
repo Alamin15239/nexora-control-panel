@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -153,5 +154,30 @@ func TestCreateDefaultIndexDoesNotOverwriteExistingHomepage(t *testing.T) {
 	got, err := os.ReadFile(index)
 	if err != nil || string(got) != string(custom) {
 		t.Fatalf("existing homepage was changed: %q err=%v", string(got), err)
+	}
+}
+
+func TestPHPFPMPoolConfigEnforcesAccountIsolation(t *testing.T) {
+	config := phpFPMPoolConfig("client01")
+	required := []string{
+		"[nexora-client01]",
+		"user = client01",
+		"group = client01",
+		"listen = /run/php/nexora-client01.sock",
+		"listen.mode = 0660",
+		"pm = ondemand",
+		"clear_env = yes",
+		"security.limit_extensions = .php",
+		"php_admin_flag[allow_url_include] = off",
+		"php_admin_value[disable_functions] = " + phpFPMDisabledFunctions,
+		"php_admin_value[open_basedir] = /home/client01:/tmp:/usr/share/php",
+	}
+	for _, directive := range required {
+		if !strings.Contains(config, directive) {
+			t.Errorf("PHP-FPM pool config is missing %q", directive)
+		}
+	}
+	if strings.Contains(config, "/home/other-account") {
+		t.Fatal("PHP-FPM pool config contains another account's home path")
 	}
 }
