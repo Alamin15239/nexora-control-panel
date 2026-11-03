@@ -947,34 +947,6 @@ app.post("/v1/databases", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
   return c.json({ message: "Database provisioning is not enabled on this Linux agent yet. No database request was created." }, 501);
-  let input: Record<string, unknown>;
-  try { input = await c.req.json<Record<string, unknown>>(); }
-  catch { return c.json({ message: "Invalid JSON request" }, 400); }
-  const accountId = typeof input.accountId === "string" ? input.accountId : "";
-  const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
-  const engine = input.engine === "MARIADB" || input.engine === "POSTGRESQL" ? input.engine : "MYSQL";
-  if (!/^[a-z][a-z0-9_]{1,30}$/.test(name)) return c.json({ message: "Database name must be 2–31 lowercase letters, numbers or underscores, and start with a letter." }, 400);
-  const account = await c.env.DB.prepare(
-    `SELECT a.id, a.username, p.database_limit,
-       (SELECT COUNT(*) FROM hosting_databases d WHERE d.hosting_account_id = a.id AND d.status != 'DELETED') AS database_count
-     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
-     WHERE a.id = ? AND a.organization_id = ? AND a.status != 'DELETED' LIMIT 1`,
-  ).bind(accountId, identity.organizationId).first<{ id: string; username: string; database_limit: number; database_count: number }>();
-  if (!account) return c.json({ message: "Select a hosting account in this workspace." }, 404);
-  if (account.database_count >= account.database_limit) return c.json({ message: "This hosting plan has reached its database limit." }, 409);
-  const id = crypto.randomUUID(); const jobId = crypto.randomUUID();
-  try {
-    await c.env.DB.batch([
-      c.env.DB.prepare("INSERT INTO hosting_databases (id, organization_id, hosting_account_id, name, engine, status) VALUES (?, ?, ?, ?, ?, 'PENDING')").bind(id, identity.organizationId, account.id, name, engine),
-      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'CREATE_DATABASE', 'QUEUED', ?)").bind(jobId, account.id, "create-database:" + id),
-      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'database.create_requested', 'database', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
-    ]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (/UNIQUE constraint failed: hosting_databases.hosting_account_id, hosting_databases.name/i.test(message)) return c.json({ message: "A database with this name already exists for this account." }, 409);
-    return c.json({ message: "Unable to queue database creation." }, 500);
-  }
-  return c.json({ database: { id, name, engine, status: "PENDING", hosting_account_id: account.id, account_username: account.username }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Database request queued. A connected Linux agent must create it before it becomes active." }, 201);
 });
 
 app.get("/v1/databases/:id/users", async (c) => {
@@ -991,32 +963,7 @@ app.post("/v1/databases/:id/users", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
   return c.json({ message: "Database-user provisioning is not enabled on this Linux agent yet. No user request was created." }, 501);
-  const database = await c.env.DB.prepare("SELECT id, hosting_account_id FROM hosting_databases WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; hosting_account_id: string }>();
-  if (!database) return c.json({ message: "Database not found" }, 404);
-  let input: Record<string, unknown>;
-  try { input = await c.req.json<Record<string, unknown>>(); }
-  catch { return c.json({ message: "Invalid JSON request" }, 400); }
-  const username = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
-  const allowed = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX"];
-  const requested = Array.isArray(input.privileges) ? input.privileges.filter((v): v is string => typeof v === "string") : [];
-  const privileges = [...new Set(requested)].filter(v => allowed.includes(v));
-  if (!/^[a-z][a-z0-9_]{1,30}$/.test(username)) return c.json({ message: "Database username must be 2–31 lowercase letters, numbers or underscores." }, 400);
-  if (!privileges.length || privileges.length !== new Set(requested).size) return c.json({ message: "Choose one or more valid database privileges." }, 400);
-  const id = crypto.randomUUID(); const jobId = crypto.randomUUID();
-  try {
-    await c.env.DB.batch([
-      c.env.DB.prepare("INSERT INTO hosting_database_users (id, organization_id, database_id, username, privileges, status) VALUES (?, ?, ?, ?, ?, 'PENDING')").bind(id, identity.organizationId, database.id, username, JSON.stringify(privileges)),
-      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'CREATE_DATABASE_USER', 'QUEUED', ?)").bind(jobId, database.hosting_account_id, "create-database-user:" + id),
-      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database_user.create_requested', 'database_user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ databaseId: database.id, privileges })),
-    ]);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (/UNIQUE constraint failed: hosting_database_users.database_id, hosting_database_users.username/i.test(message)) return c.json({ message: "This username already exists for the database." }, 409);
-    return c.json({ message: "Unable to queue database user creation." }, 500);
-  }
-  return c.json({ user: { id, username, privileges, status: "PENDING" }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Database user request queued. No password is stored in Nexora; credential creation is delegated to the hosting agent." }, 201);
 });
-
 
 type AgentCredential = { secretHash: string; serverId: string; organizationId: string };
 async function authenticateAgentRequest(request: Request, db: D1Database, rawBody: string) {
