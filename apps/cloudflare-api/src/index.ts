@@ -6,6 +6,7 @@ type Bindings = {
   ALLOW_PUBLIC_REGISTRATION?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_DNS_API_TOKEN?: string;
+  CLOUDFLARE_ZONE_NAME?: string;
   CLOUDFLARE_ZONE_ID?: string;
   CLOUDFLARE_SAAS_TARGET?: string;
 };
