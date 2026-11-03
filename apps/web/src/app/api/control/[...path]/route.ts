@@ -33,6 +33,10 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
     return method === "POST";
   }
   if (parts.length === 3 && parts[0] === "servers" &&
+      /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "telemetry") {
+    return method === "GET";
+  }
+  if (parts.length === 3 && parts[0] === "servers" &&
       /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "enrollment-token") {
     return method === "POST";
   }
