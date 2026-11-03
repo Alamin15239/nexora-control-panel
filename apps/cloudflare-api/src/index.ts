@@ -922,6 +922,7 @@ app.post("/v1/databases", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  return c.json({ message: "Database provisioning is not enabled on this Linux agent yet. No database request was created." }, 501);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
@@ -965,6 +966,7 @@ app.post("/v1/databases/:id/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  return c.json({ message: "Database-user provisioning is not enabled on this Linux agent yet. No user request was created." }, 501);
   const database = await c.env.DB.prepare("SELECT id, hosting_account_id FROM hosting_databases WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; hosting_account_id: string }>();
   if (!database) return c.json({ message: "Database not found" }, 404);
   let input: Record<string, unknown>;
