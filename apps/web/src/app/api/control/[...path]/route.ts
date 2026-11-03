@@ -11,6 +11,7 @@ const COOKIE_NAME = "nexora_session";
 
 function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
   if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
+  if (parts.length === 3 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "website-limit") return method === "POST";
   if (parts.length === 2 && parts[0] === "servers" && /^[0-9a-f-]{36}$/i.test(parts[1])) {
     return method === "GET";
   }
