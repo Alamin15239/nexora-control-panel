@@ -15,6 +15,7 @@ interface D1StatementLike {
   bind(...values: unknown[]): D1StatementLike;
   run(): Promise<unknown>;
   first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results?: T[] }>;
 }
 interface D1DatabaseLike {
   prepare(sql: string): D1StatementLike;
