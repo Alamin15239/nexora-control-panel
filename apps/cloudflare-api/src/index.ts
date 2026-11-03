@@ -928,7 +928,14 @@ type CloudflareHostnameResponse = {
     id?: string;
     hostname?: string;
     status?: string;
-    ssl?: { status?: string; method?: string; validation_records?: unknown[] };
+    ssl?: {
+      status?: string;
+      method?: string;
+      type?: string;
+      settings?: Record<string, unknown>;
+      validation_records?: unknown[];
+      validation_errors?: unknown[];
+    };
     ownership_verification?: { name?: string; type?: string; value?: string };
     ownership_verification_http?: { http_url?: string; http_body?: string };
     verification_errors?: string[];
@@ -938,7 +945,7 @@ type CloudflareHostnameResponse = {
 async function cloudflareHostnameRequest(
   env: Bindings,
   hostnameId: string | null,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PATCH",
   body?: Record<string, unknown>,
 ): Promise<CloudflareHostnameResponse> {
   if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ZONE_ID) {
@@ -976,6 +983,7 @@ async function saveCloudflareHostnameState(
     ownershipVerification: result.ownership_verification ?? null,
     ownershipVerificationHttp: result.ownership_verification_http ?? null,
     sslValidationRecords: result.ssl?.validation_records ?? [],
+    sslValidationErrors: result.ssl?.validation_errors ?? [],
     verificationErrors: result.verification_errors ?? [],
   };
   await db.prepare(
@@ -1069,6 +1077,59 @@ app.get("/v1/domains/:id/cloudflare-hostname", async (c) => {
     return c.json({ cloudflare: state });
   } catch (error) {
     return c.json({ message: error instanceof Error ? error.message : "Unable to refresh Cloudflare status" }, 502);
+  }
+});
+
+app.post("/v1/domains/:id/cloudflare-hostname/revalidate", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  const domain = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.cloudflare_custom_hostname_id AS hostnameId,
+            d.cloudflare_cname_target AS cnameTarget
+     FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     WHERE d.id = ? AND a.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{
+    id: string; name: string; hostnameId: string | null; cnameTarget: string | null;
+  }>();
+  if (!domain) return c.json({ message: "Domain not found" }, 404);
+  if (!domain.hostnameId) return c.json({ message: "Register the Cloudflare hostname before revalidating its certificate." }, 409);
+
+  try {
+    // Read the live SSL configuration first. PATCH must echo the existing method,
+    // certificate type and settings so revalidation does not reset customer TLS options.
+    const before = await cloudflareHostnameRequest(c.env, domain.hostnameId, "GET");
+    const ssl = before.result?.ssl;
+    if (!ssl?.method || !ssl.type) {
+      throw new Error("Cloudflare did not return the current SSL method and certificate type; no settings were changed.");
+    }
+    const sslPatch: Record<string, unknown> = { method: ssl.method, type: ssl.type };
+    if (ssl.settings !== undefined) sslPatch.settings = ssl.settings;
+
+    await cloudflareHostnameRequest(c.env, domain.hostnameId, "PATCH", { ssl: sslPatch });
+    const after = await cloudflareHostnameRequest(c.env, domain.hostnameId, "GET");
+    const target = domain.cnameTarget || c.env.CLOUDFLARE_SAAS_TARGET || "customers.nexoraedge.digital";
+    const state = await saveCloudflareHostnameState(c.env.DB, domain.id, after, target);
+
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.cloudflare_certificate_revalidated', 'domain', ?, ?)",
+    ).bind(
+      crypto.randomUUID(), identity.organizationId, identity.id, domain.id,
+      JSON.stringify({ hostnameStatus: state.hostnameStatus, sslStatus: state.sslStatus }),
+    ).run();
+
+    return c.json({
+      cloudflare: state,
+      message: state.sslStatus === "active"
+        ? "Cloudflare reports the SSL certificate as active."
+        : "Cloudflare revalidation was triggered. The certificate is still processing; refresh status again in a few minutes.",
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Cloudflare certificate revalidation failed";
+    await c.env.DB.prepare("UPDATE domains SET cloudflare_error = ?, cloudflare_last_checked_at = ? WHERE id = ?")
+      .bind(message.slice(0, 500), new Date().toISOString(), domain.id).run();
+    return c.json({ message }, 502);
   }
 });
 
