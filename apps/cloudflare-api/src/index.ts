@@ -354,6 +354,49 @@ app.get("/v1/servers/:id", async (c) => {
   return c.json({ server });
 });
 
+type ServerTelemetryRow = {
+  id: string;
+  agent_version: string;
+  cpu_usage_percent: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+  disk_total_bytes: number;
+  disk_used_bytes: number;
+  load_average_1m: number;
+  collected_at: string;
+  received_at: string;
+};
+
+app.get("/v1/servers/:id/telemetry", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const serverId = c.req.param("id");
+  const server = await c.env.DB.prepare(
+    `SELECT id, hostname, primary_ip, region, agent_version, status,
+            last_heartbeat_at, created_at
+     FROM servers WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(serverId, identity.organizationId).first<ServerRow>();
+  if (!server) return c.json({ message: "Server not found" }, 404);
+
+  const result = await c.env.DB.prepare(
+    `SELECT id, agent_version, cpu_usage_percent, memory_total_bytes,
+            memory_used_bytes, disk_total_bytes, disk_used_bytes,
+            load_average_1m, collected_at, received_at
+     FROM server_telemetry
+     WHERE server_id = ?
+     ORDER BY collected_at DESC
+     LIMIT 60`,
+  ).bind(serverId).all<ServerTelemetryRow>();
+
+  const samples = (result.results ?? []).reverse();
+  return c.json({
+    server,
+    latest: samples.length ? samples[samples.length - 1] : null,
+    samples,
+  });
+});
+
 app.post("/v1/servers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
