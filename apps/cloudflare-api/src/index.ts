@@ -288,6 +288,48 @@ app.post("/v1/auth/login", async (c) => {
   });
 });
 
+app.get("/v1/overview", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const now = Date.now();
+  const onlineCutoff = new Date(now - 3 * 60 * 1000).toISOString();
+  try {
+    const [servers, onlineServers, accounts, domains, plans, databases, schemaRows] = await Promise.all([
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM servers WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM servers WHERE organization_id = ? AND status = 'ONLINE' AND last_heartbeat_at >= ?").bind(identity.organizationId, onlineCutoff).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_accounts WHERE organization_id = ? AND status != 'DELETED'").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM domains WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_plans WHERE organization_id = ? AND active = 1").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_databases WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents')").all<{ name: string }>(),
+    ]);
+    const requiredTables = ["users", "organizations", "memberships", "auth_sessions", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "agent_credentials", "server_telemetry", "server_service_checks", "server_incidents"];
+    const presentTables = new Set((schemaRows.results ?? []).map((row) => row.name));
+    const schemaReady = requiredTables.every((name) => presentTables.has(name));
+    return c.json({
+      counts: {
+        servers: servers?.count ?? 0,
+        onlineServers: onlineServers?.count ?? 0,
+        hostingAccounts: accounts?.count ?? 0,
+        websites: domains?.count ?? 0,
+        hostingPlans: plans?.count ?? 0,
+        databases: databases?.count ?? 0,
+      },
+      checks: {
+        api: true,
+        database: true,
+        schema: schemaReady,
+        agent: (onlineServers?.count ?? 0) > 0,
+        server: (onlineServers?.count ?? 0) > 0,
+      },
+      updatedAt: new Date(now).toISOString(),
+    });
+  } catch {
+    return c.json({ message: "Unable to load infrastructure overview" }, 503);
+  }
+});
+
 app.get("/v1/auth/me", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
