@@ -271,9 +271,9 @@ export default function ServersPage() {
     }
   }
 
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white">
-      <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl">
+      <div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
         <div className="flex items-center gap-3">
           <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
           <span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><ServerIcon size={20}/></span>
@@ -283,16 +283,16 @@ export default function ServersPage() {
       </div>
     </header>
 
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
+    <section className="mx-auto max-w-[1500px] space-y-7 px-6 py-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <div><p className="text-sm font-medium text-blue-700">Infrastructure</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Your servers</h1><p className="mt-2 text-sm text-slate-500">Register Linux nodes and issue short-lived, single-use agent enrollment tokens.</p></div>
-        <button onClick={() => setShowForm((value) => !value)} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-800"><Plus size={17}/> Register server</button>
+        <div><p className="text-sm font-medium text-blue-700">Infrastructure</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Your servers</h1><p className="mt-2 text-sm text-slate-500">Register Linux nodes and issue short-lived, single-use agent enrollment tokens.</p></div>
+        <button onClick={() => setShowForm((value) => !value)} className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm shadow-blue-900/15 transition hover:brightness-105"><Plus size={17}/> Register server</button>
       </div>
 
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
 
-      {showForm && <form onSubmit={createServer} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {showForm && <form onSubmit={createServer} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
         <div className="mb-5"><h2 className="font-semibold">Register a Linux server</h2><p className="mt-1 text-xs text-slate-500">This adds the node to your workspace. It does not install software or change the server.</p></div>
         <div className="grid gap-4 md:grid-cols-3">
           <label className="text-xs font-medium text-slate-600">Hostname<input required maxLength={253} value={form.hostname} onChange={(event) => setForm((current) => ({ ...current, hostname: event.target.value }))} placeholder="web-01.example.com" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm text-slate-900 outline-none focus:border-blue-500"/></label>
@@ -376,7 +376,7 @@ export default function ServersPage() {
         {loading ? <div className="p-10 text-center text-sm text-slate-500">Loading server inventory…</div> : servers.length === 0 ? <div className="p-12 text-center"><ServerIcon className="mx-auto text-slate-300" size={32}/><h3 className="mt-3 font-medium">No servers registered</h3><p className="mt-1 text-sm text-slate-500">Add your first Linux node to start building your infrastructure inventory.</p><button onClick={() => setShowForm(true)} className="mt-4 rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white">Register first server</button></div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Server</th><th className="px-5 py-3 font-medium">Region</th><th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 font-medium">Agent</th><th className="px-5 py-3 font-medium">Last heartbeat</th><th className="px-5 py-3 text-right font-medium">Action</th></tr></thead><tbody className="divide-y divide-slate-100">{servers.map((server) => <tr key={server.id} className="hover:bg-slate-50/70"><td className="px-5 py-4"><p className="font-medium text-slate-900">{server.hostname}</p><p className="mt-1 text-xs text-slate-500">{server.primary_ip}</p></td><td className="px-5 py-4 text-slate-600">{server.region || "—"}</td><td className="px-5 py-4"><span className={"inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium " + (server.status === "ONLINE" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}><Activity size={12}/>{server.status}</span></td><td className="px-5 py-4 text-slate-600">{server.agent_version || "Not connected"}</td><td className="px-5 py-4 text-slate-500">{server.last_heartbeat_at ? new Date(server.last_heartbeat_at).toLocaleString() : "Never"}</td><td className="px-5 py-4 text-right"><div className="flex justify-end gap-2"><button onClick={() => void openTelemetry(server.id)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700">{selectedServerId === server.id ? "Hide metrics" : "View metrics"}</button><button disabled={busy} onClick={() => void issueToken(server.id)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50">Generate token</button></div></td></tr>)}</tbody></table></div>}
       </div>
 
-      {selectedServerId && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {selectedServerId && <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Live server telemetry</p>
@@ -444,7 +444,7 @@ export default function ServersPage() {
         </div>}
       </section>}
 
-      {selectedServerId && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {selectedServerId && <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Systemd monitoring</p>
