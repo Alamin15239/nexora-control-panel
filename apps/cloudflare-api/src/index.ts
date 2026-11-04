@@ -1846,7 +1846,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
     jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId).run();
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
   const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
-    .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string }>();
+    .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string }>();
   if (completedJob?.operation === "CREATE_HOSTING_ACCOUNT") {
     const accountId = await c.env.DB.prepare(
       "SELECT hosting_account_id AS accountId FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1",
