@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"crypto/rand"
 	"os/user"
 	"path/filepath"
 	"regexp"
@@ -33,6 +34,8 @@ type request struct {
 	ContentBase64 string `json:"contentBase64,omitempty"`
 	FileOperation string `json:"fileOperation,omitempty"`
 	DatabaseName string `json:"databaseName,omitempty"`
+	DatabaseUserName string `json:"databaseUserName,omitempty"`
+	Privileges []string `json:"privileges,omitempty"`
 }
 
 var (
@@ -61,6 +64,11 @@ func main() {
 		return
 	case "CREATE_DATABASE":
 		err = createDatabase(input.DatabaseName)
+	case "CREATE_DATABASE_USER":
+		if err := createDatabaseUser(input.DatabaseName, input.Username, input.DatabaseUserName, input.Privileges); err != nil { fail("DATABASE_USER_CREATE_FAILED", "The MariaDB user could not be created.") }
+		return
+	case "REVOKE_DATABASE_USER":
+		err = revokeDatabaseUser(input.Username, input.DatabaseUserName)
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
 	}
@@ -79,6 +87,55 @@ func createDatabase(name string) error {
 	if err != nil {
 		return fmt.Errorf("DATABASE_CREATE_FAILED: %s", safeOutput(string(output)))
 	}
+	return nil
+}
+
+var allowedDatabasePrivileges = map[string]bool{
+	"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true,
+	"CREATE": true, "ALTER": true, "INDEX": true,
+}
+
+func sqlString(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+
+func createDatabaseUser(databaseName, accountName, requestedUser string, privileges []string) error {
+	if !databaseNamePattern.MatchString(databaseName) || !usernamePattern.MatchString(accountName) || !databaseNamePattern.MatchString(requestedUser) || len(privileges) == 0 || len(privileges) > len(allowedDatabasePrivileges) {
+		return fmt.Errorf("INVALID_DATABASE_USER: database user request is invalid")
+	}
+	seen := map[string]bool{}
+	for _, privilege := range privileges {
+		if !allowedDatabasePrivileges[privilege] || seen[privilege] { return fmt.Errorf("INVALID_DATABASE_PRIVILEGE: requested database privilege is not allowed") }
+		seen[privilege] = true
+	}
+	physicalUser := accountName + "_" + requestedUser
+	if len(physicalUser) > 80 { return fmt.Errorf("INVALID_DATABASE_USER: database username is too long") }
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil { return fmt.Errorf("PASSWORD_GENERATION_FAILED: secure random source unavailable") }
+	password := base64.RawURLEncoding.EncodeToString(secret)
+	quotedUser := sqlString(physicalUser)
+	account := quotedUser + "@'localhost'"
+	quotedDB := "`" + strings.ReplaceAll(databaseName, "`", "``") + "`"
+	grants := strings.Join(privileges, ", ")
+	sql := "CREATE USER " + account + " IDENTIFIED BY " + sqlString(password) + "; GRANT " + grants + " ON " + quotedDB + ".* TO " + account + ";"
+	command := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names")
+	command.Stdin = strings.NewReader(sql)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		cleanup := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names", "-e", "DROP USER IF EXISTS "+account)
+		_, _ = cleanup.CombinedOutput()
+		return fmt.Errorf("DATABASE_USER_CREATE_FAILED: %s", safeOutput(string(output)))
+	}
+	result, _ := json.Marshal(map[string]string{"username": physicalUser, "password": password})
+	_, err = os.Stdout.Write(append(result, '\n'))
+	return err
+}
+
+func revokeDatabaseUser(accountName, requestedUser string) error {
+	if !usernamePattern.MatchString(accountName) || !databaseNamePattern.MatchString(requestedUser) { return fmt.Errorf("INVALID_DATABASE_USER: database username is invalid") }
+	physicalUser := accountName + "_" + requestedUser
+	if len(physicalUser) > 80 { return fmt.Errorf("INVALID_DATABASE_USER: database username is too long") }
+	statement := "DROP USER IF EXISTS " + sqlString(physicalUser) + "@'localhost'"
+	output, err := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names", "-e", statement).CombinedOutput()
+	if err != nil { return fmt.Errorf("DATABASE_USER_REVOKE_FAILED: %s", safeOutput(string(output))) }
 	return nil
 }
 
