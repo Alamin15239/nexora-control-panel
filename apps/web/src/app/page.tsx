@@ -30,7 +30,10 @@ type OverviewData = {
 export default function Home() {
   const router = useRouter();
   const [identity, setIdentity] = useState<{ displayName: string | null; email: string } | null>(null);
-  const [checking, setChecking] = useState(true);\n  const [overview, setOverview] = useState<OverviewData | null>(null);\n  const [overviewError, setOverviewError] = useState("");\n  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [checking, setChecking] = useState(true);
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [overviewError, setOverviewError] = useState("");
+  const [overviewLoading, setOverviewLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
