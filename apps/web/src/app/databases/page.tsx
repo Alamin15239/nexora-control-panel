@@ -54,18 +54,18 @@ export default function DatabasesPage() {
   useEffect(() => { void loadUsers(selected); }, [selected, loadUsers]);
 
   const current = databases.find(d => d.id === selected);
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
       <div className="flex items-center gap-3"><Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link><span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Database size={20}/></span><div><p className="font-semibold">Database management</p><p className="text-xs text-slate-500">Nexora Control / Databases</p></div></div>
       <button onClick={() => { void load(); if (selected) void loadUsers(selected); }} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"><RefreshCw size={15}/> Refresh</button>
     </div></header>
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
-      <div><p className="text-sm font-medium text-blue-700">Customer resources</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Databases</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">View database records and access policies. Provisioning controls remain unavailable until the Linux database service is installed and secured.</p></div>
+    <section className="mx-auto max-w-[1500px] space-y-7 px-6 py-8">
+      <div><p className="text-sm font-medium text-blue-700">Customer resources</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Databases</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">View database records and access policies. Provisioning controls remain unavailable until the Linux database service is installed and secured.</p></div>
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
       <div className="grid gap-4 sm:grid-cols-3"><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Databases</p><p className="mt-2 text-3xl font-semibold">{databases.length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Active</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="ACTIVE").length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Pending provisioning</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="PENDING").length}</p></div></div>
       <div className="grid gap-6 xl:grid-cols-2">
-        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
           <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-amber-700">Unavailable: database-engine provisioning is not installed on the connected Linux agent yet.</p>
           <div className="mt-5 space-y-4">
             <label className="block text-xs font-medium text-slate-600">Database name<input disabled required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={name} onChange={e=>setName(e.target.value.toLowerCase())} placeholder="customer_db" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
@@ -75,7 +75,7 @@ export default function DatabasesPage() {
           <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database provisioning unavailable</button>
           {!accounts.length && <p className="mt-3 text-xs text-amber-700">Create a hosting account before adding a database.</p>}
         </form>
-        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
           <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-amber-700">Unavailable: secure database-user creation and password delivery are not implemented yet.</p>
           <div className="mt-5 space-y-4">
             <label className="block text-xs font-medium text-slate-600">Database<select disabled required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
