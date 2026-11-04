@@ -21,10 +21,16 @@ function Metric({ label, value, note, icon: Icon }: { label: string; value: stri
   return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><p className="text-sm text-slate-500">{label}</p><span className="rounded-xl bg-slate-50 p-2 text-slate-600"><Icon size={18}/></span></div><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-900">{value}</p><p className="mt-1 text-xs text-slate-500">{note}</p></div>;
 }
 
+type OverviewData = {
+  counts: { servers: number; onlineServers: number; hostingAccounts: number; websites: number; hostingPlans: number; databases: number };
+  checks: { api: boolean; database: boolean; schema: boolean; agent: boolean; server: boolean };
+  updatedAt: string;
+};
+
 export default function Home() {
   const router = useRouter();
   const [identity, setIdentity] = useState<{ displayName: string | null; email: string } | null>(null);
-  const [checking, setChecking] = useState(true);
+  const [checking, setChecking] = useState(true);\n  const [overview, setOverview] = useState<OverviewData | null>(null);\n  const [overviewError, setOverviewError] = useState("");\n  const [overviewLoading, setOverviewLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -38,6 +44,27 @@ export default function Home() {
       .finally(() => { if (active) setChecking(false); });
     return () => { active = false; };
   }, [router]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadOverview() {
+      setOverviewLoading(true);
+      setOverviewError("");
+      try {
+        const response = await fetch("/api/control/overview", { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to load infrastructure status");
+        if (active) setOverview(data as OverviewData);
+      } catch (error) {
+        if (active) setOverviewError(error instanceof Error ? error.message : "Unable to load infrastructure status");
+      } finally {
+        if (active) setOverviewLoading(false);
+      }
+    }
+    void loadOverview();
+    const interval = window.setInterval(() => void loadOverview(), 60_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, []);
 
   async function signOut() {
     await fetch("/api/auth/logout", { method: "POST" });
@@ -60,12 +87,12 @@ export default function Home() {
       <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4 lg:px-9"><div><p className="text-xs text-slate-500">Control plane / Workspace</p><h1 className="mt-1 text-lg font-semibold">Overview</h1></div><div className="flex items-center gap-3"><span className="hidden rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 sm:inline-flex">Development environment</span><span className="max-w-40 truncate text-xs text-slate-600">{identity.displayName || identity.email}</span><button onClick={signOut} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Sign out</button></div></header>
       <div className="mx-auto max-w-7xl space-y-7 px-5 py-8 lg:px-9">
         <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Welcome to Nexora Control</p><h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">Your hosting infrastructure, in one place.</h2><p className="mt-2 max-w-2xl text-sm text-slate-500">A unified control plane for servers, websites, databases and customers. Connect your first Linux node to begin.</p></div><button onClick={() => router.push("/servers")} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-blue-800"><Plus size={16}/> Register server</button></div>
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Managed servers" value="0" note="No server agents connected" icon={Server}/><Metric label="Hosting accounts" value="0" note="Provisioned customer accounts" icon={Users}/><Metric label="Websites" value="0" note="Managed virtual hosts" icon={Globe2}/><Metric label="System status" value="Setup" note="Awaiting infrastructure setup" icon={Activity}/></div>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Managed servers" value={overviewLoading && !overview ? "…" : String(overview?.counts.servers ?? "—")} note={overview ? `${overview.counts.onlineServers} online · live agent heartbeats` : "Live server inventory"} icon={Server}/><Metric label="Hosting accounts" value={overviewLoading && !overview ? "…" : String(overview?.counts.hostingAccounts ?? "—")} note="Provisioned customer accounts" icon={Users}/><Metric label="Websites" value={overviewLoading && !overview ? "…" : String(overview?.counts.websites ?? "—")} note="Domains registered in this workspace" icon={Globe2}/><Metric label="System status" value={overview ? (overview.checks.api && overview.checks.database && overview.checks.schema ? (overview.checks.agent ? "Online" : "Setup") : "Attention") : overviewLoading ? "Checking" : "Unavailable"} note={overview ? (overview.checks.agent ? "API, database and agent responding" : "Control plane ready · waiting for agent") : overviewError || "Checking control-plane services"} icon={Activity}/></div>
         <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
-          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex items-center justify-between"><div><h3 className="font-semibold">Infrastructure readiness</h3><p className="mt-1 text-xs text-slate-500">Initial setup checklist</p></div><span className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">0 / 4 complete</span></div><div className="mt-6 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full w-0 rounded-full bg-blue-600"/></div><div className="mt-5 space-y-4">{["Deploy the control-plane API", "Verify Cloudflare D1 database", "Install the Linux server agent", "Connect and verify your first server"].map((item, i) => <div key={item} className="flex items-center gap-3"><span className="grid h-7 w-7 place-items-center rounded-full border border-slate-200 text-xs text-slate-500">{i+1}</span><span className="text-sm text-slate-700">{item}</span><span className="ml-auto text-xs text-slate-400">Pending</span></div>)}</div></div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex items-center justify-between"><div><h3 className="font-semibold">Infrastructure readiness</h3><p className="mt-1 text-xs text-slate-500">Live setup checks · refreshed every minute</p></div><span className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{overview ? `${[overview.checks.api, overview.checks.database && overview.checks.schema, overview.checks.agent, overview.checks.server].filter(Boolean).length} / 4 complete` : overviewLoading ? "Checking…" : "Unavailable"}</span></div><div className="mt-6 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: overview ? `${[overview.checks.api, overview.checks.database && overview.checks.schema, overview.checks.agent, overview.checks.server].filter(Boolean).length * 25}%` : "0%" }}/></div><div className="mt-5 space-y-4">{[{label:"Deploy the control-plane API",done:overview?.checks.api,detail:"API health endpoint"},{label:"Verify Cloudflare D1 database",done:overview?.checks.database && overview?.checks.schema,detail:"Database connectivity and schema"},{label:"Install the Linux server agent",done:overview?.checks.agent,detail:"Recent authenticated heartbeat"},{label:"Connect and verify your first server",done:overview?.checks.server,detail:"At least one server online"}].map((item, i) => <div key={item.label} className="flex items-center gap-3"><span className={"grid h-7 w-7 place-items-center rounded-full border text-xs " + (item.done ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 text-slate-500")}>{item.done ? <ShieldCheck size={15}/> : i+1}</span><span className="min-w-0 flex-1"><span className="block text-sm text-slate-700">{item.label}</span><span className="block text-xs text-slate-400">{item.detail}</span></span><span className={"ml-auto text-xs " + (item.done ? "font-medium text-emerald-700" : "text-slate-400")}>{item.done ? "Complete" : overviewLoading ? "Checking" : "Pending"}</span></div>)}</div>{overviewError && <p role="alert" className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">{overviewError}</p>}</div>
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><div className="flex items-center gap-2"><Zap size={17} className="text-amber-500"/><h3 className="font-semibold">Next actions</h3></div><div className="mt-4 space-y-3">{[{title:"Register a server",desc:"Connect a Linux node to the control plane",icon:Server},{title:"Create a hosting plan",desc:"Define storage, websites and resource limits",icon:Box},{title:"Review security",desc:"Configure access policies and audit events",icon:ShieldCheck},{title:"Monitor capacity",desc:"Prepare CPU, memory and disk telemetry",icon:Cpu}].map(({title,desc,icon: Icon}) => <div key={title} className="flex items-center gap-3 rounded-xl border border-slate-100 p-3"><span className="rounded-lg bg-slate-100 p-2 text-slate-700"><Icon size={17}/></span><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-slate-800">{title}</span><span className="mt-0.5 block text-xs text-slate-500">{desc}</span></span><ArrowUpRight size={15} className="text-slate-400"/></div>)}</div></div>
         </div>
-        <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-5"><div className="flex gap-3"><div className="rounded-xl bg-white p-2 text-blue-700"><ShieldCheck size={19}/></div><div><h3 className="text-sm font-semibold text-slate-900">Control-plane foundation</h3><p className="mt-1 max-w-4xl text-sm leading-6 text-slate-600">This initial interface is a development shell. Metrics are placeholders until the API and authenticated server agents are connected. No server changes are performed from this screen yet.</p></div></div></div>
+        <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-5"><div className="flex gap-3"><div className="rounded-xl bg-white p-2 text-blue-700"><ShieldCheck size={19}/></div><div><h3 className="text-sm font-semibold text-slate-900">Control-plane foundation</h3><p className="mt-1 max-w-4xl text-sm leading-6 text-slate-600">Overview metrics and readiness checks are now loaded from the authenticated control-plane API. Server actions still require the authenticated agent and explicit operation policies.</p></div></div></div>
         <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-5 text-xs text-slate-400"><span>Nexora Control · Private development</span><span>Infrastructure management platform</span></footer>
       </div>
     </section>
