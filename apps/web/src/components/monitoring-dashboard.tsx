@@ -78,7 +78,7 @@ function Metric({ label, value, detail, icon: Icon, percentage }: {
   label: string; value: string; detail: string; icon: typeof Cpu; percentage?: number;
 }) {
   const width = Math.max(0, Math.min(100, percentage ?? 0));
-  return <div className="rounded-xl border border-slate-200 bg-white p-4">
+  return <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_5px_rgba(15,23,42,0.035)]">
     <div className="flex items-center justify-between gap-2">
       <p className="text-sm text-slate-500">{label}</p>
       <Icon size={17} className="text-slate-400"/>
@@ -147,28 +147,28 @@ export default function MonitoringDashboard() {
   const onlineCount = servers.filter(item => item.server.status === "ONLINE").length;
   const criticalCount = incidents.filter(item => item.severity === "CRITICAL").length;
 
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center gap-3 px-5 py-4">
-      <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
-      <span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Activity size={20}/></span>
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center gap-3 px-5 py-4">
+      <Link href="/" aria-label="Back to overview" className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-600 shadow-sm transition hover:bg-slate-50"><ArrowLeft size={17}/></Link>
+      <span className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white shadow-sm"><Activity size={20}/></span>
       <div className="min-w-0 flex-1"><p className="font-semibold">Nexora Control</p><p className="text-xs text-slate-500">Infrastructure / Monitoring</p></div>
-      <button onClick={() => void load(true)} disabled={refreshing} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+      <button onClick={() => void load(true)} disabled={refreshing} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50">
         <RefreshCw size={15} className={refreshing ? "animate-spin" : ""}/><span className="hidden sm:inline">Refresh</span>
       </button>
     </div></header>
 
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
+    <section className="mx-auto max-w-[1500px] space-y-6 px-5 py-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><p className="text-sm font-medium text-blue-700">Live infrastructure</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Server monitoring</h1><p className="mt-2 text-sm text-slate-500">Authenticated agent telemetry, Linux service health and active incidents.</p></div>
+        <div><p className="text-sm font-medium text-blue-700">Live infrastructure</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Server monitoring</h1><p className="mt-2 text-sm text-slate-500">Authenticated agent telemetry, Linux service health and active incidents.</p></div>
         <p className="text-xs text-slate-500">{updatedAt ? `Updated ${new Date(updatedAt).toLocaleTimeString()}` : "Waiting for first refresh"} · auto-refresh 30 sec</p>
       </div>
 
       {error && <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Managed servers</p><p className="mt-2 text-3xl font-semibold">{loading ? "—" : servers.length}</p><p className="mt-1 text-xs text-slate-500">{onlineCount} online</p></div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Open incidents</p><p className="mt-2 text-3xl font-semibold">{loading ? "—" : incidents.length}</p><p className="mt-1 text-xs text-slate-500">{criticalCount} critical</p></div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Telemetry source</p><p className="mt-2 text-xl font-semibold">Linux agent</p><p className="mt-1 text-xs text-slate-500">Signed heartbeat · read-only checks</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">Managed servers</p><p className="mt-2 text-3xl font-semibold">{loading ? "—" : servers.length}</p><p className="mt-1 text-xs text-slate-500">{onlineCount} online</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">Open incidents</p><p className="mt-2 text-3xl font-semibold">{loading ? "—" : incidents.length}</p><p className="mt-1 text-xs text-slate-500">{criticalCount} critical</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">Telemetry source</p><p className="mt-2 text-xl font-semibold">Linux agent</p><p className="mt-1 text-xs text-slate-500">Signed heartbeat · read-only checks</p></div>
       </div>
 
       {loading && <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">Loading server telemetry…</div>}
@@ -179,7 +179,7 @@ export default function MonitoringDashboard() {
         const memory = latest ? percent(latest.memory_used_bytes, latest.memory_total_bytes) : 0;
         const disk = latest ? percent(latest.disk_used_bytes, latest.disk_total_bytes) : 0;
         const heartbeatFresh = !!server.last_heartbeat_at && Date.now() - Date.parse(server.last_heartbeat_at) < 180_000;
-        return <section key={server.id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        return <section key={server.id} className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_4px_24px_rgba(15,23,42,0.045)]">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
             <div className="flex items-center gap-3"><span className="rounded-xl bg-slate-100 p-2.5 text-slate-600"><Server size={19}/></span><div><h2 className="font-semibold">{server.hostname}</h2><p className="mt-0.5 text-xs text-slate-500">{server.primary_ip}{server.region ? ` · ${server.region}` : ""} · Agent {server.agent_version ?? "unknown"}</p></div></div>
             <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium ${heartbeatFresh ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}><span className={`h-1.5 w-1.5 rounded-full ${heartbeatFresh ? "bg-emerald-500" : "bg-amber-500"}`}/>{heartbeatFresh ? "Online" : server.status}</span>
