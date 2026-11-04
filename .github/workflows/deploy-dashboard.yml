@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   deploy-dashboard:
+    if: github.ref == 'refs/heads/main'
     name: Build and deploy nexora-dashboard
     runs-on: ubuntu-latest
     steps:
