@@ -511,7 +511,27 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	errorCode := ""
 	errorMessage := ""
 	var resultPayload json.RawMessage
-	if job.Operation == "FILE_MANAGER" {
+	if job.Operation == "CREATE_DATABASE" {
+		var payload struct { DatabaseName string `json:"databaseName"` }
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseName == "" {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The database job payload is invalid"
+		} else {
+			encoded, _ := json.Marshal(map[string]string{"operation": "CREATE_DATABASE", "username": job.Account.Username, "databaseName": payload.DatabaseName})
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
+			output, commandErr := command.CombinedOutput()
+			if commandErr == nil {
+				success = true
+				fmt.Printf("Provisioning job %s (CREATE_DATABASE) completed for account %s\\n", job.ID, job.Account.Username)
+			} else {
+				errorCode = "DATABASE_PROVISION_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if errorMessage == "" { errorMessage = "The MariaDB database could not be created" }
+				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+			}
+		}
+	} else if job.Operation == "FILE_MANAGER" {
 		var payload map[string]any
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
 			errorCode = "INVALID_JOB_PAYLOAD"
