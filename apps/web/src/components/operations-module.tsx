@@ -254,7 +254,6 @@ function EmailNotificationSettings() {
 }
 
 export default function OperationsModule({ module }: { module: string }) {
-  if (module === "monitoring") return <MonitoringDashboard/>;
   const config = configs[module] ?? configs.settings;
   const Icon = config.icon;
   const [notificationReadiness, setNotificationReadiness] = useState<"ready" | "pending">("pending");
@@ -283,6 +282,8 @@ export default function OperationsModule({ module }: { module: string }) {
 
     return () => { active = false; };
   }, [module]);
+
+  if (module === "monitoring") return <MonitoringDashboard/>;
 
   const items = config.items.map(item =>
     module === "settings" && item.title === "Email notifications"
