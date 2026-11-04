@@ -531,6 +531,23 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
 			}
 		}
+	} else if job.Operation == "CREATE_DATABASE_USER" {
+		var payload struct { DatabaseName string `json:"databaseName"`; DatabaseUserName string `json:"databaseUserName"`; Privileges []string `json:"privileges"` }
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseName == "" || payload.DatabaseUserName == "" {
+			errorCode = "INVALID_JOB_PAYLOAD"; errorMessage = "The database-user job payload is invalid"
+		} else {
+			encoded, _ := json.Marshal(map[string]any{"operation": "CREATE_DATABASE_USER", "username": job.Account.Username, "databaseName": payload.DatabaseName, "databaseUserName": payload.DatabaseUserName, "privileges": payload.Privileges})
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision"); command.Stdin = bytes.NewReader(encoded)
+			output, commandErr := command.CombinedOutput()
+			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) { success = true; resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...); fmt.Printf("Provisioning job %s (CREATE_DATABASE_USER) completed for account %s\\n", job.ID, job.Account.Username) } else { errorCode = "DATABASE_USER_PROVISION_FAILED"; errorMessage = "The MariaDB database user could not be created" }
+		}
+	} else if job.Operation == "REVOKE_DATABASE_USER" {
+		var payload struct { DatabaseUserName string `json:"databaseUserName"` }
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" { errorCode = "INVALID_JOB_PAYLOAD"; errorMessage = "The database-user revocation payload is invalid" } else {
+			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName})
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision"); command.Stdin = bytes.NewReader(encoded)
+			_, commandErr := command.CombinedOutput(); if commandErr == nil { success = true } else { errorCode = "DATABASE_USER_REVOKE_FAILED"; errorMessage = "The MariaDB database user could not be revoked" }
+		}
 	} else if job.Operation == "FILE_MANAGER" {
 		var payload map[string]any
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
