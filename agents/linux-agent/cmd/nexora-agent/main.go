@@ -201,7 +201,8 @@ func enroll(api, serverID, configPath string) error {
 	return nil
 }
 
-const jobPollInterval = 2 * time.Second
+const jobPollInterval = 15 * time.Second
+const serviceCheckEvery = 5
 
 func run(configPath string, interval time.Duration) error {
 	cfg, err := loadConfig(configPath)
@@ -213,9 +214,12 @@ func run(configPath string, interval time.Duration) error {
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	var previousTotal, previousIdle uint64
+	heartbeatCount := 0
 
 	sendTelemetry := func() {
-		sample, total, idle, collectErr := collect(previousTotal, previousIdle)
+		heartbeatCount++
+		includeServices := heartbeatCount == 1 || heartbeatCount%serviceCheckEvery == 0
+		sample, total, idle, collectErr := collect(previousTotal, previousIdle, includeServices)
 		if collectErr != nil {
 			fmt.Fprintln(os.Stderr, "telemetry:", collectErr)
 			return
@@ -252,7 +256,7 @@ func run(configPath string, interval time.Duration) error {
 	}
 }
 
-func collect(previousTotal, previousIdle uint64) (telemetry, uint64, uint64, error) {
+func collect(previousTotal, previousIdle uint64, includeServices bool) (telemetry, uint64, uint64, error) {
 	cpu, total, idle, err := cpuUsage(previousTotal, previousIdle)
 	if err != nil {
 		return telemetry{}, total, idle, err
@@ -286,7 +290,7 @@ func collect(previousTotal, previousIdle uint64) (telemetry, uint64, uint64, err
 		return telemetry{}, total, idle, err
 	}
 
-	return telemetry{
+	sample := telemetry{
 		AgentVersion: version,
 		CPUUsage:     cpu,
 		MemoryTotal:  memTotal,
@@ -295,8 +299,13 @@ func collect(previousTotal, previousIdle uint64) (telemetry, uint64, uint64, err
 		DiskUsed:     diskTotal - diskFree,
 		Load1:        load,
 		CollectedAt:  time.Now().UTC().Format(time.RFC3339),
-		Services:     collectServiceChecks(),
-	}, total, idle, nil
+	}
+
+	if includeServices {
+		sample.Services = collectServiceChecks()
+	}
+
+	return sample, total, idle, nil
 }
 
 func serviceStatus(loadState, activeState string) string {
@@ -428,9 +437,9 @@ func memoryUsage() (uint64, uint64, error) {
 
 type provisionJob struct {
 	DatabaseName string `json:"databaseName,omitempty"`
-	ID        string `json:"id"`
-	Operation string `json:"operation"`
-	Account   struct {
+	ID           string `json:"id"`
+	Operation    string `json:"operation"`
+	Account      struct {
 		AccountID      string `json:"accountId"`
 		Username       string `json:"username"`
 		PrimaryDomain  string `json:"primaryDomain"`
@@ -512,7 +521,9 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	errorMessage := ""
 	var resultPayload json.RawMessage
 	if job.Operation == "CREATE_DATABASE" {
-		var payload struct { DatabaseName string `json:"databaseName"` }
+		var payload struct {
+			DatabaseName string `json:"databaseName"`
+		}
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseName == "" {
 			errorCode = "INVALID_JOB_PAYLOAD"
 			errorMessage = "The database job payload is invalid"
@@ -527,26 +538,55 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			} else {
 				errorCode = "DATABASE_PROVISION_FAILED"
 				errorMessage = strings.TrimSpace(string(output))
-				if errorMessage == "" { errorMessage = "The MariaDB database could not be created" }
-				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+				if errorMessage == "" {
+					errorMessage = "The MariaDB database could not be created"
+				}
+				if len(errorMessage) > 400 {
+					errorMessage = errorMessage[:400]
+				}
 			}
 		}
 	} else if job.Operation == "CREATE_DATABASE_USER" {
-		var payload struct { DatabaseName string `json:"databaseName"`; DatabaseUserName string `json:"databaseUserName"`; Privileges []string `json:"privileges"` }
+		var payload struct {
+			DatabaseName     string   `json:"databaseName"`
+			DatabaseUserName string   `json:"databaseUserName"`
+			Privileges       []string `json:"privileges"`
+		}
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseName == "" || payload.DatabaseUserName == "" {
-			errorCode = "INVALID_JOB_PAYLOAD"; errorMessage = "The database-user job payload is invalid"
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The database-user job payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]any{"operation": "CREATE_DATABASE_USER", "username": job.Account.Username, "databaseName": payload.DatabaseName, "databaseUserName": payload.DatabaseUserName, "privileges": payload.Privileges})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision"); command.Stdin = bytes.NewReader(encoded)
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
 			output, commandErr := command.CombinedOutput()
-			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) { success = true; resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...); fmt.Printf("Provisioning job %s (CREATE_DATABASE_USER) completed for account %s\\n", job.ID, job.Account.Username) } else { errorCode = "DATABASE_USER_PROVISION_FAILED"; errorMessage = "The MariaDB database user could not be created" }
+			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
+				success = true
+				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
+				fmt.Printf("Provisioning job %s (CREATE_DATABASE_USER) completed for account %s\\n", job.ID, job.Account.Username)
+			} else {
+				errorCode = "DATABASE_USER_PROVISION_FAILED"
+				errorMessage = "The MariaDB database user could not be created"
+			}
 		}
 	} else if job.Operation == "REVOKE_DATABASE_USER" {
-		var payload struct { DatabaseUserName string `json:"databaseUserName"` }
-		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" { errorCode = "INVALID_JOB_PAYLOAD"; errorMessage = "The database-user revocation payload is invalid" } else {
+		var payload struct {
+			DatabaseUserName string `json:"databaseUserName"`
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The database-user revocation payload is invalid"
+		} else {
 			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision"); command.Stdin = bytes.NewReader(encoded)
-			_, commandErr := command.CombinedOutput(); if commandErr == nil { success = true } else { errorCode = "DATABASE_USER_REVOKE_FAILED"; errorMessage = "The MariaDB database user could not be revoked" }
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
+			_, commandErr := command.CombinedOutput()
+			if commandErr == nil {
+				success = true
+			} else {
+				errorCode = "DATABASE_USER_REVOKE_FAILED"
+				errorMessage = "The MariaDB database user could not be revoked"
+			}
 		}
 	} else if job.Operation == "FILE_MANAGER" {
 		var payload map[string]any

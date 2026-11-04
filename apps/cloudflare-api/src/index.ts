@@ -1884,8 +1884,7 @@ async function authenticateAgentRequest(request: Request, db: D1Database, rawBod
   } catch {
     return { error: { status: 409, message: "Agent request nonce has already been used" } } as const;
   }
-  await db.prepare("UPDATE agent_credentials SET last_seen_at = ? WHERE node_id = ?")
-    .bind(new Date().toISOString(), nodeId).run();
+  // Heartbeats update last_seen_at. Do not write it on every job poll.
   return { credential: { ...credential, nodeId } } as const;
 }
 
