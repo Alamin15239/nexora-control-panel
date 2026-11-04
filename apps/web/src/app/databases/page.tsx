@@ -188,7 +188,7 @@ export default function DatabasesPage() {
             <div><p className="text-sm font-medium">{user.username}</p><p className="mt-1 text-xs text-slate-500">Active login · localhost only</p></div>
             <button type="button" onClick={() => void copyConnectionSettings(user)} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"><Copy size={14}/> Copy connection settings</button>
           </div>)}
-          <p className="text-xs leading-5 text-slate-500">The copied settings include a password placeholder, not your password. Replace it with the password you saved. Keep credentials in your application's environment file and never commit that file to Git.</p>
+          <p className="text-xs leading-5 text-slate-500">The copied settings include a password placeholder, not your password. Replace it with the password you saved. Keep credentials in your application&apos;s environment file and never commit that file to Git.</p>
         </div>}
       </section>
       {revealedCredential && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-950">One-time database credentials</p><p className="mt-2 text-xs text-amber-900">Username: <span className="font-mono">{revealedCredential.username}</span></p><p className="mt-1 break-all font-mono text-sm text-amber-950">Password: {revealedCredential.password}</p><button type="button" onClick={() => void navigator.clipboard.writeText(revealedCredential.password)} className="mt-3 rounded-lg border border-amber-300 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100">Copy password</button></div>}
