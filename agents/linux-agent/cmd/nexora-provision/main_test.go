@@ -19,6 +19,21 @@ func TestUsernamePattern(t *testing.T) {
 	}
 }
 
+func TestDatabaseNamePattern(t *testing.T) {
+	valid := []string{"client01_app", "store_db2", "ab"}
+	for _, value := range valid {
+		if !databaseNamePattern.MatchString(value) {
+			t.Errorf("expected database name %q to be accepted", value)
+		}
+	}
+	invalid := []string{"", "1database", "UpperCase", "db-name", "db.name", "db;drop", "a"}
+	for _, value := range invalid {
+		if databaseNamePattern.MatchString(value) {
+			t.Errorf("expected database name %q to be rejected", value)
+		}
+	}
+}
+
 func TestDomainPattern(t *testing.T) {
 	valid := []string{"example.com", "sub.example.co.uk", "nxoratest01.test", "a1.example-domain.com"}
 	for _, value := range valid {
