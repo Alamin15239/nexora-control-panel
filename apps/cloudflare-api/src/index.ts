@@ -1873,9 +1873,15 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
         .bind(now, accountId.accountId, auth.credential.serverId).run();
     }
   }
+  if (completedJob?.operation === "CREATE_DATABASE" && completedJob.idempotencyKey?.startsWith("create-database:")) {
+    const databaseId = completedJob.idempotencyKey.slice("create-database:".length);
+    await c.env.DB.prepare(
+      "UPDATE hosting_databases SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'PENDING'",
+    ).bind(input.success ? "ACTIVE" : "FAILED", now, databaseId, auth.credential.organizationId).run();
+  }
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
     .bind(crypto.randomUUID(), auth.credential.organizationId,
-      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : "hosting_account.provisioning_failed"),
+      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : "hosting_account.provisioning_failed"),
       jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });
