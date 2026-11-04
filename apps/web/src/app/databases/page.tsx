@@ -6,7 +6,7 @@ import { ArrowLeft, Database, Plus, RefreshCw, ShieldCheck, Users } from "lucide
 
 type Account = { id: string; username: string; status: string };
 type Db = { id: string; name: string; engine: string; status: string; hosting_account_id: string; account_username: string; plan_database_limit: number; users: number };
-type DbUser = { id: string; username: string; privileges: string; status: string };
+type DbUser = { id: string; username: string; privileges: string; status: string; secret_available?: number };
 const permissions = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX"];
 
 export default function DatabasesPage() {
@@ -18,6 +18,8 @@ export default function DatabasesPage() {
   const [accountId, setAccountId] = useState("");
   const [engine] = useState("MARIADB");
   const [creating, setCreating] = useState(false);
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [revealedCredential, setRevealedCredential] = useState<{ username: string; password: string } | null>(null);
   const [username, setUsername] = useState("");
   const [privileges, setPrivileges] = useState<string[]>(["SELECT", "INSERT", "UPDATE", "DELETE"]);
   const [loading, setLoading] = useState(true);
@@ -42,7 +44,8 @@ export default function DatabasesPage() {
   }, []);
 
   const loadUsers = useCallback(async (id: string) => {
-    if (!id) { setUsers([]); return; }
+    if (!id) { setUsers([]); setRevealedCredential(null); return; }
+    setRevealedCredential(null);
     try {
       const response = await fetch(`/api/control/databases/${id}/users`, { cache: "no-store" });
       const data = await response.json();
@@ -74,6 +77,32 @@ export default function DatabasesPage() {
     }
   };
 
+  const createDatabaseUser = async () => {
+    setCreatingUser(true); setError(""); setNotice(""); setRevealedCredential(null);
+    try {
+      const response = await fetch("/api/control/databases/" + selected + "/users", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim().toLowerCase(), privileges }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to create database user");
+      setNotice(data.message || "Database user provisioning has been queued.");
+      setUsername(""); await loadUsers(selected);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to create database user"); }
+    finally { setCreatingUser(false); }
+  };
+
+  const revealCredential = async (userId: string) => {
+    setError(""); setNotice(""); setRevealedCredential(null);
+    try {
+      const response = await fetch("/api/control/databases/" + selected + "/users/" + userId + "/secret", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "One-time password is unavailable");
+      setRevealedCredential(data.credential);
+      setNotice("This password is shown once. Copy it now and store it in a secure password manager.");
+      await loadUsers(selected);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to reveal database password"); }
+  };
   const current = databases.find(d => d.id === selected);
   return <main className="min-h-full bg-transparent text-slate-900">
     <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
@@ -96,14 +125,14 @@ export default function DatabasesPage() {
           <button type="submit" disabled={creating || !accountId || !name.trim()} className="mt-5 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{creating ? "Creating database…" : "Create database"}</button>
           {!accounts.length && <p className="mt-3 text-xs text-amber-700">Create a hosting account before adding a database.</p>}
         </form>
-        <form onSubmit={event => event.preventDefault()} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
-          <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-amber-700">Unavailable: secure database-user creation and password delivery are not implemented yet.</p>
+        <form onSubmit={event => { event.preventDefault(); void createDatabaseUser(); }} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
+          <h2 className="font-semibold">Database users & privileges</h2><p className="mt-1 text-xs text-slate-500">Create a restricted MariaDB login. Its generated password can be revealed once for 24 hours.</p>
           <div className="mt-5 space-y-4">
-            <label className="block text-xs font-medium text-slate-600">Database<select disabled required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
-            <label className="block text-xs font-medium text-slate-600">Database username<input disabled required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
-            <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" disabled checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
+            <label className="block text-xs font-medium text-slate-600">Database<select required value={selected} onChange={e=>setSelected(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select database</option>{databases.map(d=><option key={d.id} value={d.id}>{d.name} · {d.status}</option>)}</select></label>
+            <label className="block text-xs font-medium text-slate-600">Database username<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
+            <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
           </div>
-          <button type="button" disabled className="mt-5 rounded-xl bg-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-600">Database-user provisioning unavailable</button>
+          <button type="submit" disabled={creatingUser || !selected || !username.trim() || privileges.length === 0} className="mt-5 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{creatingUser ? "Creating database user…" : "Create database user"}</button>
         </form>
       </div>
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -111,9 +140,10 @@ export default function DatabasesPage() {
         {loading?<div className="p-10 text-center text-sm text-slate-500">Loading databases…</div>:databases.length===0?<div className="p-12 text-center"><Database size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No databases yet</h3><p className="mt-1 text-sm text-slate-500">Create a database above to provision it on the connected MariaDB server.</p></div>:<div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Database</th><th className="px-5 py-3 font-medium">Account</th><th className="px-5 py-3 font-medium">Engine</th><th className="px-5 py-3 font-medium">Users</th><th className="px-5 py-3 font-medium">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{databases.map(d=><tr key={d.id} className={selected===d.id?"bg-blue-50/50":""}><td className="px-5 py-4"><button onClick={()=>setSelected(d.id)} className="font-medium text-blue-700 hover:underline">{d.name}</button></td><td className="px-5 py-4">{d.account_username}</td><td className="px-5 py-4">{d.engine}</td><td className="px-5 py-4">{d.users}</td><td className="px-5 py-4"><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{d.status}</span></td></tr>)}</tbody></table></div>}
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>
-        {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{u.status}</span></div>)}</div>}
+        {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p><p className="mt-1 text-xs text-slate-500">{u.status === "ACTIVE" ? "Localhost access · selected database only" : "Provisioning state"}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{u.status}</span>{u.status === "ACTIVE" && u.secret_available === 1 && <button type="button" onClick={() => void revealCredential(u.id)} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50">Reveal one-time password</button>}</div></div>)}</div>}
       </section>
-      <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><ShieldCheck size={14} className="mt-0.5 shrink-0"/> Database inventory is read-only until a database service is installed. Database passwords must be generated and delivered through a one-time secure workflow; they must never be stored in job results or ordinary audit logs.</p>
+      {revealedCredential && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-950">One-time database credentials</p><p className="mt-2 text-xs text-amber-900">Username: <span className="font-mono">{revealedCredential.username}</span></p><p className="mt-1 break-all font-mono text-sm text-amber-950">Password: {revealedCredential.password}</p><button type="button" onClick={() => void navigator.clipboard.writeText(revealedCredential.password)} className="mt-3 rounded-lg border border-amber-300 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100">Copy password</button></div>}
+      <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><ShieldCheck size={14} className="mt-0.5 shrink-0"/> Database credentials are encrypted temporarily and can be revealed once. Save the password securely; Nexora cannot show it again.</p>
     </section>
   </main>;
 }
