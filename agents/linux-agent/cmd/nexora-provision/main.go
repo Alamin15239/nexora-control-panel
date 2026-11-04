@@ -39,6 +39,7 @@ var (
 	usernamePattern = regexp.MustCompile("^[a-z][a-z0-9_]{2,15}$")
 	domainPattern = regexp.MustCompile("^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))+$")
 	documentRootPattern = regexp.MustCompile("^/home/[a-z][a-z0-9_]{2,15}/public_html(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$")
+	databaseNamePattern = regexp.MustCompile("^[a-z][a-z0-9_]{1,63}$")
 )
 
 func main() {
