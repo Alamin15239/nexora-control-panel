@@ -1772,10 +1772,10 @@ app.post("/v1/databases/:id/users", async (c) => {
   try { databaseSecretKey(c.env); } catch { return c.json({ message: "Secure credential delivery is not configured. No user was created." }, 503); }
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
-  const requestedName = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
+  const submittedName = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
   const requestedPrivileges = Array.isArray(input.privileges) ? input.privileges : [];
   const allowed = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX"]);
-  if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName) || requestedPrivileges.length < 1 || requestedPrivileges.length > allowed.size ||
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(submittedName) || requestedPrivileges.length < 1 || requestedPrivileges.length > allowed.size ||
       requestedPrivileges.some((value) => typeof value !== "string" || !allowed.has(value)) ||
       new Set(requestedPrivileges).size !== requestedPrivileges.length) {
     return c.json({ message: "Choose a valid username and one or more supported privileges." }, 400);
@@ -1786,7 +1786,12 @@ app.post("/v1/databases/:id/users", async (c) => {
      WHERE d.id = ? AND d.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1`,
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; accountId: string; status: string; accountUsername: string }>();
   if (!database || database.status !== "ACTIVE") return c.json({ message: "An active database is required." }, 404);
-  const physicalUsername = database.accountUsername + "_" + requestedName;
+  const accountPrefix = database.accountUsername + "_";
+  const requestedName = submittedName.startsWith(accountPrefix) ? submittedName.slice(accountPrefix.length) : submittedName;
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) {
+    return c.json({ message: "Enter a database username suffix such as app_user, not a full account login." }, 400);
+  }
+  const physicalUsername = accountPrefix + requestedName;
   if (physicalUsername.length > 80) return c.json({ message: "The resulting database username is too long." }, 400);
   const userId = crypto.randomUUID(), jobId = crypto.randomUUID(), now = new Date().toISOString();
   const payload = JSON.stringify({ databaseName: database.name, databaseUserName: requestedName, privileges: requestedPrivileges });

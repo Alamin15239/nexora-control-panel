@@ -97,7 +97,16 @@ var allowedDatabasePrivileges = map[string]bool{
 
 func sqlString(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 
+func normalizeDatabaseUserSuffix(accountName, requestedUser string) string {
+	prefix := accountName + "_"
+	for strings.HasPrefix(requestedUser, prefix) {
+		requestedUser = strings.TrimPrefix(requestedUser, prefix)
+	}
+	return requestedUser
+}
+
 func createDatabaseUser(databaseName, accountName, requestedUser string, privileges []string) error {
+	requestedUser = normalizeDatabaseUserSuffix(accountName, requestedUser)
 	if !databaseNamePattern.MatchString(databaseName) || !usernamePattern.MatchString(accountName) || !databaseNamePattern.MatchString(requestedUser) || len(privileges) == 0 || len(privileges) > len(allowedDatabasePrivileges) {
 		return fmt.Errorf("INVALID_DATABASE_USER: database user request is invalid")
 	}
@@ -130,6 +139,7 @@ func createDatabaseUser(databaseName, accountName, requestedUser string, privile
 }
 
 func revokeDatabaseUser(accountName, requestedUser string) error {
+	requestedUser = normalizeDatabaseUserSuffix(accountName, requestedUser)
 	if !usernamePattern.MatchString(accountName) || !databaseNamePattern.MatchString(requestedUser) { return fmt.Errorf("INVALID_DATABASE_USER: database username is invalid") }
 	physicalUser := accountName + "_" + requestedUser
 	if len(physicalUser) > 80 { return fmt.Errorf("INVALID_DATABASE_USER: database username is too long") }
