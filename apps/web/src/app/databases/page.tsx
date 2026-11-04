@@ -100,7 +100,7 @@ export default function DatabasesPage() {
       if (!response.ok) throw new Error(data.message || "One-time password is unavailable");
       setRevealedCredential(data.credential);
       setNotice("This password is shown once. Copy it now and store it in a secure password manager.");
-      await loadUsers(selected);
+      setUsers(current => current.map(user => user.id === userId ? { ...user, secret_available: 0 } : user));
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to reveal database password"); }
   };
   const current = databases.find(d => d.id === selected);
