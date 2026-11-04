@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock3, LockKeyhole, Mail, Network, HardDrive, Activity, Settings2, ShieldCheck, Server, AlertTriangle } from "lucide-react";
+import MonitoringDashboard from "@/components/monitoring-dashboard";
 
 type Item = { title: string; description: string; state: "ready" | "pending" | "blocked" };
 const configs: Record<string, { title: string; subtitle: string; icon: typeof Mail; items: Item[]; note: string }> = {
@@ -253,6 +254,7 @@ function EmailNotificationSettings() {
 }
 
 export default function OperationsModule({ module }: { module: string }) {
+  if (module === "monitoring") return <MonitoringDashboard/>;
   const config = configs[module] ?? configs.settings;
   const Icon = config.icon;
   const [notificationReadiness, setNotificationReadiness] = useState<"ready" | "pending">("pending");
