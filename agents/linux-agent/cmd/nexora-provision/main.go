@@ -68,6 +68,18 @@ func main() {
 
 func fail(code, message string) { fmt.Fprintf(os.Stderr, "%s: %s\n", code, message); os.Exit(1) }
 
+func createDatabase(name string) error {
+	if !databaseNamePattern.MatchString(name) || len(name) > 64 {
+		return fmt.Errorf("INVALID_DATABASE_NAME: database name is invalid")
+	}
+	statement := "CREATE DATABASE IF NOT EXISTS `" + name + "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+	output, err := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names", "-e", statement).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("DATABASE_CREATE_FAILED: %s", safeOutput(string(output)))
+	}
+	return nil
+}
+
 func verifiedAccount(username string) (*user.User, *user.Group, error) {
 	home := filepath.Join("/home", username)
 	account, err := user.Lookup(username)
