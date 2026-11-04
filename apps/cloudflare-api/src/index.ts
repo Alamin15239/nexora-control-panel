@@ -1803,6 +1803,36 @@ app.post("/v1/databases/:id/users", async (c) => {
   return c.json({ databaseUserId: userId, jobId, status: "PENDING", username: physicalUsername, message: "Database user creation has been queued. Its generated password will be available once, after provisioning succeeds." }, 202);
 });
 
+app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const user = await c.env.DB.prepare(
+    `SELECT u.id, u.username, u.status, d.name AS databaseName, d.hosting_account_id AS accountId, a.username AS accountUsername
+     FROM hosting_database_users u
+     JOIN hosting_databases d ON d.id = u.database_id AND d.organization_id = u.organization_id
+     JOIN hosting_accounts a ON a.id = d.hosting_account_id AND a.organization_id = d.organization_id
+     WHERE u.id = ? AND d.id = ? AND u.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(c.req.param("userId"), c.req.param("id"), identity.organizationId)
+    .first<{ id: string; username: string; status: string; databaseName: string; accountId: string; accountUsername: string }>();
+  if (!user) return c.json({ message: "Database user not found." }, 404);
+  if (user.status !== "ACTIVE") return c.json({ message: "Only an active database user can be revoked." }, 409);
+  const requestedName = user.username.startsWith(user.accountUsername + "_") ? user.username.slice(user.accountUsername.length + 1) : "";
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) return c.json({ message: "The stored database username is invalid." }, 409);
+  const jobId = crypto.randomUUID(), now = new Date().toISOString();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE hosting_database_users SET status = 'REVOKING' WHERE id = ? AND organization_id = ? AND status = 'ACTIVE'")
+        .bind(user.id, identity.organizationId),
+      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'REVOKE_DATABASE_USER', 'QUEUED', ?, ?)")
+        .bind(jobId, user.accountId, "revoke-database-user:" + user.id, JSON.stringify({ databaseUserName: requestedName, databaseName: user.databaseName })),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database_user.revocation_queued', 'database_user', ?, ?)")
+        .bind(crypto.randomUUID(), identity.organizationId, identity.id, user.id, JSON.stringify({ jobId, databaseId: c.req.param("id") })),
+    ]);
+  } catch { return c.json({ message: "Unable to queue database-user revocation." }, 409); }
+  return c.json({ databaseUserId: user.id, jobId, status: "REVOKING" }, 202);
+});
+
 app.get("/v1/databases/:id/users/:userId/secret", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
@@ -1810,8 +1840,8 @@ app.get("/v1/databases/:id/users/:userId/secret", async (c) => {
   let secret: { ciphertext: string; iv: string } | null;
   try {
     secret = await c.env.DB.prepare(
-      "UPDATE database_user_secrets SET revealed_at = ? WHERE database_user_id = ? AND organization_id = ? AND revealed_at IS NULL AND expires_at > ? RETURNING ciphertext, iv",
-    ).bind(new Date().toISOString(), c.req.param("userId"), identity.organizationId, new Date().toISOString()).first<{ ciphertext: string; iv: string }>();
+      "UPDATE database_user_secrets SET revealed_at = ? WHERE database_user_id = ? AND organization_id = ? AND revealed_at IS NULL AND expires_at > ? AND EXISTS (SELECT 1 FROM hosting_database_users u JOIN hosting_databases d ON d.id = u.database_id WHERE u.id = database_user_secrets.database_user_id AND d.id = ? AND u.organization_id = ?) RETURNING ciphertext, iv",
+    ).bind(new Date().toISOString(), c.req.param("userId"), identity.organizationId, new Date().toISOString(), c.req.param("id"), identity.organizationId).first<{ ciphertext: string; iv: string }>();
   } catch { return c.json({ message: "Unable to retrieve the database credential." }, 503); }
   if (!secret) return c.json({ message: "The one-time password is unavailable, expired, or has already been revealed." }, 410);
   try {
@@ -1945,6 +1975,17 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
     } else if (accountId) {
       await c.env.DB.prepare("UPDATE hosting_accounts SET status = 'FAILED', updated_at = ? WHERE id = ? AND server_id = ?")
         .bind(now, accountId.accountId, auth.credential.serverId).run();
+    }
+  }
+  if (completedJob?.operation === "REVOKE_DATABASE_USER" && completedJob.idempotencyKey?.startsWith("revoke-database-user:")) {
+    const databaseUserId = completedJob.idempotencyKey.slice("revoke-database-user:".length);
+    if (input.success) {
+      await c.env.DB.batch([
+        c.env.DB.prepare("UPDATE hosting_database_users SET status = 'REVOKED' WHERE id = ? AND organization_id = ? AND status = 'REVOKING'").bind(databaseUserId, auth.credential.organizationId),
+        c.env.DB.prepare("DELETE FROM database_user_secrets WHERE database_user_id = ? AND organization_id = ?").bind(databaseUserId, auth.credential.organizationId),
+      ]);
+    } else {
+      await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'ACTIVE' WHERE id = ? AND organization_id = ? AND status = 'REVOKING'").bind(databaseUserId, auth.credential.organizationId).run();
     }
   }
   if (completedJob?.operation === "CREATE_DATABASE_USER" && completedJob.idempotencyKey?.startsWith("create-database-user:")) {
