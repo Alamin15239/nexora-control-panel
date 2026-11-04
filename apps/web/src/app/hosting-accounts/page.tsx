@@ -61,16 +61,16 @@ export default function HostingAccountsPage() {
   const pending = accounts.filter(a => a.status === "PENDING").length;
   const active = accounts.filter(a => a.status === "ACTIVE").length;
 
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
       <div className="flex items-center gap-3"><Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link><span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Users size={20}/></span><div><p className="font-semibold">Hosting accounts</p><p className="text-xs text-slate-500">Nexora Control / Customers</p></div></div>
       <button onClick={() => void load()} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"><RefreshCw size={15}/> Refresh</button>
     </div></header>
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
-      <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Customer hosting</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Hosting accounts</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Create customer hosting accounts, assign a Linux server and apply a workspace hosting plan.</p></div><button onClick={() => setShowForm(v => !v)} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800"><Plus size={17}/> Create account</button></div>
+    <section className="mx-auto max-w-[1500px] space-y-7 px-6 py-8">
+      <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Customer hosting</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Hosting accounts</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Create customer hosting accounts, assign a Linux server and apply a workspace hosting plan.</p></div><button onClick={() => setShowForm(v => !v)} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800"><Plus size={17}/> Create account</button></div>
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
-      {showForm && <form onSubmit={createAccount} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {showForm && <form onSubmit={createAccount} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
         <div className="mb-5"><h2 className="font-semibold">New hosting account</h2><p className="mt-1 text-xs text-slate-500">The agent creates the restricted Linux account and document root. If you enter a primary domain, Nexora automatically queues its Nginx website configuration after account creation. DNS and TLS still require separate setup.</p></div>
         <div className="grid gap-4 md:grid-cols-2">
           <label className="text-xs font-medium text-slate-600">System username<input required minLength={3} maxLength={16} pattern="[a-z][a-z0-9_]{2,15}" value={form.username} onChange={e=>setForm(v=>({...v,username:e.target.value.toLowerCase()}))} placeholder="customer01" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm outline-none focus:border-blue-500"/><span className="mt-1 block font-normal text-slate-400">3–16 lowercase letters, numbers or underscores.</span></label>
