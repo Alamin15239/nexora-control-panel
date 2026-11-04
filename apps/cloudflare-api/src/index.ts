@@ -1689,7 +1689,49 @@ app.post("/v1/databases", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
-  return c.json({ message: "Database provisioning is not enabled on this Linux agent yet. No database request was created." }, 501);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const accountId = typeof input.accountId === "string" ? input.accountId : "";
+  const requestedName = typeof input.name === "string" ? input.name.toLowerCase() : "";
+  if (!accountId || !/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) {
+    return c.json({ message: "Choose a hosting account and a database name using 2–31 lowercase letters, numbers, or underscores." }, 400);
+  }
+
+  const account = await c.env.DB.prepare(
+    "SELECT a.id, a.username, a.server_id AS serverId, p.database_limit AS databaseLimit FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1",
+  ).bind(accountId, identity.organizationId).first<{ id: string; username: string; serverId: string; databaseLimit: number }>();
+  if (!account) return c.json({ message: "The selected hosting account is not active or does not belong to this workspace." }, 404);
+
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM hosting_databases WHERE hosting_account_id = ? AND status != 'DELETED'",
+  ).bind(account.id).first<{ count: number }>();
+  if ((count?.count ?? 0) >= account.databaseLimit) {
+    return c.json({ message: "This hosting account has reached its database limit." }, 409);
+  }
+
+  const databaseId = crypto.randomUUID();
+  const databaseName = (account.username + "_" + requestedName).slice(0, 64);
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const payload = JSON.stringify({ databaseId, databaseName });
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO hosting_databases (id, organization_id, hosting_account_id, name, engine, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'MARIADB', 'PENDING', ?, ?)",
+      ).bind(databaseId, identity.organizationId, account.id, databaseName, now, now),
+      c.env.DB.prepare(
+        "INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_DATABASE', 'QUEUED', ?, ?)",
+      ).bind(jobId, account.id, "create-database:" + databaseId, payload),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.provisioning_queued', 'database', ?, ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, databaseId, JSON.stringify({ hostingAccountId: account.id, jobId })),
+    ]);
+  } catch {
+    return c.json({ message: "Unable to queue database provisioning. Refresh and try again." }, 409);
+  }
+  return c.json({ databaseId, jobId, status: "PENDING", name: databaseName, engine: "MARIADB", message: "Database creation has been queued for the connected Linux agent." }, 202);
 });
 
 app.get("/v1/databases/:id/users", async (c) => {
