@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Database, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import { ArrowLeft, Copy, Database, RefreshCw, ShieldCheck, Users } from "lucide-react";
 
 type Account = { id: string; username: string; status: string };
 type Db = { id: string; name: string; engine: string; status: string; hosting_account_id: string; account_username: string; plan_database_limit: number; users: number };
@@ -117,6 +117,26 @@ export default function DatabasesPage() {
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to reveal database password"); }
   };
   const current = databases.find(d => d.id === selected);
+  const activeUsers = users.filter(user => user.status === "ACTIVE");
+
+  const copyConnectionSettings = async (user: DbUser) => {
+    if (!current) return;
+    const settings = [
+      "DB_CONNECTION=mysql",
+      "DB_HOST=localhost",
+      "DB_PORT=3306",
+      `DB_DATABASE=${current.name}`,
+      `DB_USERNAME=${user.username}`,
+      "DB_PASSWORD=enter_the_password_you_saved",
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(settings);
+      setNotice("Connection settings copied. Replace the password placeholder with the password you saved.");
+      setError("");
+    } catch {
+      setError("Unable to copy connection settings. Check your browser clipboard permissions.");
+    }
+  };
   return <main className="min-h-full bg-transparent text-slate-900">
     <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
       <div className="flex items-center gap-3"><Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link><span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Database size={20}/></span><div><p className="font-semibold">Database management</p><p className="text-xs text-slate-500">Nexora Control / Databases</p></div></div>
@@ -129,7 +149,7 @@ export default function DatabasesPage() {
       <div className="grid gap-4 sm:grid-cols-3"><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Databases</p><p className="mt-2 text-3xl font-semibold">{databases.length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Active</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="ACTIVE").length}</p></div><div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Pending provisioning</p><p className="mt-2 text-3xl font-semibold">{databases.filter(d=>d.status==="PENDING").length}</p></div></div>
       <div className="grid gap-6 xl:grid-cols-2">
         <form onSubmit={event => { event.preventDefault(); void createDatabase(); }} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
-          <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-slate-500">Creates an isolated MariaDB database on the selected hosting server. Database users will be added in the next stage.</p>
+          <h2 className="font-semibold">Create database</h2><p className="mt-1 text-xs text-slate-500">Creates an isolated MariaDB database on the selected hosting server. Add restricted users below to connect your hosted applications.</p>
           <div className="mt-5 space-y-4">
             <label className="block text-xs font-medium text-slate-600">Database name<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={name} onChange={e=>setName(e.target.value.toLowerCase())} placeholder="customer_db" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
             <label className="block text-xs font-medium text-slate-600">Hosting account<select required value={accountId} onChange={e=>setAccountId(e.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm"><option value="">Select account</option>{accounts.filter(a=>a.status==="ACTIVE").map(a=><option key={a.id} value={a.id}>{a.username} · {a.status}</option>)}</select></label>
@@ -154,6 +174,22 @@ export default function DatabasesPage() {
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>
         {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p><p className="mt-1 text-xs text-slate-500">{u.status === "ACTIVE" ? "Localhost access · selected database only" : "Provisioning state"}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{u.status}</span>{u.status === "ACTIVE" && u.secret_available === 1 && <button type="button" onClick={() => void revealCredential(u.id)} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50">Reveal one-time password</button>}{u.status === "ACTIVE" && <button type="button" onClick={() => void revokeDatabaseUser(u.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50">Revoke</button>}</div></div>)}</div>}
+      </section>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center gap-2"><Database size={17}/><h2 className="font-semibold">Connection details</h2></div>
+        <p className="mt-1 text-xs text-slate-500">Use these settings in applications hosted on this same server. Remote database connections are disabled.</p>
+        {!current ? <p className="mt-4 text-sm text-slate-500">Select a database to view its connection settings.</p> : activeUsers.length === 0 ? <p className="mt-4 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">No active database users are available. Create a user and wait until its status is ACTIVE to generate connection settings.</p> : <div className="mt-4 space-y-3">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Host</p><p className="mt-1 font-mono text-sm">localhost</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Port</p><p className="mt-1 font-mono text-sm">3306</p></div>
+            <div className="rounded-xl bg-slate-50 p-3"><p className="text-xs text-slate-500">Database</p><p className="mt-1 break-all font-mono text-sm">{current.name}</p></div>
+          </div>
+          {activeUsers.map(user => <div key={user.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 p-3">
+            <div><p className="text-sm font-medium">{user.username}</p><p className="mt-1 text-xs text-slate-500">Active login · localhost only</p></div>
+            <button type="button" onClick={() => void copyConnectionSettings(user)} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"><Copy size={14}/> Copy connection settings</button>
+          </div>)}
+          <p className="text-xs leading-5 text-slate-500">The copied settings include a password placeholder, not your password. Replace it with the password you saved. Keep credentials in your application's environment file and never commit that file to Git.</p>
+        </div>}
       </section>
       {revealedCredential && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-950">One-time database credentials</p><p className="mt-2 text-xs text-amber-900">Username: <span className="font-mono">{revealedCredential.username}</span></p><p className="mt-1 break-all font-mono text-sm text-amber-950">Password: {revealedCredential.password}</p><button type="button" onClick={() => void navigator.clipboard.writeText(revealedCredential.password)} className="mt-3 rounded-lg border border-amber-300 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-100">Copy password</button></div>}
       <p className="flex items-start gap-2 text-xs leading-5 text-slate-400"><ShieldCheck size={14} className="mt-0.5 shrink-0"/> Database credentials are encrypted temporarily and can be revealed once. Save the password securely; Nexora cannot show it again.</p>
