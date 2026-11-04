@@ -299,7 +299,7 @@ app.get("/v1/overview", async (c) => {
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM servers WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM servers WHERE organization_id = ? AND status = 'ONLINE' AND last_heartbeat_at >= ?").bind(identity.organizationId, onlineCutoff).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_accounts WHERE organization_id = ? AND status != 'DELETED'").bind(identity.organizationId).first<{ count: number }>(),
-      c.env.DB.prepare("SELECT COUNT(*) AS count FROM domains WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
+      c.env.DB.prepare("SELECT COUNT(*) AS count FROM domains d JOIN hosting_accounts h ON h.id = d.hosting_account_id WHERE h.organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_plans WHERE organization_id = ? AND active = 1").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_databases WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents')").all<{ name: string }>(),
