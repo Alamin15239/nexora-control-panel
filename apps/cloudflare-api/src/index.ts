@@ -9,6 +9,8 @@ type Bindings = {
   CLOUDFLARE_ZONE_NAME?: string;
   CLOUDFLARE_ZONE_ID?: string;
   CLOUDFLARE_SAAS_TARGET?: string;
+  RESEND_API_KEY?: string;
+  EMAIL_FROM?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -137,7 +139,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -354,6 +356,341 @@ app.get("/v1/servers/:id", async (c) => {
   return c.json({ server });
 });
 
+type ServerTelemetryRow = {
+  id: string;
+  agent_version: string;
+  cpu_usage_percent: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+  disk_total_bytes: number;
+  disk_used_bytes: number;
+  load_average_1m: number;
+  collected_at: string;
+  received_at: string;
+};
+
+app.get("/v1/servers/:id/telemetry", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const serverId = c.req.param("id");
+  const server = await c.env.DB.prepare(
+    `SELECT id, hostname, primary_ip, region, agent_version, status,
+            last_heartbeat_at, created_at
+     FROM servers WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(serverId, identity.organizationId).first<ServerRow>();
+  if (!server) return c.json({ message: "Server not found" }, 404);
+
+  const result = await c.env.DB.prepare(
+    `SELECT id, agent_version, cpu_usage_percent, memory_total_bytes,
+            memory_used_bytes, disk_total_bytes, disk_used_bytes,
+            load_average_1m, collected_at, received_at
+     FROM server_telemetry
+     WHERE server_id = ?
+     ORDER BY collected_at DESC
+     LIMIT 60`,
+  ).bind(serverId).all<ServerTelemetryRow>();
+
+  const samples = (result.results ?? []).reverse();
+  return c.json({
+    server,
+    latest: samples.length ? samples[samples.length - 1] : null,
+    samples,
+  });
+});
+
+app.get("/v1/servers/:id/services", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const serverId = c.req.param("id");
+  const server = await c.env.DB.prepare(
+    `SELECT id, hostname, primary_ip, region, agent_version, status,
+            last_heartbeat_at, created_at
+     FROM servers WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(serverId, identity.organizationId).first<ServerRow>();
+  if (!server) return c.json({ message: "Server not found" }, 404);
+
+  const result = await c.env.DB.prepare(
+    `SELECT id, service_key, display_name, status, checked_at, received_at
+     FROM server_service_checks
+     WHERE server_id = ?
+     ORDER BY checked_at DESC, received_at DESC
+     LIMIT 120`,
+  ).bind(serverId).all<{
+    id: string;
+    service_key: string;
+    display_name: string;
+    status: string;
+    checked_at: string;
+    received_at: string;
+  }>();
+
+  const samples = (result.results ?? []).reverse();
+  const latestByService = new Map<string, typeof samples[number]>();
+  for (const sample of [...samples].reverse()) {
+    if (!latestByService.has(sample.service_key)) {
+      latestByService.set(sample.service_key, sample);
+    }
+  }
+
+  return c.json({
+    server,
+    services: [...latestByService.values()],
+    samples,
+  });
+});
+
+app.get("/v1/incidents", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const status = c.req.query("status");
+  if (status && !["OPEN", "ACKNOWLEDGED", "RESOLVED"].includes(status)) {
+    return c.json({ message: "Invalid incident status filter" }, 400);
+  }
+
+  const result = await c.env.DB.prepare(
+    `SELECT i.id, i.server_id AS serverId, s.hostname AS serverHostname,
+            i.incident_type AS incidentType, i.incident_key AS incidentKey,
+            i.severity, i.status, i.title, i.description,
+            i.opened_at AS openedAt, i.updated_at AS updatedAt,
+            i.last_observed_at AS lastObservedAt, i.resolved_at AS resolvedAt,
+            i.acknowledged_at AS acknowledgedAt,
+            i.acknowledged_by AS acknowledgedBy
+     FROM server_incidents i
+     JOIN servers s ON s.id = i.server_id AND s.organization_id = i.organization_id
+     WHERE i.organization_id = ?
+       AND (? IS NULL OR i.status = ?)
+     ORDER BY
+       CASE WHEN i.status = 'RESOLVED' THEN 1 ELSE 0 END,
+       i.opened_at DESC
+     LIMIT 100`,
+  ).bind(identity.organizationId, status || null, status || null).all();
+
+  return c.json({ incidents: result.results ?? [] });
+});
+
+app.post("/v1/incidents/:id/acknowledge", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) {
+    return c.json({ message: "Administrator access required" }, 403);
+  }
+
+  const incidentId = c.req.param("id");
+  const incident = await c.env.DB.prepare(
+    "SELECT id, status FROM server_incidents WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(incidentId, identity.organizationId).first<{ id: string; status: string }>();
+
+  if (!incident) return c.json({ message: "Incident not found" }, 404);
+  if (incident.status === "RESOLVED") {
+    return c.json({ message: "Resolved incidents cannot be acknowledged" }, 409);
+  }
+
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    "UPDATE server_incidents SET status = 'ACKNOWLEDGED', acknowledged_at = COALESCE(acknowledged_at, ?), acknowledged_by = COALESCE(acknowledged_by, ?), updated_at = ? WHERE id = ? AND organization_id = ? AND resolved_at IS NULL",
+  ).bind(now, identity.id, now, incidentId, identity.organizationId).run();
+
+  return c.json({ acknowledged: true, incidentId });
+});
+
+
+app.get("/v1/notification-settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+
+  const row = await c.env.DB.prepare(
+    "SELECT enabled, recipients_json AS recipientsJson, updated_at AS updatedAt FROM incident_notification_settings WHERE organization_id = ? LIMIT 1",
+  ).bind(identity.organizationId).first<{
+    enabled: number; recipientsJson: string; updatedAt: string;
+  }>();
+
+  let recipients: string[] = [];
+  try {
+    const parsed: unknown = row ? JSON.parse(row.recipientsJson) : [];
+    if (Array.isArray(parsed)) recipients = parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    recipients = [];
+  }
+
+  return c.json({
+    enabled: row?.enabled === 1,
+    recipients,
+    updatedAt: row?.updatedAt ?? null,
+    providerConfigured: Boolean(c.env.RESEND_API_KEY && c.env.EMAIL_FROM),
+    sender: c.env.EMAIL_FROM ?? null,
+    canManage: canManageServers(identity.role),
+  });
+});
+
+app.post("/v1/notification-settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) {
+    return c.json({ message: "Administrator access required" }, 403);
+  }
+
+  let input: { enabled?: unknown; recipients?: unknown };
+  try {
+    input = await c.req.json();
+  } catch {
+    return c.json({ message: "Invalid JSON request body" }, 400);
+  }
+
+  if (typeof input.enabled !== "boolean" || !Array.isArray(input.recipients)) {
+    return c.json({ message: "Provide an enabled boolean and a recipients array" }, 400);
+  }
+  if (input.recipients.length > 10) {
+    return c.json({ message: "A maximum of 10 notification recipients is allowed" }, 400);
+  }
+
+  const recipients = [...new Set(input.recipients.map((value) =>
+    typeof value === "string" ? normalizeEmail(value) : "",
+  ))];
+
+  if (recipients.some((email) => !validEmail(email))) {
+    return c.json({ message: "One or more recipient email addresses are invalid" }, 400);
+  }
+  if (input.enabled && recipients.length === 0) {
+    return c.json({ message: "Add at least one recipient before enabling notifications" }, 400);
+  }
+
+  const now = new Date().toISOString();
+  await c.env.DB.prepare(
+    `INSERT INTO incident_notification_settings
+       (organization_id, enabled, recipients_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(organization_id) DO UPDATE SET
+       enabled = excluded.enabled,
+       recipients_json = excluded.recipients_json,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    identity.organizationId,
+    input.enabled ? 1 : 0,
+    JSON.stringify(recipients),
+    now,
+    now,
+  ).run();
+
+  return c.json({
+    saved: true,
+    enabled: input.enabled,
+    recipients,
+    providerConfigured: Boolean(c.env.RESEND_API_KEY && c.env.EMAIL_FROM),
+  });
+});
+
+
+app.post("/v1/notification-settings/test", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) {
+    return c.json({ message: "Administrator access required" }, 403);
+  }
+  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) {
+    return c.json({ message: "Resend email delivery is not configured" }, 503);
+  }
+
+  const settings = await c.env.DB.prepare(
+    `SELECT enabled, recipients_json AS recipientsJson
+     FROM incident_notification_settings
+     WHERE organization_id = ? LIMIT 1`,
+  ).bind(identity.organizationId).first<{
+    enabled: number;
+    recipientsJson: string;
+  }>();
+
+  if (!settings || settings.enabled !== 1) {
+    return c.json({ message: "Enable incident email notifications before sending a test" }, 400);
+  }
+
+  let recipients: unknown;
+  try {
+    recipients = JSON.parse(settings.recipientsJson);
+  } catch {
+    return c.json({ message: "Saved notification recipients are invalid" }, 400);
+  }
+
+  if (!Array.isArray(recipients) || recipients.length === 0 ||
+      recipients.length > 10 ||
+      recipients.some((email) => typeof email !== "string" || !validEmail(email))) {
+    return c.json({ message: "Saved notification recipient list is invalid" }, 400);
+  }
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const cooldownBefore = new Date(now.getTime() - 60 * 1000).toISOString();
+
+  const throttle = await c.env.DB.prepare(
+    `UPDATE incident_notification_settings
+     SET last_test_at = ?
+     WHERE organization_id = ?
+       AND (last_test_at IS NULL OR last_test_at <= ?)`,
+  ).bind(nowIso, identity.organizationId, cooldownBefore).run();
+
+  if ((throttle.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "A test email was sent recently. Please wait 60 seconds before trying again." }, 429);
+  }
+
+  const subject = "[Nexora] Test email — incident notifications";
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#172033">
+      <h2>Nexora email delivery test</h2>
+      <p>This is a test message from your Nexora Control Panel workspace.</p>
+      <p>Your saved incident notification recipients and Resend delivery configuration are working well enough for Resend to accept this test message.</p>
+      <p><strong>Sent at:</strong> ${escapeEmailHtml(nowIso)}</p>
+      <hr/>
+      <p style="font-size:12px;color:#64748b">Nexora Control Panel · Test message only — no server incident was created.</p>
+    </div>`;
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${c.env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: c.env.EMAIL_FROM,
+        to: recipients,
+        subject,
+        html,
+      }),
+    });
+
+    const responseText = (await response.text()).slice(0, 800);
+    let providerResult: { id?: string; message?: string } = {};
+    try {
+      providerResult = JSON.parse(responseText);
+    } catch {
+      providerResult = {};
+    }
+
+    if (!response.ok) {
+      console.error("Resend test email rejected:", response.status, responseText);
+      return c.json({
+        sent: false,
+        message: `Resend rejected the test email (HTTP ${response.status}). Check the API Worker logs and Resend account.`,
+      }, 502);
+    }
+
+    return c.json({
+      sent: true,
+      message: "Resend accepted the test email.",
+      emailId: providerResult.id ?? null,
+      recipientCount: recipients.length,
+    });
+  } catch (error) {
+    console.error("Resend test email request failed:", error);
+    return c.json({
+      sent: false,
+      message: "Unable to contact Resend. Check the API Worker logs.",
+    }, 502);
+  }
+});
+
 app.post("/v1/servers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
@@ -478,7 +815,7 @@ app.post("/v1/agent/heartbeat", async (c) => {
   }
 
   const credential = await c.env.DB.prepare(
-    "SELECT secret_hash AS secretHash, server_id AS serverId, organization_id AS organizationId FROM agent_credentials WHERE node_id = ? AND revoked_at IS NULL LIMIT 1",
+    "SELECT ac.secret_hash AS secretHash, ac.server_id AS serverId, ac.organization_id AS organizationId FROM agent_credentials ac JOIN servers s ON s.id = ac.server_id AND s.organization_id = ac.organization_id WHERE ac.node_id = ? AND ac.revoked_at IS NULL LIMIT 1",
   ).bind(nodeId).first<{ secretHash: string; serverId: string; organizationId: string }>();
   if (!credential) return c.json({ message: "Agent identity is unknown or revoked" }, 401);
 
@@ -505,6 +842,63 @@ app.post("/v1/agent/heartbeat", async (c) => {
     return c.json({ message: "Telemetry fields are invalid or outside accepted limits" }, 400);
   }
 
+
+    const serviceNames: Record<string, string> = {
+      nginx: "Nginx",
+      php_fpm: "PHP 8.5-FPM",
+      mariadb: "MariaDB",
+      ssh: "SSH",
+      nexora_agent: "Nexora Agent",
+      cloudflared: "Cloudflare Tunnel",
+    };
+    const allowedServiceStatuses = new Set([
+      "ACTIVE", "INACTIVE", "FAILED", "NOT_INSTALLED", "UNKNOWN",
+    ]);
+    const serviceChecks: Array<{
+      key: string;
+      displayName: string;
+      status: string;
+      checkedAt: string;
+    }> = [];
+
+    // Backward compatibility: older agents may omit services.
+    if (input.services !== undefined) {
+      if (!Array.isArray(input.services) || input.services.length > 6) {
+        return c.json({ message: "Service checks must be an array of at most six entries" }, 400);
+      }
+
+      const seenServiceKeys = new Set<string>();
+      for (const item of input.services) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          return c.json({ message: "Invalid service check entry" }, 400);
+        }
+
+        const check = item as Record<string, unknown>;
+        const key = typeof check.key === "string" ? check.key : "";
+        const status = typeof check.status === "string" ? check.status : "";
+        const checkedAt = typeof check.checkedAt === "string" ? check.checkedAt : "";
+        const checkedAtMs = Date.parse(checkedAt);
+
+        if (
+          !Object.prototype.hasOwnProperty.call(serviceNames, key) ||
+          seenServiceKeys.has(key) ||
+          !allowedServiceStatuses.has(status) ||
+          !Number.isFinite(checkedAtMs) ||
+          Math.abs(Date.now() - checkedAtMs) > 10 * 60 * 1000
+        ) {
+          return c.json({ message: "Service check fields are invalid or outside accepted limits" }, 400);
+        }
+
+        seenServiceKeys.add(key);
+        serviceChecks.push({
+          key,
+          displayName: serviceNames[key],
+          status,
+          checkedAt: new Date(checkedAtMs).toISOString(),
+        });
+      }
+    }
+
   const bodyHash = await sha256(rawBody);
   const path = new URL(c.req.url).pathname;
   const canonical = [timestamp, nonce, c.req.method.toUpperCase(), path, bodyHash].join("\n");
@@ -520,13 +914,65 @@ app.post("/v1/agent/heartbeat", async (c) => {
     return c.json({ message: "Agent request nonce has already been used" }, 409);
   }
   const now = new Date().toISOString();
+  const incidentStatements = serviceChecks.flatMap((check) => {
+    const incidentKey = `service:${check.key}`;
+    if (check.status === "INACTIVE" || check.status === "FAILED") {
+      const severity = check.status === "FAILED" ? "CRITICAL" : "WARNING";
+      const title = `${check.displayName} ${check.status.toLowerCase()}`;
+      const description = `${check.displayName} reported ${check.status} by the authenticated server agent.`;
+
+      return [
+        c.env.DB.prepare(
+          "UPDATE server_incidents SET updated_at = ?, last_observed_at = ?, severity = ?, title = ?, description = ? WHERE server_id = ? AND organization_id = ? AND incident_key = ? AND resolved_at IS NULL",
+        ).bind(now, check.checkedAt, severity, title, description, credential.serverId, credential.organizationId, incidentKey),
+        c.env.DB.prepare(
+          "INSERT OR IGNORE INTO server_incidents (id, organization_id, server_id, incident_type, incident_key, severity, status, title, description, opened_at, updated_at, last_observed_at) SELECT ?, ?, ?, 'SERVICE', ?, ?, 'OPEN', ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM servers WHERE id = ? AND organization_id = ?)",
+        ).bind(
+          crypto.randomUUID(), credential.organizationId, credential.serverId,
+          incidentKey, severity, title, description, now, now, check.checkedAt,
+          credential.serverId, credential.organizationId,
+        ),
+        notificationOutboxStatement(
+          c.env.DB, credential.organizationId, credential.serverId,
+          incidentKey, "OPENED", now,
+        ),
+      ];
+    }
+
+    if (check.status === "ACTIVE") {
+      return [
+        c.env.DB.prepare(
+          "UPDATE server_incidents SET status = 'RESOLVED', resolved_at = ?, updated_at = ?, last_observed_at = ? WHERE server_id = ? AND organization_id = ? AND incident_key = ? AND resolved_at IS NULL",
+        ).bind(now, now, check.checkedAt, credential.serverId, credential.organizationId, incidentKey),
+        notificationOutboxStatement(
+          c.env.DB, credential.organizationId, credential.serverId,
+          incidentKey, "RESOLVED", now,
+        ),
+      ];
+    }
+
+    return [];
+  });
+
   await c.env.DB.batch([
     c.env.DB.prepare(
       "INSERT INTO server_telemetry (id, server_id, agent_version, cpu_usage_percent, memory_total_bytes, memory_used_bytes, disk_total_bytes, disk_used_bytes, load_average_1m, collected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).bind(crypto.randomUUID(), credential.serverId, agentVersion, cpu, memoryTotal, memoryUsed, diskTotal, diskUsed, load, collectedAt),
     c.env.DB.prepare("UPDATE servers SET status = 'ONLINE', agent_version = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ?")
       .bind(agentVersion, now, now, credential.serverId),
+    ...serviceChecks.map((check) =>
+      c.env.DB.prepare(
+        "INSERT INTO server_service_checks (id, server_id, service_key, display_name, status, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).bind(crypto.randomUUID(), credential.serverId, check.key, check.displayName, check.status, check.checkedAt),
+    ),
     c.env.DB.prepare("UPDATE agent_credentials SET last_seen_at = ? WHERE node_id = ?").bind(now, nodeId),
+    ...incidentStatements,
+    c.env.DB.prepare("UPDATE server_incidents SET status = 'RESOLVED', resolved_at = ?, updated_at = ?, last_observed_at = ? WHERE server_id = ? AND organization_id = ? AND incident_key = 'server-heartbeat' AND resolved_at IS NULL")
+      .bind(now, now, now, credential.serverId, credential.organizationId),
+    notificationOutboxStatement(
+      c.env.DB, credential.organizationId, credential.serverId,
+      "server-heartbeat", "RESOLVED", now,
+    ),
     c.env.DB.prepare("DELETE FROM agent_nonces WHERE created_at < ?").bind(new Date(Date.now() - 10 * 60 * 1000).toISOString()),
   ]);
   return c.json({ accepted: true, receivedAt: now });
@@ -1234,7 +1680,7 @@ async function authenticateAgentRequest(request: Request, db: D1Database, rawBod
     return { error: { status: 401, message: "Agent request timestamp is outside the allowed five-minute window" } } as const;
   }
   const credential = await db.prepare(
-    "SELECT secret_hash AS secretHash, server_id AS serverId, organization_id AS organizationId FROM agent_credentials WHERE node_id = ? AND revoked_at IS NULL LIMIT 1",
+    "SELECT ac.secret_hash AS secretHash, ac.server_id AS serverId, ac.organization_id AS organizationId FROM agent_credentials ac JOIN servers s ON s.id = ac.server_id AND s.organization_id = ac.organization_id WHERE ac.node_id = ? AND ac.revoked_at IS NULL LIMIT 1",
   ).bind(nodeId).first<AgentCredential>();
   if (!credential) return { error: { status: 401, message: "Agent identity is unknown or revoked" } } as const;
   const bodyHash = await sha256(rawBody);
@@ -1352,4 +1798,249 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
-export default app;
+
+type NotificationEventType = "OPENED" | "RESOLVED";
+
+function notificationOutboxStatement(
+  db: D1Database,
+  organizationId: string,
+  serverId: string,
+  incidentKey: string,
+  eventType: NotificationEventType,
+  eventAt: string,
+): D1PreparedStatement {
+  const eventColumn = eventType === "OPENED" ? "opened_at" : "resolved_at";
+  return db.prepare(
+    `INSERT OR IGNORE INTO incident_notification_outbox
+       (id, organization_id, incident_id, event_type, recipients_json,
+        payload_json, status, next_attempt_at, created_at, updated_at)
+     SELECT ?, i.organization_id, i.id, ?, n.recipients_json,
+            json_object(
+              'eventType', ?,
+              'hostname', s.hostname,
+              'incidentType', i.incident_type,
+              'severity', i.severity,
+              'title', i.title,
+              'description', i.description,
+              'openedAt', i.opened_at,
+              'resolvedAt', i.resolved_at,
+              'observedAt', i.last_observed_at
+            ),
+            'PENDING', ?, ?, ?
+     FROM server_incidents i
+     JOIN servers s
+       ON s.id = i.server_id AND s.organization_id = i.organization_id
+     JOIN incident_notification_settings n
+       ON n.organization_id = i.organization_id AND n.enabled = 1
+     WHERE i.server_id = ?
+       AND i.organization_id = ?
+       AND i.incident_key = ?
+       AND i.${eventColumn} = ?
+       AND json_array_length(n.recipients_json) > 0
+       AND NOT EXISTS (
+         SELECT 1 FROM incident_notification_outbox o
+         WHERE o.incident_id = i.id AND o.event_type = ?
+       )`,
+  ).bind(
+    crypto.randomUUID(),
+    eventType,
+    eventType,
+    eventAt,
+    eventAt,
+    eventAt,
+    serverId,
+    organizationId,
+    incidentKey,
+    eventAt,
+    eventType,
+  );
+}
+
+function escapeEmailHtml(value: unknown): string {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character] ?? character);
+}
+
+type NotificationOutboxRow = {
+  id: string;
+  recipients_json: string;
+  payload_json: string;
+  attempts: number;
+};
+
+async function dispatchIncidentNotifications(env: Bindings): Promise<void> {
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return;
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const due = await env.DB.prepare(
+    `SELECT id FROM incident_notification_outbox
+     WHERE (
+       status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?
+     ) OR (
+       status = 'PROCESSING' AND locked_until IS NOT NULL AND locked_until <= ?
+     )
+     ORDER BY next_attempt_at ASC
+     LIMIT 10`,
+  ).bind(nowIso, nowIso).all<{ id: string }>();
+
+  for (const candidate of due.results ?? []) {
+    const lockedUntil = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    const claim = await env.DB.prepare(
+      `UPDATE incident_notification_outbox
+       SET status = 'PROCESSING', locked_until = ?,
+           attempts = attempts + 1, updated_at = ?
+       WHERE id = ? AND (
+         (status IN ('PENDING', 'RETRY') AND next_attempt_at <= ?)
+         OR (status = 'PROCESSING' AND locked_until IS NOT NULL AND locked_until <= ?)
+       )`,
+    ).bind(lockedUntil, nowIso, candidate.id, nowIso, nowIso).run();
+
+    if ((claim.meta?.changes ?? 0) !== 1) continue;
+
+    const row = await env.DB.prepare(
+      `SELECT id, recipients_json, payload_json, attempts
+       FROM incident_notification_outbox WHERE id = ? LIMIT 1`,
+    ).bind(candidate.id).first<NotificationOutboxRow>();
+
+    if (!row) continue;
+
+    try {
+      const recipients: unknown = JSON.parse(row.recipients_json);
+      const payload: Record<string, unknown> = JSON.parse(row.payload_json);
+
+      if (!Array.isArray(recipients) || recipients.length === 0 ||
+          recipients.length > 10 ||
+          recipients.some((email) => typeof email !== "string" || !validEmail(email))) {
+        throw new Error("Outbox recipient list is invalid");
+      }
+
+      const opened = payload.eventType === "OPENED";
+      const eventLabel = opened ? "Incident opened" : "Incident recovered";
+      const subject = `[Nexora] ${eventLabel}: ${String(payload.title ?? "Server incident")}`;
+      const hostname = escapeEmailHtml(payload.hostname);
+      const title = escapeEmailHtml(payload.title);
+      const description = escapeEmailHtml(payload.description);
+      const severity = escapeEmailHtml(payload.severity);
+      const incidentType = escapeEmailHtml(payload.incidentType);
+      const observedAt = escapeEmailHtml(payload.observedAt);
+      const html = `
+        <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#172033">
+          <h2>${escapeEmailHtml(eventLabel)}</h2>
+          <p><strong>Server:</strong> ${hostname}</p>
+          <p><strong>Incident:</strong> ${title}</p>
+          <p><strong>Severity:</strong> ${severity}</p>
+          <p><strong>Type:</strong> ${incidentType}</p>
+          <p>${description}</p>
+          <p><strong>Observed:</strong> ${observedAt}</p>
+          <hr/>
+          <p style="font-size:12px;color:#64748b">Nexora Control Panel · Automated infrastructure notification</p>
+        </div>`;
+
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: env.EMAIL_FROM,
+          to: recipients,
+          subject,
+          html,
+        }),
+      });
+
+      if (!response.ok) {
+        const responseText = (await response.text()).slice(0, 800);
+        throw new Error(`Resend HTTP ${response.status}: ${responseText}`);
+      }
+
+      await env.DB.prepare(
+        `UPDATE incident_notification_outbox
+         SET status = 'SENT', sent_at = ?, locked_until = NULL,
+             last_error = NULL, updated_at = ?
+         WHERE id = ? AND status = 'PROCESSING'`,
+      ).bind(new Date().toISOString(), new Date().toISOString(), row.id).run();
+    } catch (error) {
+      const failedAt = new Date();
+      const attempts = row.attempts;
+      const exhausted = attempts >= 8;
+      const delaySeconds = Math.min(6 * 60 * 60, 60 * (2 ** Math.max(0, attempts - 1)));
+      const nextAttempt = new Date(failedAt.getTime() + delaySeconds * 1000).toISOString();
+      const message = (error instanceof Error ? error.message : "Unknown email delivery error").slice(0, 1000);
+
+      await env.DB.prepare(
+        `UPDATE incident_notification_outbox
+         SET status = ?, next_attempt_at = ?, locked_until = NULL,
+             last_error = ?, updated_at = ?
+         WHERE id = ? AND status = 'PROCESSING'`,
+      ).bind(
+        exhausted ? "FAILED" : "RETRY",
+        nextAttempt,
+        message,
+        failedAt.toISOString(),
+        row.id,
+      ).run();
+    }
+  }
+}
+
+async function checkMissedHeartbeats(env: Bindings): Promise<void> {
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - 3 * 60 * 1000).toISOString();
+  const observedAt = now.toISOString();
+
+  const stale = await env.DB.prepare(
+    `SELECT id, organization_id AS organizationId, hostname, last_heartbeat_at AS lastHeartbeatAt
+     FROM servers
+     WHERE last_heartbeat_at IS NOT NULL
+       AND last_heartbeat_at <= ?
+       AND status IN ('ONLINE', 'DEGRADED')`,
+  ).bind(cutoff).all<{
+    id: string;
+    organizationId: string;
+    hostname: string;
+    lastHeartbeatAt: string;
+  }>();
+
+  for (const server of stale.results ?? []) {
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE servers SET status = 'OFFLINE', updated_at = ? WHERE id = ? AND organization_id = ? AND last_heartbeat_at = ? AND last_heartbeat_at <= ? AND status IN ('ONLINE', 'DEGRADED')",
+      ).bind(observedAt, server.id, server.organizationId, server.lastHeartbeatAt, cutoff),
+      env.DB.prepare(
+        "INSERT OR IGNORE INTO server_incidents (id, organization_id, server_id, incident_type, incident_key, severity, status, title, description, opened_at, updated_at, last_observed_at) SELECT ?, ?, id, 'SERVER_HEARTBEAT', 'server-heartbeat', 'CRITICAL', 'OPEN', ?, ?, ?, ?, ? FROM servers WHERE id = ? AND organization_id = ? AND status = 'OFFLINE' AND last_heartbeat_at = ?",
+      ).bind(
+        crypto.randomUUID(), server.organizationId,
+        `${server.hostname} is offline`,
+        `No authenticated heartbeat has been received since ${server.lastHeartbeatAt}.`,
+        observedAt, observedAt, server.lastHeartbeatAt,
+        server.id, server.organizationId, server.lastHeartbeatAt,
+      ),
+      notificationOutboxStatement(
+        env.DB, server.organizationId, server.id,
+        "server-heartbeat", "OPENED", observedAt,
+      ),
+    ]);
+  }
+}
+
+export default {
+  fetch: app.fetch,
+  scheduled(_controller: ScheduledController, env: Bindings, ctx: ExecutionContext) {
+    ctx.waitUntil(Promise.all([
+      checkMissedHeartbeats(env).catch((error) => {
+        console.error("Heartbeat incident check failed:", error);
+      }),
+      dispatchIncidentNotifications(env).catch((error) => {
+        console.error("Incident email dispatcher failed:", error);
+      }),
+    ]));
+  },
+};

@@ -6,6 +6,7 @@ compatibility_date = "2026-11-02"
 ALLOW_PUBLIC_REGISTRATION = "true"
 CLOUDFLARE_ZONE_NAME = "nexoraedge.digital"
 
+EMAIL_FROM = "Nexora Alerts <alerts@nexoraedge.digital>"
 [observability]
 enabled = true
 
@@ -14,3 +15,6 @@ binding = "DB"
 database_name = "nexora-production"
 database_id = "f819590a-ebef-429d-9ee8-d006a1f5df7f"
 migrations_dir = "migrations"
+
+[triggers]
+crons = ["* * * * *"]

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock3, LockKeyhole, Mail, Network, HardDrive, Activity, Settings2, ShieldCheck, Server, AlertTriangle } from "lucide-react";
 
 type Item = { title: string; description: string; state: "ready" | "pending" | "blocked" };
@@ -45,11 +46,12 @@ const configs: Record<string, { title: string; subtitle: string; icon: typeof Ma
   monitoring: {
     title: "Monitoring", subtitle: "Infrastructure health, capacity and service events.", icon: Activity,
     items: [
-      { title: "Server heartbeat", description: "Server records support online and last-heartbeat status fields.", state: "pending" },
-      { title: "CPU and memory telemetry", description: "Telemetry storage is prepared; authenticated agent reporting is not live.", state: "pending" },
-      { title: "Disk and capacity alerts", description: "Thresholds and notification delivery need configuration.", state: "pending" },
-      { title: "Service uptime checks", description: "HTTP, DNS, mail and database probes are not configured.", state: "blocked" },
-    ], note: "Monitoring values will remain empty until a connected agent and health-check service report verified measurements."
+      { title: "Server heartbeat", description: "Authenticated Linux agents report server connectivity and last-heartbeat status.", state: "ready" },
+      { title: "CPU, memory and disk telemetry", description: "Signed resource measurements are stored and displayed with history.", state: "ready" },
+      { title: "Systemd service checks", description: "Six allowlisted Linux services report read-only unit states through agent heartbeats.", state: "ready" },
+      { title: "Capacity thresholds and notifications", description: "Alert thresholds and notification delivery still need configuration.", state: "pending" },
+      { title: "HTTP, DNS and mail probes", description: "External application and network probes are not configured.", state: "blocked" },
+    ], note: "Server telemetry and systemd service states are available from connected agents. Alert delivery and external probes are separate unfinished capabilities."
   },
   settings: {
     title: "System settings", subtitle: "Workspace configuration and service integrations.", icon: Settings2,
@@ -63,12 +65,238 @@ const configs: Record<string, { title: string; subtitle: string; icon: typeof Ma
   }
 };
 
+
+type NotificationSettings = {
+  enabled: boolean;
+  recipients: string[];
+  providerConfigured: boolean;
+  sender: string | null;
+  canManage: boolean;
+};
+
+function EmailNotificationSettings() {
+  const [settings, setSettings] = useState<NotificationSettings | null>(null);
+  const [recipientsText, setRecipientsText] = useState("");
+  const [enabled, setEnabled] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [testSending, setTestSending] = useState(false);
+  const [testMessage, setTestMessage] = useState("");
+  const [testError, setTestError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/control/notification-settings", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to load notification settings.");
+        return data as NotificationSettings;
+      })
+      .then((data) => {
+        if (!active) return;
+        setSettings(data);
+        setEnabled(data.enabled);
+        setRecipientsText(data.recipients.join("\n"));
+      })
+      .catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : "Unable to load notification settings.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  async function saveSettings(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    const recipients = [...new Set(
+      recipientsText.split(/[,\n;]/).map((email) => email.trim().toLowerCase()).filter(Boolean)
+    )];
+
+    try {
+      const response = await fetch("/api/control/notification-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled, recipients }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to save notification settings.");
+
+      setSettings((current) => current ? {
+        ...current,
+        enabled: data.enabled,
+        recipients: data.recipients,
+        providerConfigured: data.providerConfigured,
+      } : current);
+      setRecipientsText(data.recipients.join("\n"));
+      setMessage("Notification settings saved.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to save notification settings.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+
+  async function sendTestEmail() {
+    setTestSending(true);
+    setTestError("");
+    setTestMessage("");
+
+    try {
+      const response = await fetch("/api/control/notification-settings/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to send test email.");
+      setTestMessage(
+        data.emailId
+          ? `Resend accepted the test email. Message ID: ${data.emailId}`
+          : "Resend accepted the test email."
+      );
+    } catch (reason) {
+      setTestError(reason instanceof Error ? reason.message : "Unable to send test email.");
+    } finally {
+      setTestSending(false);
+    }
+  }
+
+  return <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+    <div className="border-b border-slate-100 px-5 py-4">
+      <div className="flex items-center gap-2">
+        <Mail size={18} className="text-blue-700"/>
+        <h2 className="font-semibold">Incident email notifications</h2>
+      </div>
+      <p className="mt-1 text-xs text-slate-500">Choose who receives incident-opened and incident-recovery alerts for this workspace.</p>
+    </div>
+    <div className="space-y-4 p-5">
+      {loading ? <p className="text-sm text-slate-500">Loading notification settings…</p> : <>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div>
+            <p className="text-sm font-medium">Resend delivery provider</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {settings?.providerConfigured
+                ? `Configured${settings.sender ? ` · ${settings.sender}` : ""}`
+                : "Not configured. Add RESEND_API_KEY and EMAIL_FROM to the API Worker before sending."}
+            </p>
+          </div>
+          <span className={"rounded-full px-2.5 py-1 text-xs font-medium " + (settings?.providerConfigured ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+            {settings?.providerConfigured ? "Provider ready" : "Setup required"}
+          </span>
+        </div>
+
+        <form onSubmit={saveSettings} className="space-y-4">
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              checked={enabled}
+              disabled={!settings?.canManage || saving}
+              onChange={(event) => setEnabled(event.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-slate-300"
+            />
+            <span>
+              <span className="block text-sm font-medium">Enable incident email notifications</span>
+              <span className="mt-1 block text-xs text-slate-500">When active, new incidents and their recovery will be sent to the recipients below once delivery is enabled.</span>
+            </span>
+          </label>
+
+          <label className="block">
+            <span className="text-sm font-medium">Recipient email addresses</span>
+            <textarea
+              value={recipientsText}
+              onChange={(event) => setRecipientsText(event.target.value)}
+              disabled={!settings?.canManage || saving}
+              rows={4}
+              maxLength={2540}
+              placeholder={"ops@example.com\nadmin@example.com"}
+              className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50"
+            />
+            <span className="mt-1 block text-xs text-slate-500">Separate addresses with a new line, comma or semicolon. Maximum 10 recipients.</span>
+          </label>
+
+          {!settings?.canManage && <p className="text-xs text-slate-500">Only workspace owners and administrators can change these settings.</p>}
+          {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+          {message && <p role="status" className="text-sm text-emerald-700">{message}</p>}
+
+          {settings?.canManage && <button
+            type="submit"
+            disabled={saving}
+            className="rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {saving ? "Saving…" : "Save notification settings"}
+          </button>}
+          {settings?.canManage && <div className="space-y-2 border-t border-slate-100 pt-4">
+            <button
+              type="button"
+              onClick={sendTestEmail}
+              disabled={testSending || saving || loading || !settings.enabled || !settings.providerConfigured || settings.recipients.length === 0}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {testSending ? "Sending test email…" : "Send test email"}
+            </button>
+            <p className="text-xs text-slate-500">Sends a clearly labelled test message to the saved recipients. Does not create an incident. One test per 60 seconds.</p>
+            {testError && <p role="alert" className="text-sm text-red-600">{testError}</p>}
+            {testMessage && <p role="status" className="break-all text-sm text-emerald-700">{testMessage}</p>}
+          </div>}
+        </form>
+      </>}
+    </div>
+  </section>;
+}
+
 export default function OperationsModule({ module }: { module: string }) {
   const config = configs[module] ?? configs.settings;
   const Icon = config.icon;
-  const ready = config.items.filter(x => x.state === "ready").length;
-  const pending = config.items.filter(x => x.state === "pending").length;
-  const blocked = config.items.filter(x => x.state === "blocked").length;
+  const [notificationReadiness, setNotificationReadiness] = useState<"ready" | "pending">("pending");
+
+  useEffect(() => {
+    if (module !== "settings") return;
+    let active = true;
+
+    fetch("/api/control/notification-settings", { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to load notification readiness.");
+        return data as NotificationSettings;
+      })
+      .then((data) => {
+        if (!active) return;
+        const ready =
+          data.providerConfigured &&
+          data.enabled &&
+          data.recipients.length > 0;
+        setNotificationReadiness(ready ? "ready" : "pending");
+      })
+      .catch(() => {
+        if (active) setNotificationReadiness("pending");
+      });
+
+    return () => { active = false; };
+  }, [module]);
+
+  const items = config.items.map(item =>
+    module === "settings" && item.title === "Email notifications"
+      ? {
+          ...item,
+          description: notificationReadiness === "ready"
+            ? "Transactional email provider is configured, notifications are enabled, and recipients are saved."
+            : "Enable notifications, configure a transactional email provider, and save at least one recipient.",
+          state: notificationReadiness,
+        }
+      : item
+  );
+
+  const ready = items.filter(x => x.state === "ready").length;
+  const pending = items.filter(x => x.state === "pending").length;
+  const blocked = items.filter(x => x.state === "blocked").length;
   return <main className="min-h-screen bg-slate-50 text-slate-900">
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center gap-3 px-5 py-4">
       <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
@@ -84,12 +312,13 @@ export default function OperationsModule({ module }: { module: string }) {
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Service readiness</h2><p className="mt-1 text-xs text-slate-500">Current implementation and infrastructure dependencies.</p></div>
-        <div className="divide-y divide-slate-100">{config.items.map(item => <div key={item.title} className="flex flex-wrap items-start gap-3 px-5 py-5">
+        <div className="divide-y divide-slate-100">{items.map(item => <div key={item.title} className="flex flex-wrap items-start gap-3 px-5 py-5">
           <span className="mt-0.5 rounded-lg bg-slate-50 p-2 text-slate-600">{item.state === "ready" ? <CheckCircle2 size={18}/> : item.state === "blocked" ? <AlertTriangle size={18}/> : <Clock3 size={18}/>}</span>
           <div className="min-w-0 flex-1"><p className="text-sm font-medium">{item.title}</p><p className="mt-1 text-sm leading-5 text-slate-500">{item.description}</p></div>
           <span className={"rounded-full px-2.5 py-1 text-xs font-medium " + (item.state === "ready" ? "bg-emerald-50 text-emerald-700" : item.state === "blocked" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600")}>{item.state === "ready" ? "Ready" : item.state === "blocked" ? "External dependency" : "Pending"}</span>
         </div>)}</div>
       </div>
+      {module === "settings" && <EmailNotificationSettings/>}
       <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-5"><div className="flex gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><LockKeyhole size={19}/></span><div><h2 className="text-sm font-semibold">Infrastructure status</h2><p className="mt-1 text-sm leading-6 text-slate-600">{config.note}</p></div></div></div>
       <div className="flex flex-wrap gap-3 text-sm"><Link href="/servers" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50"><Server size={14} className="mr-2 inline"/>Server management</Link><Link href="/hosting-accounts" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50">Hosting accounts</Link></div>
     </section>

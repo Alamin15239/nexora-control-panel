@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Activity, ArrowLeft, Check, Copy, Plus, RefreshCw, Server as ServerIcon, ShieldCheck, Terminal } from "lucide-react";
+import { Activity, AlertTriangle, ArrowLeft, Check, CheckCircle2, Copy, Plus, RefreshCw, Server as ServerIcon, ShieldCheck, Terminal } from "lucide-react";
 
 type ServerRecord = {
   id: string;
@@ -17,6 +17,70 @@ type ServerRecord = {
 
 type Enrollment = { serverId: string; enrollmentToken: string; expiresAt: string; message: string };
 
+type TelemetrySample = {
+  id: string;
+  agent_version: string;
+  cpu_usage_percent: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+  disk_total_bytes: number;
+  disk_used_bytes: number;
+  load_average_1m: number;
+  collected_at: string;
+  received_at: string;
+};
+
+type ServerTelemetry = {
+  server: ServerRecord;
+  latest: TelemetrySample | null;
+  samples: TelemetrySample[];
+};
+
+type ServiceCheck = {
+  id: string;
+  service_key: string;
+  display_name: string;
+  status: "ACTIVE" | "INACTIVE" | "FAILED" | "NOT_INSTALLED" | "UNKNOWN";
+  checked_at: string;
+  received_at: string;
+};
+
+type ServerServices = {
+  services: ServiceCheck[];
+  samples: ServiceCheck[];
+};
+
+type Incident = {
+  id: string;
+  serverId: string;
+  serverHostname: string;
+  incidentType: "SERVICE" | "SERVER_HEARTBEAT";
+  incidentKey: string;
+  severity: "WARNING" | "CRITICAL";
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+  title: string;
+  description: string | null;
+  openedAt: string;
+  updatedAt: string;
+  lastObservedAt: string;
+  resolvedAt: string | null;
+  acknowledgedAt: string | null;
+  acknowledgedBy: string | null;
+};
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "—";
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  let size = value / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit++;
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
 export default function ServersPage() {
   const [servers, setServers] = useState<ServerRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,6 +90,18 @@ export default function ServersPage() {
   const [notice, setNotice] = useState("");
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
   const [copied, setCopied] = useState(false);
+  const [selectedServerId, setSelectedServerId] = useState("");
+  const [telemetry, setTelemetry] = useState<ServerTelemetry | null>(null);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [telemetryError, setTelemetryError] = useState("");
+  const [serviceData, setServiceData] = useState<ServerServices | null>(null);
+  const [servicesLoading, setServicesLoading] = useState(false);
+  const [servicesError, setServicesError] = useState("");
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [incidentsLoading, setIncidentsLoading] = useState(false);
+  const [incidentsError, setIncidentsError] = useState("");
+  const [incidentFilter, setIncidentFilter] = useState<"ALL" | "OPEN" | "RESOLVED">("ALL");
+  const [acknowledgingId, setAcknowledgingId] = useState("");
   const [form, setForm] = useState({ hostname: "", primaryIp: "", region: "" });
 
   const loadServers = useCallback(async () => {
@@ -44,6 +120,104 @@ export default function ServersPage() {
   }, []);
 
   useEffect(() => { void loadServers(); }, [loadServers]);
+
+  const refreshTelemetry = useCallback(async (serverId: string) => {
+    setTelemetryLoading(true);
+    setTelemetryError("");
+    try {
+      const response = await fetch(`/api/control/servers/${serverId}/telemetry`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to load server telemetry");
+      setTelemetry(data);
+    } catch (caught) {
+      setTelemetryError(caught instanceof Error ? caught.message : "Unable to load server telemetry");
+    } finally {
+      setTelemetryLoading(false);
+    }
+  }, []);
+
+  const refreshServices = useCallback(async (serverId: string) => {
+    setServicesLoading(true);
+    setServicesError("");
+    try {
+      const response = await fetch(`/api/control/servers/${serverId}/services`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to load service checks");
+      setServiceData(data);
+    } catch (caught) {
+      setServicesError(caught instanceof Error ? caught.message : "Unable to load service checks");
+    } finally {
+      setServicesLoading(false);
+    }
+  }, []);
+
+  const refreshIncidents = useCallback(async () => {
+    setIncidentsLoading(true);
+    setIncidentsError("");
+    try {
+      const response = await fetch("/api/control/incidents", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to load incidents");
+      setIncidents(data.incidents ?? []);
+    } catch (caught) {
+      setIncidentsError(caught instanceof Error ? caught.message : "Unable to load incidents");
+    } finally {
+      setIncidentsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void refreshIncidents(); }, [refreshIncidents]);
+  useEffect(() => {
+    const interval = window.setInterval(() => { void refreshIncidents(); }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [refreshIncidents]);
+
+  async function acknowledgeIncident(incidentId: string) {
+    setAcknowledgingId(incidentId);
+    setIncidentsError("");
+    try {
+      const response = await fetch(`/api/control/incidents/${incidentId}/acknowledge`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to acknowledge incident");
+      await refreshIncidents();
+    } catch (caught) {
+      setIncidentsError(caught instanceof Error ? caught.message : "Unable to acknowledge incident");
+    } finally {
+      setAcknowledgingId("");
+    }
+  }
+
+  async function openTelemetry(serverId: string) {
+    if (selectedServerId === serverId) {
+      setSelectedServerId("");
+      setTelemetry(null);
+      setTelemetryError("");
+      setServiceData(null);
+      setServicesError("");
+      return;
+    }
+
+    setSelectedServerId(serverId);
+    setTelemetry(null);
+    setServiceData(null);
+    await Promise.all([refreshTelemetry(serverId), refreshServices(serverId)]);
+  }
+
+  useEffect(() => {
+    if (!selectedServerId) return;
+    const interval = window.setInterval(() => {
+      void refreshTelemetry(selectedServerId);
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [selectedServerId, refreshTelemetry]);
+
+  useEffect(() => {
+    if (!selectedServerId) return;
+    const interval = window.setInterval(() => {
+      void refreshServices(selectedServerId);
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, [selectedServerId, refreshServices]);
 
   async function createServer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -129,7 +303,7 @@ export default function ServersPage() {
       </form>}
 
       {enrollment && <section className="rounded-2xl border border-blue-200 bg-blue-50/70 p-5">
-        <div className="flex items-start gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><Terminal size={19}/></span><div className="min-w-0 flex-1"><h2 className="font-semibold text-slate-900">Agent enrollment token</h2><p className="mt-1 text-sm text-slate-600">{enrollment.message}</p><p className="mt-2 text-xs font-medium text-slate-700">Server ID</p><code className="mt-1 block break-all rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs text-slate-800">{enrollment.serverId}</code><div className="mt-4 flex flex-wrap items-center gap-2"><code className="min-w-0 flex-1 break-all rounded-lg border border-blue-100 bg-white px-3 py-3 text-sm text-slate-800">{enrollment.enrollmentToken}</code><button onClick={() => void copyToken()} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-3 text-sm font-medium text-white">{copied ? <Check size={16}/> : <Copy size={16}/>} {copied ? "Copied" : "Copy token"}</button></div><p className="mt-2 text-xs text-slate-500">Expires: {new Date(enrollment.expiresAt).toLocaleString()}</p><p className="mt-2 text-xs text-amber-800">Keep this token private. The Linux agent now supports one-time enrollment and signed, read-only telemetry. The API migration must finish deploying before enrollment will work.</p></div></div>
+        <div className="flex items-start gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><Terminal size={19}/></span><div className="min-w-0 flex-1"><h2 className="font-semibold text-slate-900">Agent enrollment token</h2><p className="mt-1 text-sm text-slate-600">{enrollment.message}</p><p className="mt-2 text-xs font-medium text-slate-700">Server ID</p><code className="mt-1 block break-all rounded-lg border border-blue-100 bg-white px-3 py-2 text-xs text-slate-800">{enrollment.serverId}</code><div className="mt-4 flex flex-wrap items-center gap-2"><code className="min-w-0 flex-1 break-all rounded-lg border border-blue-100 bg-white px-3 py-3 text-sm text-slate-800">{enrollment.enrollmentToken}</code><button onClick={() => void copyToken()} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-3 text-sm font-medium text-white">{copied ? <Check size={16}/> : <Copy size={16}/>} {copied ? "Copied" : "Copy token"}</button></div><p className="mt-2 text-xs text-slate-500">Expires: {new Date(enrollment.expiresAt).toLocaleString()}</p><p className="mt-2 text-xs text-amber-800">Keep this token private. It is displayed once and expires after 15 minutes. The enrolled agent sends signed, read-only server telemetry.</p></div></div>
       </section>}
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -138,10 +312,170 @@ export default function ServersPage() {
         <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Awaiting agent</p><p className="mt-2 text-3xl font-semibold">{servers.filter((server) => server.status === "PENDING").length}</p></div>
       </div>
 
+
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+          <div>
+            <h2 className="font-semibold">Incident monitoring</h2>
+            <p className="mt-1 text-xs text-slate-500">Service failures and missed server heartbeats for this workspace.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <select aria-label="Filter incidents" value={incidentFilter} onChange={(event) => setIncidentFilter(event.target.value as "ALL" | "OPEN" | "RESOLVED")} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700">
+              <option value="ALL">All incidents</option>
+              <option value="OPEN">Unresolved</option>
+              <option value="RESOLVED">Resolved</option>
+            </select>
+            <button onClick={() => void refreshIncidents()} disabled={incidentsLoading} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+              {incidentsLoading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+        <div className="grid gap-3 border-b border-slate-100 px-5 py-4 sm:grid-cols-3">
+          <div><p className="text-xs text-slate-500">Unresolved</p><p className="mt-1 text-2xl font-semibold tabular-nums">{incidents.filter((item) => item.status !== "RESOLVED").length}</p></div>
+          <div><p className="text-xs text-slate-500">Critical</p><p className="mt-1 text-2xl font-semibold tabular-nums">{incidents.filter((item) => item.status !== "RESOLVED" && item.severity === "CRITICAL").length}</p></div>
+          <div><p className="text-xs text-slate-500">Resolved</p><p className="mt-1 text-2xl font-semibold tabular-nums">{incidents.filter((item) => item.status === "RESOLVED").length}</p></div>
+        </div>
+        {incidentsError && <p role="alert" className="mx-5 mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{incidentsError}</p>}
+        {incidentsLoading && incidents.length === 0 ? <p className="p-8 text-center text-sm text-slate-500">Loading incidents…</p> : (() => {
+          const visible = incidents.filter((item) => incidentFilter === "ALL" || (incidentFilter === "RESOLVED" ? item.status === "RESOLVED" : item.status !== "RESOLVED"));
+          if (visible.length === 0) return <div className="p-8 text-center">
+            <CheckCircle2 className="mx-auto text-emerald-500" size={27}/>
+            <p className="mt-2 text-sm font-medium text-slate-700">{incidentFilter === "RESOLVED" ? "No resolved incidents" : incidentFilter === "OPEN" ? "No unresolved incidents" : "No incidents recorded"}</p>
+            <p className="mt-1 text-xs text-slate-500">New service or heartbeat incidents will appear here automatically.</p>
+          </div>;
+          return <div className="divide-y divide-slate-100">
+            {visible.map((incident) => {
+              const severityTone = incident.severity === "CRITICAL" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-800";
+              const statusTone = incident.status === "RESOLVED" ? "bg-emerald-50 text-emerald-700" : incident.status === "ACKNOWLEDGED" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700";
+              return <article key={incident.id} className="flex flex-wrap items-start gap-3 px-5 py-4">
+                <span className={"mt-0.5 rounded-lg p-2 " + (incident.severity === "CRITICAL" ? "bg-red-50 text-red-600" : "bg-amber-50 text-amber-700")}>
+                  <AlertTriangle size={18}/>
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-semibold text-slate-900">{incident.title}</h3>
+                    <span className={"rounded-full px-2 py-1 text-[10px] font-semibold " + severityTone}>{incident.severity}</span>
+                    <span className={"rounded-full px-2 py-1 text-[10px] font-semibold " + statusTone}>{incident.status}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-600">{incident.serverHostname} · {incident.incidentType === "SERVICE" ? "System service" : "Server heartbeat"}</p>
+                  {incident.description && <p className="mt-1 text-xs leading-5 text-slate-500">{incident.description}</p>}
+                  <p className="mt-2 text-[11px] text-slate-400">First seen: {new Date(incident.openedAt).toLocaleString()} · Last observed: {new Date(incident.lastObservedAt).toLocaleString()}{incident.resolvedAt ? ` · Resolved: ${new Date(incident.resolvedAt).toLocaleString()}` : ""}</p>
+                </div>
+                {incident.status === "OPEN" && <button onClick={() => void acknowledgeIncident(incident.id)} disabled={!!acknowledgingId} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50">
+                  {acknowledgingId === incident.id ? "Saving…" : "Acknowledge"}
+                </button>}
+              </article>;
+            })}
+          </div>;
+        })()}
+        <p className="border-t border-slate-100 px-5 py-3 text-[11px] text-slate-400">Incident data refreshes every 60 seconds. Acknowledgement requires workspace owner or administrator permission.</p>
+      </section>
+
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold">Server inventory</h2><p className="mt-1 text-xs text-slate-500">Only servers belonging to your active workspace are shown.</p></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">{servers.length} total</span></div>
-        {loading ? <div className="p-10 text-center text-sm text-slate-500">Loading server inventory…</div> : servers.length === 0 ? <div className="p-12 text-center"><ServerIcon className="mx-auto text-slate-300" size={32}/><h3 className="mt-3 font-medium">No servers registered</h3><p className="mt-1 text-sm text-slate-500">Add your first Linux node to start building your infrastructure inventory.</p><button onClick={() => setShowForm(true)} className="mt-4 rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white">Register first server</button></div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Server</th><th className="px-5 py-3 font-medium">Region</th><th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 font-medium">Agent</th><th className="px-5 py-3 font-medium">Last heartbeat</th><th className="px-5 py-3 text-right font-medium">Action</th></tr></thead><tbody className="divide-y divide-slate-100">{servers.map((server) => <tr key={server.id} className="hover:bg-slate-50/70"><td className="px-5 py-4"><p className="font-medium text-slate-900">{server.hostname}</p><p className="mt-1 text-xs text-slate-500">{server.primary_ip}</p></td><td className="px-5 py-4 text-slate-600">{server.region || "—"}</td><td className="px-5 py-4"><span className={"inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium " + (server.status === "ONLINE" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}><Activity size={12}/>{server.status}</span></td><td className="px-5 py-4 text-slate-600">{server.agent_version || "Not connected"}</td><td className="px-5 py-4 text-slate-500">{server.last_heartbeat_at ? new Date(server.last_heartbeat_at).toLocaleString() : "Never"}</td><td className="px-5 py-4 text-right"><button disabled={busy} onClick={() => void issueToken(server.id)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50">Generate token</button></td></tr>)}</tbody></table></div>}
+        {loading ? <div className="p-10 text-center text-sm text-slate-500">Loading server inventory…</div> : servers.length === 0 ? <div className="p-12 text-center"><ServerIcon className="mx-auto text-slate-300" size={32}/><h3 className="mt-3 font-medium">No servers registered</h3><p className="mt-1 text-sm text-slate-500">Add your first Linux node to start building your infrastructure inventory.</p><button onClick={() => setShowForm(true)} className="mt-4 rounded-lg bg-blue-700 px-4 py-2 text-sm font-medium text-white">Register first server</button></div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Server</th><th className="px-5 py-3 font-medium">Region</th><th className="px-5 py-3 font-medium">Status</th><th className="px-5 py-3 font-medium">Agent</th><th className="px-5 py-3 font-medium">Last heartbeat</th><th className="px-5 py-3 text-right font-medium">Action</th></tr></thead><tbody className="divide-y divide-slate-100">{servers.map((server) => <tr key={server.id} className="hover:bg-slate-50/70"><td className="px-5 py-4"><p className="font-medium text-slate-900">{server.hostname}</p><p className="mt-1 text-xs text-slate-500">{server.primary_ip}</p></td><td className="px-5 py-4 text-slate-600">{server.region || "—"}</td><td className="px-5 py-4"><span className={"inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium " + (server.status === "ONLINE" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}><Activity size={12}/>{server.status}</span></td><td className="px-5 py-4 text-slate-600">{server.agent_version || "Not connected"}</td><td className="px-5 py-4 text-slate-500">{server.last_heartbeat_at ? new Date(server.last_heartbeat_at).toLocaleString() : "Never"}</td><td className="px-5 py-4 text-right"><div className="flex justify-end gap-2"><button onClick={() => void openTelemetry(server.id)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700">{selectedServerId === server.id ? "Hide metrics" : "View metrics"}</button><button disabled={busy} onClick={() => void issueToken(server.id)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50">Generate token</button></div></td></tr>)}</tbody></table></div>}
       </div>
+
+      {selectedServerId && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Live server telemetry</p>
+            <h2 className="mt-1 text-lg font-semibold">{servers.find((server) => server.id === selectedServerId)?.hostname || "Selected server"}</h2>
+            <p className="mt-1 text-xs text-slate-500">Latest signed agent readings and the most recent 60 samples.</p>
+          </div>
+          <button onClick={() => void refreshTelemetry(selectedServerId)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Refresh metrics</button>
+        </div>
+
+        {telemetryLoading && <p className="py-8 text-center text-sm text-slate-500">Loading real server measurements…</p>}
+        {telemetryError && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{telemetryError}</p>}
+        {!telemetryLoading && telemetry && !telemetry.latest && <div className="mt-5 rounded-xl bg-slate-50 p-6 text-center">
+          <Activity className="mx-auto text-slate-300" size={26}/>
+          <p className="mt-2 text-sm font-medium text-slate-700">No telemetry received yet</p>
+          <p className="mt-1 text-xs text-slate-500">The server is registered, but the agent has not stored a measurement for it.</p>
+        </div>}
+
+        {telemetry?.latest && <div className="mt-5 space-y-5">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 p-4">
+              <p className="text-xs font-medium text-slate-500">CPU utilization</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums">{telemetry.latest.cpu_usage_percent.toFixed(1)}%</p>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.min(100, Math.max(0, telemetry.latest.cpu_usage_percent))}%` }}/></div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <p className="text-xs font-medium text-slate-500">Memory utilization</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums">{((telemetry.latest.memory_used_bytes / telemetry.latest.memory_total_bytes) * 100).toFixed(1)}%</p>
+              <p className="mt-2 text-xs text-slate-500">{formatBytes(telemetry.latest.memory_used_bytes)} used / {formatBytes(telemetry.latest.memory_total_bytes)}</p>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-violet-600" style={{ width: `${Math.min(100, Math.max(0, telemetry.latest.memory_used_bytes / telemetry.latest.memory_total_bytes * 100))}%` }}/></div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <p className="text-xs font-medium text-slate-500">Disk utilization</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums">{((telemetry.latest.disk_used_bytes / telemetry.latest.disk_total_bytes) * 100).toFixed(1)}%</p>
+              <p className="mt-2 text-xs text-slate-500">{formatBytes(telemetry.latest.disk_used_bytes)} used / {formatBytes(telemetry.latest.disk_total_bytes)}</p>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-amber-500" style={{ width: `${Math.min(100, Math.max(0, telemetry.latest.disk_used_bytes / telemetry.latest.disk_total_bytes * 100))}%` }}/></div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <p className="text-xs font-medium text-slate-500">Load average (1 min)</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums">{telemetry.latest.load_average_1m.toFixed(2)}</p>
+              <p className="mt-2 text-xs text-slate-500">Agent {telemetry.latest.agent_version}</p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(240px,1fr)]">
+            <div className="rounded-xl border border-slate-200 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold">CPU history</h3>
+                <span className="text-xs text-slate-500">{telemetry.samples.length} samples</span>
+              </div>
+              <div className="mt-5 flex h-24 items-end gap-1" role="img" aria-label="CPU utilization history, oldest to newest">
+                {telemetry.samples.slice(-30).map((sample) => <div key={sample.id} title={`${sample.cpu_usage_percent.toFixed(1)}% at ${new Date(sample.collected_at).toLocaleString()}`} className="min-w-0 flex-1 rounded-t bg-blue-500/80" style={{ height: `${Math.max(3, Math.min(100, sample.cpu_usage_percent))}%` }}/>)}
+              </div>
+              <div className="mt-2 flex justify-between text-[11px] text-slate-400"><span>Oldest</span><span>Newest</span></div>
+            </div>
+            <div className="rounded-xl border border-slate-200 p-4">
+              <h3 className="text-sm font-semibold">Telemetry details</h3>
+              <dl className="mt-3 space-y-3 text-xs">
+                <div><dt className="text-slate-500">Last collected</dt><dd className="mt-1 font-medium text-slate-800">{new Date(telemetry.latest.collected_at).toLocaleString()}</dd></div>
+                <div><dt className="text-slate-500">Received by Nexora</dt><dd className="mt-1 font-medium text-slate-800">{new Date(telemetry.latest.received_at).toLocaleString()}</dd></div>
+                <div><dt className="text-slate-500">Agent version</dt><dd className="mt-1 font-medium text-slate-800">{telemetry.latest.agent_version}</dd></div>
+                <div><dt className="text-slate-500">Server status</dt><dd className="mt-1 font-medium text-slate-800">{telemetry.server.status}</dd></div>
+              </dl>
+            </div>
+          </div>
+        </div>}
+      </section>}
+
+      {selectedServerId && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Systemd monitoring</p>
+            <h2 className="mt-1 text-lg font-semibold">Service health</h2>
+            <p className="mt-1 text-xs text-slate-500">Read-only service state checks, refreshed every minute.</p>
+          </div>
+          <button onClick={() => void refreshServices(selectedServerId)} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Refresh services</button>
+        </div>
+
+        {servicesLoading && <p className="py-5 text-center text-sm text-slate-500">Loading service checks…</p>}
+        {servicesError && <p role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{servicesError}</p>}
+        {!servicesLoading && serviceData && serviceData.services.length === 0 && <p className="mt-4 rounded-xl bg-slate-50 p-5 text-center text-sm text-slate-500">No service checks received yet. The connected agent must report its next heartbeat.</p>}
+        {serviceData && serviceData.services.length > 0 && <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {serviceData.services.map((service) => {
+            const tone = service.status === "ACTIVE"
+              ? "bg-emerald-50 text-emerald-700"
+              : service.status === "FAILED" || service.status === "INACTIVE"
+                ? "bg-red-50 text-red-700"
+                : "bg-amber-50 text-amber-700";
+            return <div key={service.service_key} className="rounded-xl border border-slate-200 p-4">
+              <div className="flex items-start justify-between gap-2">
+                <p className="font-medium text-slate-900">{service.display_name}</p>
+                <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${tone}`}>{service.status.replace("_", " ")}</span>
+              </div>
+              <p className="mt-3 text-xs text-slate-500">Last checked</p>
+              <p className="mt-1 text-xs font-medium text-slate-700">{new Date(service.checked_at).toLocaleString()}</p>
+            </div>;
+          })}
+        </div>}
+        <p className="mt-4 text-xs text-slate-400">These checks report systemd unit state only. They do not verify application responses or automatically restart services.</p>
+      </section>}
 
       <div className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-5"><ShieldCheck size={19} className="mt-0.5 shrink-0 text-emerald-600"/><div><h3 className="text-sm font-semibold">Workspace isolation enabled</h3><p className="mt-1 text-sm leading-6 text-slate-500">Server queries are scoped to the authenticated organization. Only workspace owners and administrators can register nodes or issue enrollment tokens. Token hashes—not raw tokens—are stored in D1.</p></div></div>
     </section>

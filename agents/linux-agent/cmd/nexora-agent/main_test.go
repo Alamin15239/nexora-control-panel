@@ -12,24 +12,32 @@ func writeConfig(t *testing.T, cfg Config) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "agent.json")
 	raw, err := json.Marshal(cfg)
-	if err != nil { t.Fatal(err) }
-	if err := os.WriteFile(path, raw, 0600); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 
 func validConfig() Config {
 	return Config{
-		NodeID: "node-123",
-		Secret: strings.Repeat("a", 64),
+		NodeID:       "node-123",
+		Secret:       strings.Repeat("a", 64),
 		ControlPlane: "https://control.example",
-		ServerID: "server-123",
+		ServerID:     "server-123",
 	}
 }
 
 func TestLoadConfigAcceptsValidHTTPSConfig(t *testing.T) {
 	cfg, err := loadConfig(writeConfig(t, validConfig()))
-	if err != nil { t.Fatalf("expected valid config, got %v", err) }
-	if cfg.NodeID != "node-123" { t.Fatalf("unexpected node ID %q", cfg.NodeID) }
+	if err != nil {
+		t.Fatalf("expected valid config, got %v", err)
+	}
+	if cfg.NodeID != "node-123" {
+		t.Fatalf("unexpected node ID %q", cfg.NodeID)
+	}
 }
 
 func TestLoadConfigRejectsHTTPControlPlane(t *testing.T) {
@@ -69,12 +77,46 @@ func TestAPIBaseRequiresHTTPS(t *testing.T) {
 		t.Fatal("expected HTTP API URL to be rejected")
 	}
 	base, err := apiBase("https://control.example/")
-	if err != nil { t.Fatal(err) }
-	if base != "https://control.example" { t.Fatalf("unexpected normalized URL %q", base) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base != "https://control.example" {
+		t.Fatalf("unexpected normalized URL %q", base)
+	}
 }
 
 func TestRandomHexStringUsesExpectedLength(t *testing.T) {
 	value := randomHexString(16)
-	if len(value) != 32 { t.Fatalf("expected 32 hex characters, got %d", len(value)) }
-	if _, err := json.Marshal(value); err != nil { t.Fatal(err) }
+	if len(value) != 32 {
+		t.Fatalf("expected 32 hex characters, got %d", len(value))
+	}
+	if _, err := json.Marshal(value); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceStatusMapping(t *testing.T) {
+	tests := []struct {
+		name        string
+		loadState   string
+		activeState string
+		want        string
+	}{
+		{"active", "loaded", "active", "ACTIVE"},
+		{"inactive", "loaded", "inactive", "INACTIVE"},
+		{"failed", "loaded", "failed", "FAILED"},
+		{"not installed", "not-found", "inactive", "NOT_INSTALLED"},
+		{"load failure", "error", "failed", "UNKNOWN"},
+		{"unknown active state", "loaded", "activating", "UNKNOWN"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := serviceStatus(tt.loadState, tt.activeState)
+			if got != tt.want {
+				t.Fatalf("serviceStatus(%q, %q) = %q, want %q",
+					tt.loadState, tt.activeState, got, tt.want)
+			}
+		})
+	}
 }
