@@ -50,13 +50,12 @@ type MonitoredServer = {
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "—";
-  const units = ["B", "KB", "GB", "TB"];
+  const units = ["B", "KB", "MB", "GB", "TB"];
   let amount = value;
   let unit = 0;
   while (amount >= 1024 && unit < units.length - 1) {
     amount /= 1024;
     unit++;
-    if (unit === 1) unit++;
   }
   return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${units[unit]}`;
 }
