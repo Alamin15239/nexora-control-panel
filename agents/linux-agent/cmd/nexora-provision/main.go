@@ -59,6 +59,8 @@ func main() {
 		err = fileManager(input)
 		if err != nil { fmt.Fprintln(os.Stderr, err.Error()); os.Exit(1) }
 		return
+	case "CREATE_DATABASE":
+		err = createDatabase(input.DatabaseName)
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
 	}
