@@ -170,7 +170,7 @@ function EmailNotificationSettings() {
     }
   }
 
-  return <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+  return <section className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_4px_24px_rgba(15,23,42,0.045)]">
     <div className="border-b border-slate-100 px-5 py-4">
       <div className="flex items-center gap-2">
         <Mail size={18} className="text-blue-700"/>
@@ -300,18 +300,18 @@ export default function OperationsModule({ module }: { module: string }) {
   const ready = items.filter(x => x.state === "ready").length;
   const pending = items.filter(x => x.state === "pending").length;
   const blocked = items.filter(x => x.state === "blocked").length;
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center gap-3 px-5 py-4">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center gap-3 px-5 py-4">
       <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
       <span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Icon size={20}/></span>
       <div><p className="font-semibold">Nexora Control</p><p className="text-xs text-slate-500">Infrastructure / {config.title}</p></div>
     </div></header>
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
-      <div><p className="text-sm font-medium text-blue-700">Infrastructure services</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{config.title}</h1><p className="mt-2 text-sm text-slate-500">{config.subtitle}</p></div>
+    <section className="mx-auto max-w-[1500px] space-y-6 px-5 py-8">
+      <div><p className="text-sm font-medium text-blue-700">Infrastructure services</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">{config.title}</h1><p className="mt-2 text-sm text-slate-500">{config.subtitle}</p></div>
       <div className="grid gap-4 sm:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Ready</p><p className="mt-2 text-3xl font-semibold">{ready}</p></div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">Pending setup</p><p className="mt-2 text-3xl font-semibold">{pending}</p></div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-5"><p className="text-sm text-slate-500">External dependency</p><p className="mt-2 text-3xl font-semibold">{blocked}</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">Ready</p><p className="mt-2 text-3xl font-semibold">{ready}</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">Pending setup</p><p className="mt-2 text-3xl font-semibold">{pending}</p></div>
+        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-[0_2px_12px_rgba(15,23,42,0.04)]"><p className="text-sm text-slate-500">External dependency</p><p className="mt-2 text-3xl font-semibold">{blocked}</p></div>
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Service readiness</h2><p className="mt-1 text-xs text-slate-500">Current implementation and infrastructure dependencies.</p></div>
@@ -322,7 +322,7 @@ export default function OperationsModule({ module }: { module: string }) {
         </div>)}</div>
       </div>
       {module === "settings" && <EmailNotificationSettings/>}
-      <div className="rounded-2xl border border-blue-100 bg-blue-50/70 p-5"><div className="flex gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><LockKeyhole size={19}/></span><div><h2 className="text-sm font-semibold">Infrastructure status</h2><p className="mt-1 text-sm leading-6 text-slate-600">{config.note}</p></div></div></div>
+      <div className="rounded-2xl border border-blue-100/80 bg-gradient-to-br from-blue-50/80 to-indigo-50/50 p-6"><div className="flex gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><LockKeyhole size={19}/></span><div><h2 className="text-sm font-semibold">Infrastructure status</h2><p className="mt-1 text-sm leading-6 text-slate-600">{config.note}</p></div></div></div>
       <div className="flex flex-wrap gap-3 text-sm"><Link href="/servers" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50"><Server size={14} className="mr-2 inline"/>Server management</Link><Link href="/hosting-accounts" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50">Hosting accounts</Link></div>
     </section>
   </main>;
