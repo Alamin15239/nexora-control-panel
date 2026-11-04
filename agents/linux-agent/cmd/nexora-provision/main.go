@@ -32,6 +32,7 @@ type request struct {
 	NewPath string `json:"newPath,omitempty"`
 	ContentBase64 string `json:"contentBase64,omitempty"`
 	FileOperation string `json:"fileOperation,omitempty"`
+	DatabaseName string `json:"databaseName,omitempty"`
 }
 
 var (
