@@ -114,16 +114,16 @@ export default function WebsitesDomainsPage() {
     finally { setBusy(false); }
   }
 
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-6 py-4">
       <div className="flex items-center gap-3"><Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link><span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Globe2 size={20}/></span><div><p className="font-semibold">Websites & domains</p><p className="text-xs text-slate-500">Nexora Control / Websites</p></div></div>
       <button onClick={() => void load()} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"><RefreshCw size={15}/> Refresh</button>
     </div></header>
-    <section className="mx-auto max-w-7xl space-y-6 px-5 py-8">
-      <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Website management</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Websites & domains</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Attach domains to customer hosting accounts and define their website document roots.</p></div><button onClick={() => setShowForm(v => !v)} disabled={accounts.length === 0} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><Plus size={17}/> Add domain</button></div>
+    <section className="mx-auto max-w-[1500px] space-y-7 px-6 py-8">
+      <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Website management</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Websites & domains</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Attach domains to customer hosting accounts and define their website document roots.</p></div><button onClick={() => setShowForm(v => !v)} disabled={accounts.length === 0} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><Plus size={17}/> Add domain</button></div>
       {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
       {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
-      {showForm && <form onSubmit={addDomain} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      {showForm && <form onSubmit={addDomain} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_8px_30px_rgba(15,23,42,0.04)]">
         <div className="mb-5"><h2 className="font-semibold">Add a domain</h2><p className="mt-1 text-xs text-slate-500">The domain record is saved now; virtual-host configuration is queued for a connected Linux agent.</p></div>
         <div className="grid gap-4 md:grid-cols-2">
           <label className="text-xs font-medium text-slate-600">Domain name<input required value={form.name} onChange={e=>setForm(v=>({...v,name:e.target.value.toLowerCase()}))} placeholder="example.com" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm outline-none focus:border-blue-500"/></label>
