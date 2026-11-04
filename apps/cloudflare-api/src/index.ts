@@ -1761,7 +1761,7 @@ app.get("/v1/databases/:id/users", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const database = await c.env.DB.prepare("SELECT id FROM hosting_databases WHERE id = ? AND organization_id = ? LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
   if (!database) return c.json({ message: "Database not found" }, 404);
-  const result = await c.env.DB.prepare("SELECT id, username, privileges, status, created_at FROM hosting_database_users WHERE database_id = ? ORDER BY created_at DESC").bind(database.id).all<{ id: string; username: string; privileges: string; status: string; created_at: string }>();
+  const result = await c.env.DB.prepare("SELECT u.id, u.username, u.privileges, u.status, u.created_at, EXISTS (SELECT 1 FROM database_user_secrets s WHERE s.database_user_id = u.id AND s.revealed_at IS NULL AND s.expires_at > ?) AS secret_available FROM hosting_database_users u WHERE u.database_id = ? ORDER BY u.created_at DESC").bind(new Date().toISOString(), database.id).all<{ id: string; username: string; privileges: string; status: string; created_at: string; secret_available: number }>();
   return c.json({ users: result.results ?? [] });
 });
 
