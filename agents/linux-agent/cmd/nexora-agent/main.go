@@ -427,6 +427,7 @@ func memoryUsage() (uint64, uint64, error) {
 }
 
 type provisionJob struct {
+	DatabaseName string `json:"databaseName,omitempty"`
 	ID        string `json:"id"`
 	Operation string `json:"operation"`
 	Account   struct {
