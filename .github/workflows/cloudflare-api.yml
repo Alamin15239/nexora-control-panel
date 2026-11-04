@@ -1,15 +1,6 @@
-name: Deploy Nexora API to Cloudflare
+name: Validate Nexora API pull requests
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "apps/cloudflare-api/**"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - ".github/workflows/cloudflare-api.yml"
   pull_request:
     paths:
       - "apps/cloudflare-api/**"
@@ -20,36 +11,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: nexora-api-production
-  cancel-in-progress: false
-
 jobs:
-  cloudflare-api:
-    name: Typecheck and deploy nexora-api
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Install workspace dependencies
-        run: pnpm install --no-frozen-lockfile
-      - name: Typecheck Cloudflare Worker
-        run: pnpm --filter @nexora/cloudflare-api typecheck
-      - name: Apply D1 migrations and deploy API Worker
-        run: pnpm --filter @nexora/cloudflare-api run deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
   cloudflare-api-pr:
     name: Typecheck nexora-api pull requests
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
