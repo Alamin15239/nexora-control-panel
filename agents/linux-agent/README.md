@@ -1,6 +1,6 @@
 # Nexora Linux Agent
 
-Restricted Linux node agent for Nexora Control. Version 0.6.1 supports authenticated hosting-account provisioning, Nginx domain configuration with a safe starter homepage for empty addon-domain roots, and sandboxed hosting File Manager jobs.
+Restricted Linux node agent for Nexora Control. Version 0.7.0 supports systemd service monitoring and authenticated hosting-account provisioning, Nginx domain configuration with a safe starter homepage for empty addon-domain roots, and sandboxed hosting File Manager jobs.
 
 ## Security model
 
