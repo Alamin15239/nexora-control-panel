@@ -224,8 +224,8 @@ export default function FileManagerPage() {
     finally { setBusy(false); }
   }
 
-  return <main className="min-h-screen bg-slate-50 text-slate-900">
-    <header className="border-b border-slate-200 bg-white">
+  return <main className="min-h-full bg-transparent text-slate-900">
+    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-4">
         <div className="flex items-center gap-3">
           <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
@@ -238,7 +238,7 @@ export default function FileManagerPage() {
 
     <section className="mx-auto max-w-7xl space-y-5 px-5 py-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <div><p className="text-sm font-medium text-blue-700">Website files</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">Manage website files</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Browse, upload, edit and organize files inside a hosting account&apos;s public_html directory.</p></div>
+        <div><p className="text-sm font-medium text-blue-700">Website files</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Manage website files</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Browse, upload, edit and organize files inside a hosting account&apos;s public_html directory.</p></div>
         <label className="text-xs font-medium text-slate-600">Hosting account
           <select value={accountId} onChange={e => setAccountId(e.target.value)} className="mt-1.5 block min-w-56 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm">
             {accounts.map(account => <option key={account.id} value={account.id}>{account.username} · {account.server_hostname}</option>)}
