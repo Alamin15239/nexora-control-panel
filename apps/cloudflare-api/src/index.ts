@@ -11,6 +11,7 @@ type Bindings = {
   CLOUDFLARE_SAAS_TARGET?: string;
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
+  DATABASE_SECRET_ENCRYPTION_KEY?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -71,6 +72,27 @@ async function verifyPassword(password: string, stored: string | null): Promise<
   let difference = 0;
   for (let i = 0; i < actual.length; i++) difference |= actual[i] ^ Number.parseInt(expectedHex.slice(i * 2, i * 2 + 2), 16);
   return difference === 0;
+}
+
+function databaseSecretKey(env: Bindings): Uint8Array {
+  const value = env.DATABASE_SECRET_ENCRYPTION_KEY ?? "";
+  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("Database credential encryption is not configured");
+  return new Uint8Array(value.match(/.{2}/g)!.map((part) => Number.parseInt(part, 16)));
+}
+function base64(bytes: Uint8Array): string {
+  let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary);
+}
+async function encryptDatabaseSecret(env: Bindings, plaintext: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", databaseSecretKey(env), "AES-GCM", false, ["encrypt"]);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return { iv: base64(iv), ciphertext: base64(new Uint8Array(ciphertext)) };
+}
+async function decryptDatabaseSecret(env: Bindings, ciphertext: string, iv: string): Promise<string> {
+  const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", databaseSecretKey(env), "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(iv) }, key, decode(ciphertext));
+  return new TextDecoder().decode(plaintext);
 }
 
 function normalizeEmail(value: unknown): string {
@@ -1747,7 +1769,55 @@ app.post("/v1/databases/:id/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
-  return c.json({ message: "Database-user provisioning is not enabled on this Linux agent yet. No user request was created." }, 501);
+  try { databaseSecretKey(c.env); } catch { return c.json({ message: "Secure credential delivery is not configured. No user was created." }, 503); }
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const requestedName = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
+  const requestedPrivileges = Array.isArray(input.privileges) ? input.privileges : [];
+  const allowed = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX"]);
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName) || requestedPrivileges.length < 1 || requestedPrivileges.length > allowed.size ||
+      requestedPrivileges.some((value) => typeof value !== "string" || !allowed.has(value)) ||
+      new Set(requestedPrivileges).size !== requestedPrivileges.length) {
+    return c.json({ message: "Choose a valid username and one or more supported privileges." }, 400);
+  }
+  const database = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.hosting_account_id AS accountId, d.status, a.username AS accountUsername
+     FROM hosting_databases d JOIN hosting_accounts a ON a.id = d.hosting_account_id
+     WHERE d.id = ? AND d.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; accountId: string; status: string; accountUsername: string }>();
+  if (!database || database.status !== "ACTIVE") return c.json({ message: "An active database is required." }, 404);
+  const physicalUsername = database.accountUsername + "_" + requestedName;
+  if (physicalUsername.length > 80) return c.json({ message: "The resulting database username is too long." }, 400);
+  const userId = crypto.randomUUID(), jobId = crypto.randomUUID(), now = new Date().toISOString();
+  const payload = JSON.stringify({ databaseName: database.name, databaseUserName: requestedName, privileges: requestedPrivileges });
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO hosting_database_users (id, organization_id, database_id, username, privileges, status, created_at) VALUES (?, ?, ?, ?, ?, 'PENDING', ?)")
+        .bind(userId, identity.organizationId, database.id, physicalUsername, JSON.stringify(requestedPrivileges), now),
+      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_DATABASE_USER', 'QUEUED', ?, ?)")
+        .bind(jobId, database.accountId, "create-database-user:" + userId, payload),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database_user.provisioning_queued', 'database_user', ?, ?)")
+        .bind(crypto.randomUUID(), identity.organizationId, identity.id, userId, JSON.stringify({ databaseId: database.id, jobId, privileges: requestedPrivileges })),
+    ]);
+  } catch { return c.json({ message: "Unable to queue database-user provisioning. Check for a duplicate username." }, 409); }
+  return c.json({ databaseUserId: userId, jobId, status: "PENDING", username: physicalUsername, message: "Database user creation has been queued. Its generated password will be available once, after provisioning succeeds." }, 202);
+});
+
+app.get("/v1/databases/:id/users/:userId/secret", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let secret: { ciphertext: string; iv: string } | null;
+  try {
+    secret = await c.env.DB.prepare(
+      "UPDATE database_user_secrets SET revealed_at = ? WHERE database_user_id = ? AND organization_id = ? AND revealed_at IS NULL AND expires_at > ? RETURNING ciphertext, iv",
+    ).bind(new Date().toISOString(), c.req.param("userId"), identity.organizationId, new Date().toISOString()).first<{ ciphertext: string; iv: string }>();
+  } catch { return c.json({ message: "Unable to retrieve the database credential." }, 503); }
+  if (!secret) return c.json({ message: "The one-time password is unavailable, expired, or has already been revealed." }, 410);
+  try {
+    const credential = JSON.parse(await decryptDatabaseSecret(c.env, secret.ciphertext, secret.iv)) as { username: string; password: string };
+    return c.json({ credential, oneTime: true });
+  } catch { return c.json({ message: "The encrypted database credential could not be opened." }, 500); }
 });
 
 type AgentCredential = { secretHash: string; serverId: string; organizationId: string };
@@ -1792,7 +1862,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE') " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -1808,7 +1878,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
     "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE')) LIMIT 1",
-  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
+  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
@@ -1832,14 +1902,18 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   if (typeof input.success !== "boolean") return c.json({ message: "A boolean success result is required" }, 400);
   const errorCode = typeof input.errorCode === "string" ? input.errorCode.slice(0, 80) : null;
   const errorMessage = typeof input.errorMessage === "string" ? input.errorMessage.slice(0, 500) : null;
-  const resultPayload = input.result && typeof input.result === "object" ? JSON.stringify(input.result) : null;
   const jobId = c.req.param("id");
+  const pendingJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? LIMIT 1")
+    .bind(jobId, auth.credential.nodeId).first<{ operation: string; idempotencyKey: string }>();
+  if (!pendingJob) return c.json({ message: "Provisioning job is not available to this agent." }, 409);
+  const incomingResult = input.result && typeof input.result === "object" ? input.result as Record<string, unknown> : null;
+  const resultPayload = pendingJob.operation === "CREATE_DATABASE_USER" ? null : (incomingResult ? JSON.stringify(incomingResult) : null);
   const now = new Date().toISOString();
   const status = input.success ? "SUCCEEDED" : "FAILED";
   const update = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE') " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
@@ -1873,6 +1947,31 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
         .bind(now, accountId.accountId, auth.credential.serverId).run();
     }
   }
+  if (completedJob?.operation === "CREATE_DATABASE_USER" && completedJob.idempotencyKey?.startsWith("create-database-user:")) {
+    const databaseUserId = completedJob.idempotencyKey.slice("create-database-user:".length);
+    if (input.success) {
+      const credential = incomingResult && typeof incomingResult.username === "string" && typeof incomingResult.password === "string"
+        ? { username: incomingResult.username, password: incomingResult.password } : null;
+      if (!credential || credential.password.length < 32 || credential.password.length > 128 || !/^[a-z][a-z0-9_]{2,80}$/.test(credential.username)) {
+        await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'FAILED' WHERE id = ? AND organization_id = ?").bind(databaseUserId, auth.credential.organizationId).run();
+        return c.json({ message: "The agent returned an invalid database credential." }, 422);
+      }
+      try {
+        const encrypted = await encryptDatabaseSecret(c.env, JSON.stringify(credential));
+        await c.env.DB.batch([
+          c.env.DB.prepare("INSERT INTO database_user_secrets (database_user_id, organization_id, ciphertext, iv, expires_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(databaseUserId, auth.credential.organizationId, encrypted.ciphertext, encrypted.iv, new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()),
+          c.env.DB.prepare("UPDATE hosting_database_users SET status = 'ACTIVE' WHERE id = ? AND organization_id = ? AND status = 'PENDING'")
+            .bind(databaseUserId, auth.credential.organizationId),
+        ]);
+      } catch {
+        await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'FAILED' WHERE id = ? AND organization_id = ?").bind(databaseUserId, auth.credential.organizationId).run();
+        return c.json({ message: "The credential could not be stored securely." }, 503);
+      }
+    } else {
+      await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'FAILED' WHERE id = ? AND organization_id = ? AND status = 'PENDING'").bind(databaseUserId, auth.credential.organizationId).run();
+    }
+  }
   if (completedJob?.operation === "CREATE_DATABASE" && completedJob.idempotencyKey?.startsWith("create-database:")) {
     const databaseId = completedJob.idempotencyKey.slice("create-database:".length);
     await c.env.DB.prepare(
@@ -1881,7 +1980,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   }
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
     .bind(crypto.randomUUID(), auth.credential.organizationId,
-      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : "hosting_account.provisioning_failed"),
+      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioned" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revoked" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioning_failed" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revocation_failed" : "hosting_account.provisioning_failed"),
       jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });
