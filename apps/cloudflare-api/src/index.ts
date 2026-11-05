@@ -1518,11 +1518,12 @@ app.post("/v1/backups/:id/restore", async (c) => {
   if (!backup) return c.json({ message: "Available backup not found" }, 404);
   if (!backup.sha256 || !/^[a-f0-9]{64}$/.test(backup.sha256)) return c.json({ message: "Backup integrity metadata is missing or invalid; restore is blocked." }, 409);
   const jobId = crypto.randomUUID();
-  await c.env.DB.batch([
+  const results = await c.env.DB.batch([
     c.env.DB.prepare("UPDATE hosting_backups SET status = 'RESTORING', error_message = NULL WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
-    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'RESTORE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, backup.accountId, "backup-restore:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [], sha256: backup.sha256 })),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup.restore_requested', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id, JSON.stringify({ accountId: backup.accountId, username: backup.username, mode: "STAGING_ONLY" })),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) SELECT ?, ?, 'RESTORE_BACKUP', 'QUEUED', ?, ? WHERE changes() = 1").bind(jobId, backup.accountId, "backup-restore:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [], sha256: backup.sha256 })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) SELECT ?, ?, ?, 'backup.restore_requested', 'hosting_backup', ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id, JSON.stringify({ accountId: backup.accountId, username: backup.username, mode: "STAGING_ONLY" })),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Backup is already being processed. Refresh and try again later." }, 409);
   return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Restore queued. Files and database dumps will be extracted to a protected staging directory; live website files and databases will not be overwritten." }, 202);
 });
 
@@ -1533,11 +1534,12 @@ app.delete("/v1/backups/:id", async (c) => {
   const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
   if (!backup) return c.json({ message: "Available backup not found" }, 404);
   const jobId = crypto.randomUUID();
-  await c.env.DB.batch([
+  const results = await c.env.DB.batch([
     c.env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
-    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, backup.accountId, "backup-delete:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'backup.delete_requested', 'hosting_backup', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) SELECT ?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ? WHERE changes() = 1").bind(jobId, backup.accountId, "backup-delete:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) SELECT ?, ?, ?, 'backup.delete_requested', 'hosting_backup', ? WHERE changes() = 1").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id),
   ]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Backup is already being processed. Refresh and try again later." }, 409);
   return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Backup deletion queued." }, 202);
 });
 
