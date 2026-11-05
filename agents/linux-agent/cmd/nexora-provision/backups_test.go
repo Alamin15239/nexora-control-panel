@@ -131,6 +131,40 @@ func TestValidateBackupArchiveRequiresBothRootsAndRejectsDuplicates(t *testing.T
 	}
 }
 
+func TestValidateBackupArchiveRejectsFileHierarchyConflicts(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []tar.Header
+	}{
+		{
+			name: "regular file used as parent",
+			headers: []tar.Header{
+				{Name: "public_html", Typeflag: tar.TypeDir, Mode: 0700},
+				{Name: "databases", Typeflag: tar.TypeDir, Mode: 0700},
+				{Name: "public_html/config", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+				{Name: "public_html/config/settings.ini", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+			},
+		},
+		{
+			name: "regular file replaces populated directory",
+			headers: []tar.Header{
+				{Name: "public_html", Typeflag: tar.TypeDir, Mode: 0700},
+				{Name: "databases", Typeflag: tar.TypeDir, Mode: 0700},
+				{Name: "public_html/config/settings.ini", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+				{Name: "public_html/config", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeBackupArchiveFixture(t, tt.headers)
+			if err := validateBackupArchive(path); err == nil {
+				t.Fatal("expected conflicting archive hierarchy to be rejected")
+			}
+		})
+	}
+}
+
 func TestValidateBackupArchiveRejectsCorruptGzipTrailer(t *testing.T) {
 	path := writeBackupArchiveFixture(t, []tar.Header{
 		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
