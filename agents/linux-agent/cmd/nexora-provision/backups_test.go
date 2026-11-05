@@ -124,6 +124,59 @@ func writeBackupArchiveFixture(t *testing.T, headers []tar.Header) string {
 	return path
 }
 
+func TestAcquireBackupLockPreventsConcurrentBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".backup.lock")
+	first, err := acquireBackupLock(path)
+	if err != nil {
+		t.Fatalf("first lock acquisition failed: %v", err)
+	}
+	defer first.Close()
+	if second, err := acquireBackupLock(path); err == nil {
+		_ = second.Close()
+		t.Fatal("expected concurrent lock acquisition to fail")
+	}
+	if err := syscall.Flock(int(first.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	second, err := acquireBackupLock(path)
+	if err != nil {
+		t.Fatalf("lock should be available after release: %v", err)
+	}
+	_ = second.Close()
+}
+
+func TestPublishBackupArchiveDoesNotReplaceExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	staged := filepath.Join(dir, "staged.tar.gz")
+	final := filepath.Join(dir, "backup.tar.gz")
+	if err := os.WriteFile(staged, []byte("verified archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishBackupArchive(staged, final); err != nil {
+		t.Fatalf("expected archive publication to succeed: %v", err)
+	}
+	info, err := os.Stat(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("published archive mode = %o, want 600", info.Mode().Perm())
+	}
+	if err := os.WriteFile(staged, []byte("second archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishBackupArchive(staged, final); err == nil {
+		t.Fatal("expected publication to refuse replacing an existing archive")
+	}
+	got, err := os.ReadFile(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "verified archive" {
+		t.Fatalf("existing archive was replaced: %q", got)
+	}
+}
+
 func TestBackupFreeSpaceSufficientUsesConservativePeakBudget(t *testing.T) {
 	if backupRequiredFreeBytes != (25<<30)+(64<<20) {
 		t.Fatalf("required free space = %d, want %d", backupRequiredFreeBytes, (25<<30)+(64<<20))
