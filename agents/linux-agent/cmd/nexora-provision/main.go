@@ -37,6 +37,8 @@ type request struct {
 	DatabaseUserName  string   `json:"databaseUserName,omitempty"`
 	DatabaseUserNames []string `json:"databaseUserNames,omitempty"`
 	Privileges        []string `json:"privileges,omitempty"`
+	BackupID          string   `json:"backupId,omitempty"`
+	DatabaseNames     []string `json:"databaseNames,omitempty"
 }
 
 var (
@@ -89,6 +91,18 @@ func main() {
 		err = revokeDatabaseUser(input.Username, input.DatabaseUserName, input.DatabaseName)
 	case "DELETE_DATABASE":
 		err = deleteDatabase(input.Username, input.DatabaseName, input.DatabaseUserNames)
+	case "CREATE_BACKUP":
+		err = createAccountBackup(input.Username, input.BackupID, input.DatabaseNames)
+		if err != nil { fail("BACKUP_CREATE_FAILED", "The hosting account backup could not be created.") }
+		return
+	case "RESTORE_BACKUP":
+		err = stageAccountBackupRestore(input.Username, input.BackupID)
+		if err != nil { fail("BACKUP_RESTORE_STAGE_FAILED", "The backup could not be staged for restore.") }
+		return
+	case "DELETE_BACKUP":
+		err = deleteAccountBackup(input.Username, input.BackupID)
+		if err != nil { fail("BACKUP_DELETE_FAILED", "The backup archive could not be deleted.") }
+		return
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
 	}
