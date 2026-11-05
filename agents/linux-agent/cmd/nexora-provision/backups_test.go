@@ -267,6 +267,20 @@ func TestSnapshotBackupDirectoryRejectsSymlinks(t *testing.T) {
 	}
 }
 
+func TestSnapshotBackupDirectoryRejectsBackslashNames(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "public_html")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "bad\\name.txt"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotBackupDirectory(openBackupFixtureDirectory(t, source), destination); err == nil {
+		t.Fatal("expected filename containing a backslash to be rejected")
+	}
+}
+
 func TestSnapshotBackupDirectoryRejectsSpecialFiles(t *testing.T) {
 	source := t.TempDir()
 	destination := filepath.Join(t.TempDir(), "public_html")
