@@ -123,6 +123,34 @@ func acquireBackupLock(path string) (*os.File, error) {
 	return file, nil
 }
 
+func cleanupStaleBackupWorkspaces(storage string) error {
+	entries, err := os.ReadDir(storage)
+	if err != nil {
+		return fmt.Errorf("BACKUP_CLEANUP_FAILED: unable to inspect backup workspace")
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".work-") {
+			continue
+		}
+		path := filepath.Join(storage, entry.Name())
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("BACKUP_CLEANUP_FAILED: unable to inspect stale workspace")
+		}
+		// Never recurse into or remove a symlink or a non-directory entry.
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("BACKUP_CLEANUP_FAILED: unable to remove stale workspace")
+		}
+	}
+	return nil
+}
+
 func publishBackupArchive(stagedPath, finalPath string) error {
 	if err := os.Chmod(stagedPath, 0600); err != nil {
 		return fmt.Errorf("BACKUP_PUBLISH_FAILED: unable to secure completed archive")
@@ -468,6 +496,9 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		_ = lock.Close()
 	}()
+	if err := cleanupStaleBackupWorkspaces(storage); err != nil {
+		return err
+	}
 	if err := ensureBackupFreeSpace(storage); err != nil {
 		return err
 	}
