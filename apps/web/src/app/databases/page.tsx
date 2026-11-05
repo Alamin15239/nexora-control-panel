@@ -116,6 +116,27 @@ export default function DatabasesPage() {
       await loadUsers(selected);
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to revoke database user"); }
   };
+  const deleteDatabase = async () => {
+    if (!current) return;
+    const confirmed = window.confirm(
+      `Permanently delete database "${current.name}" and all its data? All database users listed for this database will also be removed. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/control/databases/${current.id}/delete`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to queue database deletion");
+      setNotice(data.message || "Database deletion has been queued.");
+      await load();
+      await loadUsers(current.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unable to delete database");
+    }
+  };
+
   const revealCredential = async (userId: string) => {
     setError(""); setNotice(""); setRevealedCredential(null);
     try {
@@ -196,7 +217,7 @@ export default function DatabasesPage() {
             <label className="block text-xs font-medium text-slate-600">Database username<input required minLength={2} maxLength={31} pattern="[a-z][a-z0-9_]{1,30}" value={username} onChange={e=>setUsername(e.target.value.toLowerCase())} placeholder="app_user" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-3 text-sm"/></label>
             <div><p className="mb-2 text-xs font-medium text-slate-600">Privileges</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-3">{permissions.map(p=><label key={p} className="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" checked={privileges.includes(p)} onChange={e=>setPrivileges(v=>e.target.checked?[...v,p]:v.filter(x=>x!==p))}/>{p}</label>)}</div></div>
           </div>
-          <button type="submit" disabled={creatingUser || !selected || !username.trim() || privileges.length === 0} className="mt-5 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{creatingUser ? "Creating database user…" : "Create database user"}</button>
+          <button type="submit" disabled={creatingUser || !selected || current?.status !== "ACTIVE" || !username.trim() || privileges.length === 0} className="mt-5 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{creatingUser ? "Creating database user…" : "Create database user"}</button>
         </form>
       </div>
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -204,7 +225,7 @@ export default function DatabasesPage() {
         {loading?<div className="p-10 text-center text-sm text-slate-500">Loading databases…</div>:databases.length===0?<div className="p-12 text-center"><Database size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No databases yet</h3><p className="mt-1 text-sm text-slate-500">Create a database above to provision it on the connected MariaDB server.</p></div>:<div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Database</th><th className="px-5 py-3 font-medium">Account</th><th className="px-5 py-3 font-medium">Engine</th><th className="px-5 py-3 font-medium">Users</th><th className="px-5 py-3 font-medium">Database size</th><th className="px-5 py-3 font-medium">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{databases.map(d=><tr key={d.id} className={selected===d.id?"bg-blue-50/50":""}><td className="px-5 py-4"><button onClick={()=>setSelected(d.id)} className="font-medium text-blue-700 hover:underline">{d.name}</button></td><td className="px-5 py-4">{d.account_username}</td><td className="px-5 py-4">{d.engine}</td><td className="px-5 py-4">{d.users}</td><td className="px-5 py-4"><p className="font-medium tabular-nums">{formatDatabaseSize(d.used_bytes)}</p><p className="mt-1 text-xs text-slate-400">{formatUsageTime(d.usage_collected_at)}</p></td><td className="px-5 py-4"><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{d.status}</span></td></tr>)}</tbody></table></div>}
       </section>
       <p className="text-xs leading-5 text-slate-500">Database size is a logical estimate from MariaDB table data and index metadata. It is not the same as physical disk usage or the hosting account&apos;s disk quota.</p>
-      <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>
+      <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>{current && ["ACTIVE", "FAILED"].includes(current.status) && <button type="button" onClick={() => void deleteDatabase()} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50">Delete database</button>}{current?.status === "DELETING" && <button type="button" onClick={() => void deleteDatabase()} className="rounded-lg border border-amber-200 px-3 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-50">Check / retry deletion</button>}</div>
         {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p><p className="mt-1 text-xs text-slate-500">{u.status === "ACTIVE" ? "Localhost access · selected database only" : "Provisioning state"}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{u.status}</span>{u.status === "ACTIVE" && u.secret_available === 1 && <button type="button" onClick={() => void revealCredential(u.id)} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50">Reveal one-time password</button>}{u.status === "ACTIVE" && <button type="button" onClick={() => void revokeDatabaseUser(u.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50">Revoke</button>}</div></div>)}</div>}
       </section>
       <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
