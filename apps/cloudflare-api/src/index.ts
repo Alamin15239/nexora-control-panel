@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { ensureSaasDnsRecord } from "./cloudflare-dns";
+import { createDnsRecord, deleteDnsRecord, listDnsRecords, updateDnsRecord } from "./dns-records";
 
 type Bindings = {
   DB: D1Database;
@@ -396,6 +397,84 @@ function validIp(value: string): boolean {
 function canManageServers(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
 }
+
+function dnsErrorStatus(error: unknown): number {
+  const message = error instanceof Error ? error.message : "";
+  return /required|valid|supported|must be|cannot|only available|TTL|priority|identifier|subdomain|label/i.test(message) ? 400 : 502;
+}
+
+app.get("/v1/dns-records", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  try {
+    const records = await listDnsRecords(c.env);
+    return c.json({
+      zone: c.env.CLOUDFLARE_ZONE_NAME ?? null,
+      records,
+      canManage: canManageServers(identity.role),
+    });
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Unable to load DNS records." }, 502);
+  }
+});
+
+app.post("/v1/dns-records", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  try {
+    const record = await createDnsRecord(c.env, input);
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'dns.record_created', 'dns_record', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, record.id,
+      JSON.stringify({ type: record.type, name: record.name })).run();
+    return c.json({ record }, 201);
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Unable to create DNS record." }, dnsErrorStatus(error));
+  }
+});
+
+app.patch("/v1/dns-records/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  try {
+    const record = await updateDnsRecord(c.env, c.req.param("id"), input);
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'dns.record_updated', 'dns_record', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, record.id,
+      JSON.stringify({ type: record.type, name: record.name })).run();
+    return c.json({ record });
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Unable to update DNS record." }, dnsErrorStatus(error));
+  }
+});
+
+app.delete("/v1/dns-records/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const id = c.req.param("id");
+  try {
+    const records = await listDnsRecords(c.env);
+    const existing = records.find((record) => record.id === id);
+    if (!existing) return c.json({ message: "DNS record not found in the managed zone." }, 404);
+    await deleteDnsRecord(c.env, id);
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'dns.record_deleted', 'dns_record', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id,
+      JSON.stringify({ type: existing.type, name: existing.name })).run();
+    return c.json({ deleted: true, id });
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Unable to delete DNS record." }, dnsErrorStatus(error));
+  }
+});
 
 app.get("/v1/servers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
