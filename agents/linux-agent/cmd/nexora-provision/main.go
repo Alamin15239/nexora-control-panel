@@ -25,14 +25,14 @@ const (
 )
 
 type request struct {
-	Operation        string   `json:"operation"`
-	Username         string   `json:"username"`
-	Domain           string   `json:"domain,omitempty"`
-	DocumentRoot     string   `json:"documentRoot,omitempty"`
-	Path             string   `json:"path,omitempty"`
-	NewPath          string   `json:"newPath,omitempty"`
-	ContentBase64    string   `json:"contentBase64,omitempty"`
-	FileOperation    string   `json:"fileOperation,omitempty"`
+	Operation         string   `json:"operation"`
+	Username          string   `json:"username"`
+	Domain            string   `json:"domain,omitempty"`
+	DocumentRoot      string   `json:"documentRoot,omitempty"`
+	Path              string   `json:"path,omitempty"`
+	NewPath           string   `json:"newPath,omitempty"`
+	ContentBase64     string   `json:"contentBase64,omitempty"`
+	FileOperation     string   `json:"fileOperation,omitempty"`
 	DatabaseName      string   `json:"databaseName,omitempty"`
 	DatabaseUserName  string   `json:"databaseUserName,omitempty"`
 	DatabaseUserNames []string `json:"databaseUserNames,omitempty"`

@@ -655,7 +655,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	} else if job.Operation == "REVOKE_DATABASE_USER" {
 		var payload struct {
 			DatabaseUserName string `json:"databaseUserName"`
-			DatabaseName string `json:"databaseName"`
+			DatabaseName     string `json:"databaseName"`
 		}
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" || payload.DatabaseName == "" {
 			errorCode = "INVALID_JOB_PAYLOAD"
@@ -674,7 +674,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 		}
 	} else if job.Operation == "DELETE_DATABASE" {
 		var payload struct {
-			DatabaseName string `json:"databaseName"`
+			DatabaseName      string   `json:"databaseName"`
 			DatabaseUserNames []string `json:"databaseUserNames"`
 		}
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil ||
@@ -694,8 +694,12 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			} else {
 				errorCode = "DATABASE_DELETE_FAILED"
 				errorMessage = strings.TrimSpace(string(output))
-				if errorMessage == "" { errorMessage = "The MariaDB database could not be deleted" }
-				if len(errorMessage) > 400 { errorMessage = errorMessage[:400] }
+				if errorMessage == "" {
+					errorMessage = "The MariaDB database could not be deleted"
+				}
+				if len(errorMessage) > 400 {
+					errorMessage = errorMessage[:400]
+				}
 			}
 		}
 	} else if job.Operation == "FILE_MANAGER" {

@@ -280,9 +280,9 @@ func TestValidateManagedDatabaseName(t *testing.T) {
 
 func TestValidateDatabaseDeletionUsers(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		account string
-		users []string
+		users   []string
 		wantErr bool
 	}{
 		{"valid users", "nxoratest01", []string{"nxoratest01_app", "nxoratest01_readonly"}, false},
