@@ -10,6 +10,8 @@ EMAIL_FROM = "Nexora Alerts <alerts@nexoraedge.digital>"
 [observability]
 enabled = true
 
+[previews]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "nexora-production"
