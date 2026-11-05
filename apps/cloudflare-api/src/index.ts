@@ -398,7 +398,7 @@ function canManageServers(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
 }
 
-function dnsErrorStatus(error: unknown): number {
+function dnsErrorStatus(error: unknown): 400 | 502 {
   const message = error instanceof Error ? error.message : "";
   return /required|valid|supported|must be|cannot|only available|TTL|priority|identifier|subdomain|label/i.test(message) ? 400 : 502;
 }

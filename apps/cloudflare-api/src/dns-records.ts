@@ -93,9 +93,9 @@ function normalizeRecord(input: Record<string, unknown>, env: DnsBindings): Reco
   if (type === "CAA" && !/^\d+\s+(?:issue|issuewild|iodef)\s+.+$/i.test(content)) {
     throw new Error("CAA content must use the format: flags tag value.");
   }
+  const proxied = input.proxied === true;
   const ttl = proxied ? 1 : input.ttl === 1 ? 1 : Number(input.ttl ?? 3600);
   if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error("TTL must be Auto or between 60 and 86,400 seconds.");
-  const proxied = input.proxied === true;
   if (proxied && !["A", "AAAA", "CNAME"].includes(type)) throw new Error("Proxy status is only available for A, AAAA and CNAME records.");
   const record: Record<string, unknown> = { type, name, content, ttl, proxied };
   if (type === "MX") {
