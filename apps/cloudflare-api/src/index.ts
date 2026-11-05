@@ -325,7 +325,7 @@ app.get("/v1/overview", async (c) => {
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM domains d JOIN hosting_accounts h ON h.id = d.hosting_account_id WHERE h.organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_plans WHERE organization_id = ? AND active = 1").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_databases WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
-      c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents')").all<{ name: string }>(),
+      c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents','hosting_backups')").all<{ name: string }>(),
     ]);
     const requiredTables = ["users", "organizations", "memberships", "auth_sessions", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "agent_credentials", "server_telemetry", "server_service_checks", "server_incidents", "hosting_backups"];
     const presentTables = new Set((schemaRows.results ?? []).map((row) => row.name));
@@ -1529,7 +1529,7 @@ app.delete("/v1/backups/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
-  const backup = await c.env.DB.prepare("SELECT id, hosting_account_id AS accountId FROM hosting_backups WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
+  const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
   if (!backup) return c.json({ message: "Available backup not found" }, 404);
   const jobId = crypto.randomUUID();
   await c.env.DB.batch([
