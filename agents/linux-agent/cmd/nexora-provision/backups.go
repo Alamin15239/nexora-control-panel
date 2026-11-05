@@ -56,6 +56,71 @@ func validateBackupID(value string) error {
 	return nil
 }
 
+// recoverExistingBackupArchive recovers an archive published by an earlier
+// attempt that stopped before reporting its result to the control plane.
+func recoverExistingBackupArchive(path, backupID string, databaseNames []string, expectedUID uint32) (backupResult, error) {
+	fail := func() (backupResult, error) {
+		return backupResult{}, fmt.Errorf("BACKUP_RECOVERY_FAILED: existing backup archive is unsafe or invalid")
+	}
+
+	before, err := os.Lstat(path)
+	if err != nil {
+		return fail()
+	}
+	beforeStat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		beforeStat.Uid != expectedUID || before.Mode().Perm() != 0600 || before.Size() <= 0 {
+		return fail()
+	}
+
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fail()
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+
+	var opened syscall.Stat_t
+	if err := syscall.Fstat(fd, &opened); err != nil ||
+		opened.Mode&syscall.S_IFMT != syscall.S_IFREG || opened.Uid != expectedUID ||
+		opened.Mode&0777 != 0600 || opened.Dev != beforeStat.Dev ||
+		opened.Ino != beforeStat.Ino || opened.Size <= 0 {
+		return fail()
+	}
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return fail()
+	}
+
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) ||
+		after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return fail()
+	}
+
+	if err := validateBackupArchive(path); err != nil {
+		return fail()
+	}
+
+	finalInfo, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, finalInfo) ||
+		finalInfo.Size() != before.Size() ||
+		!finalInfo.ModTime().Equal(before.ModTime()) {
+		return fail()
+	}
+
+	return backupResult{
+		BackupID:      backupID,
+		ArchiveName:   filepath.Base(path),
+		SizeBytes:     after.Size(),
+		SHA256:        hex.EncodeToString(hash.Sum(nil)),
+		DatabaseNames: append([]string(nil), databaseNames...),
+		CreatedAt:     after.ModTime().UTC().Format(time.RFC3339),
+		Success:       true,
+	}, nil
+}
+
 func ensurePrivateDirectory(path string) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("INVALID_STORAGE_PATH: backup storage path is invalid")
@@ -465,16 +530,6 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err != nil {
 		return err
 	}
-	rootFD, err := openDirectoryChain("/", "home", username, "public_html")
-	if err != nil {
-		return fmt.Errorf("BACKUP_SOURCE_UNAVAILABLE: document root is missing or unsafe")
-	}
-	rootFDOpen := true
-	defer func() {
-		if rootFDOpen {
-			_ = syscall.Close(rootFD)
-		}
-	}()
 	if len(databaseNames) > 20 {
 		return fmt.Errorf("INVALID_DATABASE_LIST: too many databases requested")
 	}
@@ -500,14 +555,30 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err := cleanupStaleBackupWorkspaces(storage); err != nil {
 		return err
 	}
-	if err := ensureBackupFreeSpace(storage); err != nil {
-		return err
-	}
 	archiveName := backupID + ".tar.gz"
 	archivePath := filepath.Join(storage, archiveName)
 	if _, err := os.Lstat(archivePath); err == nil {
-		return fmt.Errorf("BACKUP_EXISTS: backup already exists")
+		recovered, recoverErr := recoverExistingBackupArchive(archivePath, backupID, databaseNames, 0)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		return json.NewEncoder(os.Stdout).Encode(recovered)
 	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	rootFD, err := openDirectoryChain("/", "home", username, "public_html")
+	if err != nil {
+		return fmt.Errorf("BACKUP_SOURCE_UNAVAILABLE: document root is missing or unsafe")
+	}
+	rootFDOpen := true
+	defer func() {
+		if rootFDOpen {
+			_ = syscall.Close(rootFD)
+		}
+	}()
+
+	if err := ensureBackupFreeSpace(storage); err != nil {
 		return err
 	}
 

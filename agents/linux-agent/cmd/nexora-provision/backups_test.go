@@ -485,3 +485,88 @@ func TestSnapshotBackupDirectoryRejectsSpecialFiles(t *testing.T) {
 		t.Fatal("expected FIFO to be rejected")
 	}
 }
+
+func TestRecoverExistingBackupArchiveAcceptsValidArchive(t *testing.T) {
+	source := writeBackupArchiveFixture(t, []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "public_html/index.html", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/example.sql", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+	})
+
+	path := filepath.Join(t.TempDir(), "backup.tar.gz")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	databases := []string{"nxoratest01_testdb"}
+	result, err := recoverExistingBackupArchive(path,
+		"12345678-1234-1234-1234-123456789abc", databases, uint32(os.Getuid()))
+	if err != nil {
+		t.Fatalf("expected valid archive recovery, got %v", err)
+	}
+
+	sum := sha256.Sum256(data)
+	if !result.Success ||
+		result.BackupID != "12345678-1234-1234-1234-123456789abc" ||
+		result.ArchiveName != "backup.tar.gz" ||
+		result.SizeBytes != int64(len(data)) ||
+		result.SHA256 != hex.EncodeToString(sum[:]) ||
+		len(result.DatabaseNames) != 1 ||
+		result.DatabaseNames[0] != databases[0] ||
+		result.CreatedAt == "" {
+		t.Fatalf("unexpected recovered result: %+v", result)
+	}
+}
+
+func TestRecoverExistingBackupArchiveRejectsSymlink(t *testing.T) {
+	source := writeBackupArchiveFixture(t, []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+	})
+	path := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := os.Symlink(source, path); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recoverExistingBackupArchive(path,
+		"12345678-1234-1234-1234-123456789abc", nil, uint32(os.Getuid())); err == nil {
+		t.Fatal("expected symlink archive to be rejected")
+	}
+}
+
+func TestRecoverExistingBackupArchiveRejectsUnsafePermissions(t *testing.T) {
+	source := writeBackupArchiveFixture(t, []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+	})
+	path := filepath.Join(t.TempDir(), "backup.tar.gz")
+	data, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recoverExistingBackupArchive(path,
+		"12345678-1234-1234-1234-123456789abc", nil, uint32(os.Getuid())); err == nil {
+		t.Fatal("expected archive with group-readable permissions to be rejected")
+	}
+}
+
+func TestRecoverExistingBackupArchiveRejectsCorruptArchive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup.tar.gz")
+	if err := os.WriteFile(path, []byte("not a gzip archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recoverExistingBackupArchive(path,
+		"12345678-1234-1234-1234-123456789abc", nil, uint32(os.Getuid())); err == nil {
+		t.Fatal("expected corrupt archive to be rejected")
+	}
+}
