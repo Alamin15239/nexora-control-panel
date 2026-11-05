@@ -130,3 +130,24 @@ func TestValidateBackupArchiveRequiresBothRootsAndRejectsDuplicates(t *testing.T
 		t.Fatal("expected duplicate archive member to be rejected")
 	}
 }
+
+func TestValidateBackupArchiveRejectsCorruptGzipTrailer(t *testing.T) {
+	path := writeBackupArchiveFixture(t, []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+	})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 8 {
+		t.Fatal("gzip fixture unexpectedly short")
+	}
+	data[len(data)-1] ^= 0xff
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected corrupt gzip trailer to be rejected")
+	}
+}
