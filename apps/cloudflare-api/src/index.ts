@@ -2261,7 +2261,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -2312,7 +2312,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const update = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
@@ -2320,6 +2320,45 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
   const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
     .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string }>();
+  if (completedJob?.operation === "CREATE_BACKUP" || completedJob?.operation === "RESTORE_BACKUP" || completedJob?.operation === "DELETE_BACKUP") {
+    const parts = completedJob.idempotencyKey.split(":");
+    const backupId = parts[1] ?? "";
+    if (completedJob.operation === "CREATE_BACKUP") {
+      if (input.success) {
+        const result = incomingResult;
+        const archiveName = result && typeof result.archiveName === "string" ? result.archiveName : "";
+        const sizeBytes = result && typeof result.sizeBytes === "number" ? result.sizeBytes : 0;
+        const digest = result && typeof result.sha256 === "string" ? result.sha256 : "";
+        const resultBackupId = result && typeof result.backupId === "string" ? result.backupId : "";
+        if (!/^[a-f0-9-]{36}$/.test(backupId) || resultBackupId !== backupId || archiveName !== backupId + ".tar.gz" || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || !/^[a-f0-9]{64}$/.test(digest)) {
+          await c.env.DB.prepare("UPDATE hosting_backups SET status = 'FAILED', error_message = 'The agent returned invalid backup metadata' WHERE id = ? AND organization_id = ?").bind(backupId, auth.credential.organizationId).run();
+          return c.json({ message: "The agent returned invalid backup metadata." }, 422);
+        }
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', archive_name = ?, size_bytes = ?, sha256 = ?, completed_at = ?, error_message = NULL WHERE id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')").bind(archiveName, sizeBytes, digest, new Date().toISOString(), backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'FAILED', error_message = ? WHERE id = ? AND organization_id = ?").bind(errorMessage || "The backup could not be created", backupId, auth.credential.organizationId).run();
+      }
+    } else if (completedJob.operation === "RESTORE_BACKUP") {
+      if (input.success) {
+        const account = await c.env.DB.prepare("SELECT a.username FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id WHERE j.id = ? AND a.organization_id = ? LIMIT 1").bind(jobId, auth.credential.organizationId).first<{ username: string }>();
+        const stagingPath = incomingResult && typeof incomingResult.stagingPath === "string" ? incomingResult.stagingPath : "";
+        const expectedPath = account ? "/var/lib/nexora/restore-staging/" + account.username + "/" + backupId : "";
+        if (!expectedPath || stagingPath !== expectedPath) {
+          await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = 'The agent returned an invalid staging location' WHERE id = ? AND organization_id = ?").bind(backupId, auth.credential.organizationId).run();
+          return c.json({ message: "The agent returned an invalid restore staging location." }, 422);
+        }
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'RESTORE_STAGED', staged_at = ?, error_message = NULL WHERE id = ? AND organization_id = ? AND status = 'RESTORING'").bind(new Date().toISOString(), backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = ? WHERE id = ? AND organization_id = ? AND status = 'RESTORING'").bind(errorMessage || "The restore could not be staged", backupId, auth.credential.organizationId).run();
+      }
+    } else {
+      if (input.success) {
+        await c.env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND organization_id = ? AND status = 'DELETING'").bind(backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = ? WHERE id = ? AND organization_id = ? AND status = 'DELETING'").bind(errorMessage || "The backup could not be deleted", backupId, auth.credential.organizationId).run();
+      }
+    }
+  }
   if (completedJob?.operation === "CREATE_HOSTING_ACCOUNT") {
     const accountId = await c.env.DB.prepare(
       "SELECT hosting_account_id AS accountId FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1",
