@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock3, LockKeyhole, Mail, Network, HardDrive, Activity, Settings2, ShieldCheck, Server, AlertTriangle } from "lucide-react";
 import MonitoringDashboard from "@/components/monitoring-dashboard";
+import DnsManagement from "@/components/dns-management";
 
 type Item = { title: string; description: string; state: "ready" | "pending" | "blocked" };
 const configs: Record<string, { title: string; subtitle: string; icon: typeof Mail; items: Item[]; note: string }> = {
@@ -19,11 +20,11 @@ const configs: Record<string, { title: string; subtitle: string; icon: typeof Ma
   dns: {
     title: "DNS management", subtitle: "Manage zone records and domain routing.", icon: Network,
     items: [
-      { title: "DNS zone inventory", description: "Track zones associated with customer domains.", state: "pending" },
-      { title: "A, AAAA and CNAME records", description: "Manage address and canonical-name records.", state: "pending" },
-      { title: "MX, TXT and verification records", description: "Prepare mail routing, SPF, DKIM, DMARC and domain verification.", state: "pending" },
-      { title: "Authoritative DNS provider", description: "Connect a provider API before publishing DNS changes.", state: "blocked" },
-    ], note: "DNS records are not published by this control panel yet. A DNS provider integration and domain ownership verification are required."
+      { title: "Cloudflare DNS zone", description: "The Nexora managed zone is connected through a scoped API token.", state: "ready" },
+      { title: "A, AAAA and CNAME records", description: "Create, edit, list and delete address and alias records.", state: "ready" },
+      { title: "MX, TXT and CAA records", description: "Manage mail routing, SPF, DKIM, DMARC and certificate-authority records.", state: "ready" },
+      { title: "Role-based DNS changes", description: "Only workspace owners and administrators can publish DNS changes.", state: "ready" },
+    ], note: "DNS changes publish directly to the configured Cloudflare zone. Verify record names and values before saving; deletions take effect at the authoritative provider."
   },
   backups: {
     title: "Backups", subtitle: "Plan customer backup policies and recovery workflows.", icon: HardDrive,
@@ -284,6 +285,7 @@ export default function OperationsModule({ module }: { module: string }) {
   }, [module]);
 
   if (module === "monitoring") return <MonitoringDashboard/>;
+  if (module === "dns") return <DnsManagement/>;
 
   const items = config.items.map(item =>
     module === "settings" && item.title === "Email notifications"
