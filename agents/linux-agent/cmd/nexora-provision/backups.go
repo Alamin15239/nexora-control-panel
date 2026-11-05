@@ -64,6 +64,9 @@ func ensurePrivateDirectory(path string) error {
 			if !ok || stat.Uid != 0 {
 				return fmt.Errorf("UNSAFE_STORAGE_OWNER: backup storage directories must be root-owned")
 			}
+			if info.Mode().Perm()&0022 != 0 {
+				return fmt.Errorf("UNSAFE_STORAGE_MODE: backup storage directories must not be group- or world-writable")
+			}
 		}
 	}
 	if err := os.Chown(path, 0, 0); err != nil {
