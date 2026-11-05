@@ -105,13 +105,13 @@ func sameInode(a, b *syscall.Stat_t) bool {
 }
 
 // backupSnapshotBudget tracks bytes copied from public_html across recursion.
-type backupSnapshotBudget struct { copied int64 }
+type backupSnapshotBudget struct { copied, limit int64 }
 
 // snapshotBackupDirectory consumes sourceFD and copies only regular files and
 // directories. Every lookup is relative to a pinned directory descriptor, and
 // every opened child is checked against the inode inspected with O_PATH.
 func snapshotBackupDirectory(sourceFD int, destination string) error {
-	return snapshotBackupDirectoryWithBudget(sourceFD, destination, &backupSnapshotBudget{})
+	return snapshotBackupDirectoryWithBudget(sourceFD, destination, &backupSnapshotBudget{limit: maxBackupSnapshotBytes})
 }
 
 func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget *backupSnapshotBudget) error {
@@ -174,7 +174,7 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 				_ = syscall.Close(fileFD)
 				return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed during snapshot")
 			}
-			if opened.Size < 0 || opened.Size > maxBackupSnapshotBytes-budget.copied {
+			if opened.Size < 0 || opened.Size > budget.limit-budget.copied {
 				_ = syscall.Close(fileFD)
 				return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
 			}
@@ -184,7 +184,7 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 				_ = input.Close()
 				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot file")
 			}
-			limited := &io.LimitedReader{R: input, N: maxBackupSnapshotBytes-budget.copied+1}
+			limited := &io.LimitedReader{R: input, N: budget.limit-budget.copied+1}
 		 copied, copyErr := io.Copy(output, limited)
 		 inputCloseErr := input.Close()
 		 var after syscall.Stat_t
@@ -194,7 +194,7 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 		 if copyErr != nil || inputCloseErr != nil || statAfterErr != nil || modeErr != nil || outputCloseErr != nil {
 			 return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
 			}
-		 if copied > maxBackupSnapshotBytes-budget.copied {
+		 if copied > budget.limit-budget.copied {
 			 return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
 			}
 		 if !sameInode(&opened, &after) || opened.Size != after.Size || opened.Mtim != after.Mtim || opened.Ctim != after.Ctim || copied != opened.Size {
