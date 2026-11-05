@@ -38,6 +38,7 @@ type request struct {
 	DatabaseUserNames []string `json:"databaseUserNames,omitempty"`
 	Privileges        []string `json:"privileges,omitempty"`
 	BackupID          string   `json:"backupId,omitempty"`
+	ExpectedSHA256    string   `json:"sha256,omitempty"`
 	DatabaseNames     []string `json:"databaseNames,omitempty"`
 }
 
@@ -96,7 +97,7 @@ func main() {
 		if err != nil { fail("BACKUP_CREATE_FAILED", "The hosting account backup could not be created.") }
 		return
 	case "RESTORE_BACKUP":
-		err = stageAccountBackupRestore(input.Username, input.BackupID)
+		err = stageAccountBackupRestore(input.Username, input.BackupID, input.ExpectedSHA256)
 		if err != nil { fail("BACKUP_RESTORE_STAGE_FAILED", "The backup could not be staged for restore.") }
 		return
 	case "DELETE_BACKUP":
