@@ -145,6 +145,37 @@ func TestAcquireBackupLockPreventsConcurrentBackup(t *testing.T) {
 	_ = second.Close()
 }
 
+func TestCleanupStaleBackupWorkspacesRemovesOnlyRealWorkDirectories(t *testing.T) {
+	storage := t.TempDir()
+	stale := filepath.Join(storage, ".work-abandoned")
+	if err := os.Mkdir(stale, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "partial.tar.gz"), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(storage, "backup.tar.gz")
+	if err := os.WriteFile(keep, []byte("valid backup"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(storage, ".work-link")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupStaleBackupWorkspaces(storage); err != nil {
+		t.Fatalf("cleanup failed: %v", err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("expected stale workspace to be removed, got %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("expected completed backup to remain: %v", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("expected symlink workspace entry to be left untouched, got %v", err)
+	}
+}
+
 func TestPublishBackupArchiveDoesNotReplaceExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	staged := filepath.Join(dir, "staged.tar.gz")
