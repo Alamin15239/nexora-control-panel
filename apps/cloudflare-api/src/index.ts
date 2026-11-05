@@ -1990,7 +1990,7 @@ app.post("/v1/databases/:id/users", async (c) => {
   const userId = crypto.randomUUID(), jobId = crypto.randomUUID(), now = new Date().toISOString();
   const payload = JSON.stringify({ databaseName: database.name, databaseUserName: requestedName, privileges: requestedPrivileges });
   try {
-    await c.env.DB.batch([
+    const results = await c.env.DB.batch([
       c.env.DB.prepare(
         `INSERT INTO hosting_database_users (id, organization_id, database_id, username, privileges, status, created_at)
          SELECT ?, ?, d.id, ?, ?, 'PENDING', ? FROM hosting_databases d
@@ -2005,6 +2005,9 @@ app.post("/v1/databases/:id/users", async (c) => {
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database_user.provisioning_queued', 'database_user', ?, ?)")
         .bind(crypto.randomUUID(), identity.organizationId, identity.id, userId, JSON.stringify({ databaseId: database.id, jobId, privileges: requestedPrivileges })),
     ]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+      return c.json({ message: "The database is no longer active. Refresh and try again." }, 409);
+    }
   } catch { return c.json({ message: "Unable to queue database-user provisioning. Check for a duplicate username." }, 409); }
   return c.json({ databaseUserId: userId, jobId, status: "PENDING", username: physicalUsername, message: "Database user creation has been queued. Its generated password will be available once, after provisioning succeeds." }, 202);
 });
@@ -2035,7 +2038,7 @@ app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
   if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) return c.json({ message: "The stored database username is invalid." }, 409);
   const jobId = crypto.randomUUID(), now = new Date().toISOString();
   try {
-    await c.env.DB.batch([
+    const results = await c.env.DB.batch([
       c.env.DB.prepare(
         `UPDATE hosting_database_users SET status = 'REVOKING'
          WHERE id = ? AND organization_id = ? AND status = 'ACTIVE'
@@ -2050,6 +2053,9 @@ app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database_user.revocation_queued', 'database_user', ?, ?)")
         .bind(crypto.randomUUID(), identity.organizationId, identity.id, user.id, JSON.stringify({ jobId, databaseId: c.req.param("id") })),
     ]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+      return c.json({ message: "The database is no longer active or the user state changed. Refresh and try again." }, 409);
+    }
   } catch { return c.json({ message: "Unable to queue database-user revocation." }, 409); }
   return c.json({ databaseUserId: user.id, jobId, status: "REVOKING" }, 202);
 });
