@@ -22,6 +22,9 @@ import (
 const backupStorageRoot = "/var/lib/nexora/backups"
 const restoreStagingRoot = "/var/lib/nexora/restore-staging"
 
+// Bound decompression and extraction work even if an archive is highly compressed.
+const maxBackupArchiveUncompressedBytes int64 = 20 << 30
+
 var backupIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
 type backupResult struct {
@@ -116,7 +119,8 @@ func validateBackupArchive(path string) error {
 		return err
 	}
 	defer gz.Close()
-	reader := tar.NewReader(gz)
+	limited := &io.LimitedReader{R: gz, N: maxBackupArchiveUncompressedBytes + 1}
+	reader := tar.NewReader(limited)
 	seen := make(map[string]bool)
 	hasPublicHTML := false
 	hasDatabases := false
@@ -130,8 +134,11 @@ func validateBackupArchive(path string) error {
 			// tar.Reader stops at the tar end markers before necessarily
 			// consuming the gzip trailer. Drain the gzip stream so its CRC and
 			// uncompressed-size trailer are verified before accepting the archive.
-			if _, err := io.Copy(io.Discard, gz); err != nil {
+			if _, err := io.Copy(io.Discard, limited); err != nil {
 				return fmt.Errorf("backup archive gzip integrity check failed: %w", err)
+			}
+			if limited.N == 0 {
+				return fmt.Errorf("backup archive exceeds the uncompressed size limit")
 			}
 			return nil
 		}
@@ -156,6 +163,9 @@ func validateBackupArchive(path string) error {
 				name == "databases" || strings.HasPrefix(name, "databases"+string(filepath.Separator))) ||
 			(header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg) || header.Size < 0 {
 			return fmt.Errorf("unsafe archive path or file type")
+		}
+		if header.Size > maxBackupArchiveUncompressedBytes {
+			return fmt.Errorf("backup archive exceeds the uncompressed size limit")
 		}
 		if seen[name] {
 			return fmt.Errorf("backup archive contains duplicate paths")
