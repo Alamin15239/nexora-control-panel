@@ -61,7 +61,9 @@ function normalizedName(raw: unknown, zoneName: string): string {
   if (!name || name.length > 253 || (name !== zone && !name.endsWith("." + zone))) {
     throw new Error("Record name must be the zone apex or a subdomain of " + zone + ".");
   }
-  if (name.split(".").some((part) => !/^(?:\*|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/.test(part))) {
+  const validLabel = (part: string) =>
+    /^(?:\*|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|_[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?)$/.test(part);
+  if (name.split(".").some((part) => !validLabel(part))) {
     throw new Error("DNS record name contains an invalid label.");
   }
   return name;
