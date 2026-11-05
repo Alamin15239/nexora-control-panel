@@ -22,8 +22,11 @@ import (
 const backupStorageRoot = "/var/lib/nexora/backups"
 const restoreStagingRoot = "/var/lib/nexora/restore-staging"
 
-// Bound decompression and extraction work even if an archive is highly compressed.
+// Bound snapshot, database dump, and archive processing disk usage.
 const maxBackupArchiveUncompressedBytes int64 = 20 << 30
+const maxBackupSnapshotBytes int64 = 20 << 30
+const maxBackupDatabaseBytes int64 = 2 << 30
+const maxBackupDatabasesTotalBytes int64 = 10 << 30
 
 var backupIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
@@ -101,10 +104,17 @@ func sameInode(a, b *syscall.Stat_t) bool {
 	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode&syscall.S_IFMT == b.Mode&syscall.S_IFMT
 }
 
+// backupSnapshotBudget tracks bytes copied from public_html across recursion.
+type backupSnapshotBudget struct { copied int64 }
+
 // snapshotBackupDirectory consumes sourceFD and copies only regular files and
 // directories. Every lookup is relative to a pinned directory descriptor, and
 // every opened child is checked against the inode inspected with O_PATH.
 func snapshotBackupDirectory(sourceFD int, destination string) error {
+	return snapshotBackupDirectoryWithBudget(sourceFD, destination, &backupSnapshotBudget{})
+}
+
+func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget *backupSnapshotBudget) error {
 	source := os.NewFile(uintptr(sourceFD), "backup-source-directory")
 	if source == nil {
 		_ = syscall.Close(sourceFD)
@@ -148,7 +158,7 @@ func snapshotBackupDirectory(sourceFD int, destination string) error {
 				_ = syscall.Close(childFD)
 				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot directory")
 			}
-			if err := snapshotBackupDirectory(childFD, target); err != nil {
+			if err := snapshotBackupDirectoryWithBudget(childFD, target, budget); err != nil {
 				return err
 			}
 			if err := os.Chmod(target, os.FileMode(inspected.Mode).Perm()&0755); err != nil {
@@ -164,19 +174,33 @@ func snapshotBackupDirectory(sourceFD int, destination string) error {
 				_ = syscall.Close(fileFD)
 				return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed during snapshot")
 			}
+			if opened.Size < 0 || opened.Size > maxBackupSnapshotBytes-budget.copied {
+				_ = syscall.Close(fileFD)
+				return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
+			}
 			input := os.NewFile(uintptr(fileFD), "backup-source-file")
-			output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		 output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 			if createErr != nil {
 				_ = input.Close()
 				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot file")
 			}
-			_, copyErr := io.Copy(output, input)
-			inputCloseErr := input.Close()
-			modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
-			outputCloseErr := output.Close()
-			if copyErr != nil || inputCloseErr != nil || modeErr != nil || outputCloseErr != nil {
-				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
+			limited := &io.LimitedReader{R: input, N: maxBackupSnapshotBytes-budget.copied+1}
+		 copied, copyErr := io.Copy(output, limited)
+		 inputCloseErr := input.Close()
+		 var after syscall.Stat_t
+		 statAfterErr := syscall.Fstat(fileFD, &after)
+		 modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
+		 outputCloseErr := output.Close()
+		 if copyErr != nil || inputCloseErr != nil || statAfterErr != nil || modeErr != nil || outputCloseErr != nil {
+			 return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
 			}
+		 if copied > maxBackupSnapshotBytes-budget.copied {
+			 return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
+			}
+		 if !sameInode(&opened, &after) || opened.Size != after.Size || opened.Mtim != after.Mtim || opened.Ctim != after.Ctim || copied != opened.Size {
+			 return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed while being snapshotted")
+			}
+		 budget.copied += copied
 		default:
 			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: symbolic links and special files are not included in backups")
 		}
