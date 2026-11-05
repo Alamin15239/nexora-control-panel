@@ -23,13 +23,17 @@ const backupStorageRoot = "/var/lib/nexora/backups"
 const restoreStagingRoot = "/var/lib/nexora/restore-staging"
 
 // Bound snapshot, database dump, and archive processing disk usage.
-const maxBackupSnapshotBytes int64 = 20 << 30
-const maxBackupDatabaseBytes int64 = 2 << 30
-const maxBackupDatabasesTotalBytes int64 = 10 << 30
+const maxBackupSnapshotBytes int64 = 8 << 30
+const maxBackupDatabaseBytes int64 = 1 << 30
+const maxBackupDatabasesTotalBytes int64 = 2 << 30
 // Allow bounded tar headers, path metadata, directory entries, and block padding
 // in addition to the maximum combined website and database payload.
-const maxBackupArchiveOverheadBytes int64 = 2 << 30
+const maxBackupArchiveOverheadBytes int64 = 1 << 30
 const maxBackupArchiveUncompressedBytes int64 = maxBackupSnapshotBytes + maxBackupDatabasesTotalBytes + maxBackupArchiveOverheadBytes
+const backupDiskSafetyReserveBytes int64 = 4 << 30
+const backupArchiveCompressionReserveBytes int64 = 64 << 20
+const backupRequiredFreeBytes int64 = maxBackupSnapshotBytes + maxBackupDatabasesTotalBytes +
+	maxBackupArchiveUncompressedBytes + backupDiskSafetyReserveBytes + backupArchiveCompressionReserveBytes
 
 var backupIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
@@ -96,6 +100,25 @@ func accountBackupDirectory(username string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func backupFreeSpaceSufficient(availableBytes int64) bool {
+	return availableBytes >= backupRequiredFreeBytes
+}
+
+func ensureBackupFreeSpace(path string) error {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return fmt.Errorf("BACKUP_DISK_CHECK_FAILED: unable to check backup storage capacity")
+	}
+	if stat.Bsize <= 0 || stat.Bavail > uint64(^uint64(0)>>1)/uint64(stat.Bsize) {
+		return fmt.Errorf("BACKUP_DISK_CHECK_FAILED: backup storage capacity is invalid")
+	}
+	availableBytes := int64(stat.Bavail * uint64(stat.Bsize))
+	if !backupFreeSpaceSufficient(availableBytes) {
+		return fmt.Errorf("BACKUP_DISK_SPACE_LOW: insufficient free space for a safe backup")
+	}
+	return nil
 }
 
 // Linux O_PATH lets us inspect an entry without opening a FIFO, device, or
@@ -402,6 +425,9 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	}
 	storage, err := accountBackupDirectory(username)
 	if err != nil {
+		return err
+	}
+	if err := ensureBackupFreeSpace(storage); err != nil {
 		return err
 	}
 	archiveName := backupID + ".tar.gz"
