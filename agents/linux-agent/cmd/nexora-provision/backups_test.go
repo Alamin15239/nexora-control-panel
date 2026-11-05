@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"syscall"
 )
 
 func TestVerifyBackupDigestAcceptsMatchingArchive(t *testing.T) {
@@ -213,5 +214,69 @@ func TestValidateBackupArchiveRejectsOversizedMember(t *testing.T) {
 	}
 	if err := validateBackupArchive(path); err == nil {
 		t.Fatal("expected oversized archive member to be rejected")
+	}
+}
+
+
+func openBackupFixtureDirectory(t *testing.T, path string) int {
+	t.Helper()
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fd
+}
+
+func TestSnapshotBackupDirectoryCopiesRegularFilesAndDirectories(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "public_html")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, "assets"), 0750); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("safe snapshot content")
+	if err := os.WriteFile(filepath.Join(source, "assets", "site.css"), want, 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := snapshotBackupDirectory(openBackupFixtureDirectory(t, source), destination); err != nil {
+		t.Fatalf("expected secure snapshot to succeed, got %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(destination, "assets", "site.css"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("snapshot content mismatch: got %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotBackupDirectoryRejectsSymlinks(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "public_html")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(source, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotBackupDirectory(openBackupFixtureDirectory(t, source), destination); err == nil {
+		t.Fatal("expected symbolic link to be rejected")
+	}
+}
+
+func TestSnapshotBackupDirectoryRejectsSpecialFiles(t *testing.T) {
+	source := t.TempDir()
+	destination := filepath.Join(t.TempDir(), "public_html")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(source, "pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotBackupDirectory(openBackupFixtureDirectory(t, source), destination); err == nil {
+		t.Fatal("expected FIFO to be rejected")
 	}
 }
