@@ -378,7 +378,7 @@ func deleteAccountBackup(username, backupID string) error {
 
 
 func verifyBackupDigest(path, expected string) error {
-	).MatchString(expected) {
+).MatchString(expected) {
 		return fmt.Errorf("BACKUP_DIGEST_INVALID: expected archive digest is invalid")
 	}
 	file, err := os.Open(path)
