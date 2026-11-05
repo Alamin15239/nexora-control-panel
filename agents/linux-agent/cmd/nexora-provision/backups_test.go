@@ -193,10 +193,11 @@ func TestPublishBackupArchiveDoesNotReplaceExistingFile(t *testing.T) {
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("published archive mode = %o, want 600", info.Mode().Perm())
 	}
-	if err := os.WriteFile(staged, []byte("second archive"), 0600); err != nil {
+	secondStaged := filepath.Join(dir, "second-staged.tar.gz")
+	if err := os.WriteFile(secondStaged, []byte("second archive"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := publishBackupArchive(staged, final); err == nil {
+	if err := publishBackupArchive(secondStaged, final); err == nil {
 		t.Fatal("expected publication to refuse replacing an existing archive")
 	}
 	got, err := os.ReadFile(final)
