@@ -963,6 +963,48 @@ app.post("/v1/agent/heartbeat", async (c) => {
       }
     }
 
+  type IncomingDatabaseUsage = {
+    name: string;
+    usedBytes: number;
+    collectedAt: string;
+  };
+  const databaseUsage: IncomingDatabaseUsage[] = [];
+
+  // Older agents may omit databaseUsage.
+  if (input.databaseUsage !== undefined) {
+    if (!Array.isArray(input.databaseUsage) || input.databaseUsage.length > 100) {
+      return c.json({ message: "Database usage must be an array of at most 100 entries" }, 400);
+    }
+
+    const seenDatabaseNames = new Set<string>();
+    for (const item of input.databaseUsage) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return c.json({ message: "Invalid database usage entry" }, 400);
+      }
+
+      const measurement = item as Record<string, unknown>;
+      const name = typeof measurement.name === "string" ? measurement.name : "";
+      const usedBytes = measurement.usedBytes;
+      const collectedAt = typeof measurement.collectedAt === "string" ? measurement.collectedAt : "";
+      const collectedAtMs = Date.parse(collectedAt);
+
+      if (
+        !/^[a-z][a-z0-9_]{1,63}$/.test(name) ||
+        seenDatabaseNames.has(name) ||
+        typeof usedBytes !== "number" ||
+        !Number.isSafeInteger(usedBytes) ||
+        usedBytes < 0 ||
+        !Number.isFinite(collectedAtMs) ||
+        Math.abs(Date.now() - collectedAtMs) > 10 * 60 * 1000
+      ) {
+        return c.json({ message: "Database usage fields are invalid or outside accepted limits" }, 400);
+      }
+
+      seenDatabaseNames.add(name);
+      databaseUsage.push({ name, usedBytes, collectedAt: new Date(collectedAtMs).toISOString() });
+    }
+  }
+
   const bodyHash = await sha256(rawBody);
   const path = new URL(c.req.url).pathname;
   const canonical = [timestamp, nonce, c.req.method.toUpperCase(), path, bodyHash].join("\n");
@@ -978,6 +1020,43 @@ app.post("/v1/agent/heartbeat", async (c) => {
     return c.json({ message: "Agent request nonce has already been used" }, 409);
   }
   const now = new Date().toISOString();
+
+  const databaseUsageStatements: D1PreparedStatement[] = [];
+  if (databaseUsage.length > 0) {
+    const managedDatabases = await c.env.DB.prepare(
+      `SELECT d.id, d.name
+       FROM hosting_databases d
+       JOIN hosting_accounts a ON a.id = d.hosting_account_id
+       WHERE a.server_id = ? AND d.organization_id = ?
+         AND a.status = 'ACTIVE' AND d.status = 'ACTIVE'`,
+    ).bind(credential.serverId, credential.organizationId).all<{ id: string; name: string }>();
+
+    const managedByName = new Map(
+      (managedDatabases.results ?? []).map((database) => [database.name, database.id]),
+    );
+
+    for (const measurement of databaseUsage) {
+      const databaseId = managedByName.get(measurement.name);
+      if (!databaseId) continue;
+
+      databaseUsageStatements.push(
+        c.env.DB.prepare(
+          `INSERT INTO database_usage
+           (database_id, server_id, organization_id, used_bytes, collected_at, received_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(database_id) DO UPDATE SET
+             server_id = excluded.server_id,
+             organization_id = excluded.organization_id,
+             used_bytes = excluded.used_bytes,
+             collected_at = excluded.collected_at,
+             received_at = excluded.received_at
+           WHERE excluded.collected_at >= database_usage.collected_at`,
+        ).bind(databaseId, credential.serverId, credential.organizationId,
+          measurement.usedBytes, measurement.collectedAt, now),
+      );
+    }
+  }
+
   const incidentStatements = serviceChecks.flatMap((check) => {
     const incidentKey = `service:${check.key}`;
     if (check.status === "INACTIVE" || check.status === "FAILED") {
@@ -1029,6 +1108,7 @@ app.post("/v1/agent/heartbeat", async (c) => {
         "INSERT INTO server_service_checks (id, server_id, service_key, display_name, status, checked_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).bind(crypto.randomUUID(), credential.serverId, check.key, check.displayName, check.status, check.checkedAt),
     ),
+    ...databaseUsageStatements,
     c.env.DB.prepare("UPDATE agent_credentials SET last_seen_at = ? WHERE node_id = ?").bind(now, nodeId),
     ...incidentStatements,
     c.env.DB.prepare("UPDATE server_incidents SET status = 'RESOLVED', resolved_at = ?, updated_at = ?, last_observed_at = ? WHERE server_id = ? AND organization_id = ? AND incident_key = 'server-heartbeat' AND resolved_at IS NULL")
@@ -1692,6 +1772,7 @@ app.post("/v1/domains/:id/retry", async (c) => {
 type HostingDatabaseRow = {
   id: string; name: string; engine: string; status: string; created_at: string;
   hosting_account_id: string; account_username: string; plan_database_limit: number; users: number;
+  used_bytes: number | null; usage_collected_at: string | null;
 };
 app.get("/v1/databases", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
@@ -1699,9 +1780,11 @@ app.get("/v1/databases", async (c) => {
   const result = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.engine, d.status, d.created_at, d.hosting_account_id,
             a.username AS account_username, p.database_limit AS plan_database_limit,
-            (SELECT COUNT(*) FROM hosting_database_users u WHERE u.database_id = d.id AND u.status != 'REVOKED') AS users
+            (SELECT COUNT(*) FROM hosting_database_users u WHERE u.database_id = d.id AND u.status != 'REVOKED') AS users,
+            du.used_bytes, du.collected_at AS usage_collected_at
      FROM hosting_databases d JOIN hosting_accounts a ON a.id = d.hosting_account_id
      JOIN hosting_plans p ON p.id = a.plan_id
+     LEFT JOIN database_usage du ON du.database_id = d.id
      WHERE d.organization_id = ? AND d.status != 'DELETED' ORDER BY d.created_at DESC`,
   ).bind(identity.organizationId).all<HostingDatabaseRow>();
   return c.json({ databases: result.results ?? [] });
@@ -1725,6 +1808,13 @@ app.post("/v1/databases", async (c) => {
     "SELECT a.id, a.username, a.server_id AS serverId, p.database_limit AS databaseLimit FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE' LIMIT 1",
   ).bind(accountId, identity.organizationId).first<{ id: string; username: string; serverId: string; databaseLimit: number }>();
   if (!account) return c.json({ message: "The selected hosting account is not active or does not belong to this workspace." }, 404);
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(account.username)) {
+    return c.json({ message: "The hosting account username is invalid." }, 409);
+  }
+  const databaseName = `${account.username}_${requestedName}`;
+  if (!/^[a-z][a-z0-9_]{1,63}$/.test(databaseName) || databaseName.length > 64) {
+    return c.json({ message: "The generated database name is invalid or too long." }, 400);
+  }
 
   const count = await c.env.DB.prepare(
     "SELECT COUNT(*) AS count FROM hosting_databases WHERE hosting_account_id = ? AND status != 'DELETED'",
@@ -1734,7 +1824,7 @@ app.post("/v1/databases", async (c) => {
   }
 
   const databaseId = crypto.randomUUID();
-  const databaseName = (account.username + "_" + requestedName).slice(0, 64);
+
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
   const payload = JSON.stringify({ databaseId, databaseName });
@@ -1787,6 +1877,13 @@ app.post("/v1/databases/:id/users", async (c) => {
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; name: string; accountId: string; status: string; accountUsername: string }>();
   if (!database || database.status !== "ACTIVE") return c.json({ message: "An active database is required." }, 404);
   const accountPrefix = database.accountUsername + "_";
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(database.accountUsername) ||
+      !/^[a-z][a-z0-9_]{1,63}$/.test(database.name) ||
+      database.name.length > 64 ||
+      !database.name.startsWith(accountPrefix) ||
+      database.name.length <= accountPrefix.length) {
+    return c.json({ message: "The database name does not belong to its hosting account." }, 409);
+  }
   const requestedName = submittedName.startsWith(accountPrefix) ? submittedName.slice(accountPrefix.length) : submittedName;
   if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) {
     return c.json({ message: "Enter a database username suffix such as app_user, not a full account login." }, 400);
@@ -1821,6 +1918,14 @@ app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
   ).bind(c.req.param("userId"), c.req.param("id"), identity.organizationId)
     .first<{ id: string; username: string; status: string; databaseName: string; accountId: string; accountUsername: string }>();
   if (!user) return c.json({ message: "Database user not found." }, 404);
+  const accountPrefix = user.accountUsername + "_";
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(user.accountUsername) ||
+      !/^[a-z][a-z0-9_]{1,63}$/.test(user.databaseName) ||
+      user.databaseName.length > 64 ||
+      !user.databaseName.startsWith(accountPrefix) ||
+      user.databaseName.length <= accountPrefix.length) {
+    return c.json({ message: "The database name does not belong to its hosting account." }, 409);
+  }
   if (user.status !== "ACTIVE") return c.json({ message: "Only an active database user can be revoked." }, 409);
   const requestedName = user.username.startsWith(user.accountUsername + "_") ? user.username.slice(user.accountUsername.length + 1) : "";
   if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) return c.json({ message: "The stored database username is invalid." }, 409);

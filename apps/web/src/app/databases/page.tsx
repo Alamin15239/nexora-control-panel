@@ -5,7 +5,18 @@ import Link from "next/link";
 import { ArrowLeft, Copy, Database, RefreshCw, ShieldCheck, Users } from "lucide-react";
 
 type Account = { id: string; username: string; status: string };
-type Db = { id: string; name: string; engine: string; status: string; hosting_account_id: string; account_username: string; plan_database_limit: number; users: number };
+type Db = {
+  id: string;
+  name: string;
+  engine: string;
+  status: string;
+  hosting_account_id: string;
+  account_username: string;
+  plan_database_limit: number;
+  users: number;
+  used_bytes: number | null;
+  usage_collected_at: string | null;
+};
 type DbUser = { id: string; username: string; privileges: string; status: string; secret_available?: number };
 const permissions = ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "INDEX"];
 
@@ -119,6 +130,26 @@ export default function DatabasesPage() {
   const current = databases.find(d => d.id === selected);
   const activeUsers = users.filter(user => user.status === "ACTIVE");
 
+  const formatDatabaseSize = (bytes: number | null) => {
+    if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return "Not measured yet";
+    if (bytes < 1024) return `${bytes} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
+  };
+
+  const formatUsageTime = (value: string | null) => {
+    if (!value) return "Awaiting first report";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "Time unavailable";
+    return date.toLocaleString();
+  };
+
   const copyConnectionSettings = async (user: DbUser) => {
     if (!current) return;
     const settings = [
@@ -169,9 +200,10 @@ export default function DatabasesPage() {
         </form>
       </div>
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Database inventory</h2><p className="mt-1 text-xs text-slate-500">Workspace databases and provisioning state.</p></div>
-        {loading?<div className="p-10 text-center text-sm text-slate-500">Loading databases…</div>:databases.length===0?<div className="p-12 text-center"><Database size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No databases yet</h3><p className="mt-1 text-sm text-slate-500">Create a database above to provision it on the connected MariaDB server.</p></div>:<div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Database</th><th className="px-5 py-3 font-medium">Account</th><th className="px-5 py-3 font-medium">Engine</th><th className="px-5 py-3 font-medium">Users</th><th className="px-5 py-3 font-medium">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{databases.map(d=><tr key={d.id} className={selected===d.id?"bg-blue-50/50":""}><td className="px-5 py-4"><button onClick={()=>setSelected(d.id)} className="font-medium text-blue-700 hover:underline">{d.name}</button></td><td className="px-5 py-4">{d.account_username}</td><td className="px-5 py-4">{d.engine}</td><td className="px-5 py-4">{d.users}</td><td className="px-5 py-4"><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{d.status}</span></td></tr>)}</tbody></table></div>}
+        <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Database inventory</h2><p className="mt-1 text-xs text-slate-500">Workspace databases, provisioning state, and latest measured data and index size. Measurements are collected periodically.</p></div>
+        {loading?<div className="p-10 text-center text-sm text-slate-500">Loading databases…</div>:databases.length===0?<div className="p-12 text-center"><Database size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No databases yet</h3><p className="mt-1 text-sm text-slate-500">Create a database above to provision it on the connected MariaDB server.</p></div>:<div className="overflow-x-auto"><table className="w-full min-w-[900px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Database</th><th className="px-5 py-3 font-medium">Account</th><th className="px-5 py-3 font-medium">Engine</th><th className="px-5 py-3 font-medium">Users</th><th className="px-5 py-3 font-medium">Database size</th><th className="px-5 py-3 font-medium">Status</th></tr></thead><tbody className="divide-y divide-slate-100">{databases.map(d=><tr key={d.id} className={selected===d.id?"bg-blue-50/50":""}><td className="px-5 py-4"><button onClick={()=>setSelected(d.id)} className="font-medium text-blue-700 hover:underline">{d.name}</button></td><td className="px-5 py-4">{d.account_username}</td><td className="px-5 py-4">{d.engine}</td><td className="px-5 py-4">{d.users}</td><td className="px-5 py-4"><p className="font-medium tabular-nums">{formatDatabaseSize(d.used_bytes)}</p><p className="mt-1 text-xs text-slate-400">{formatUsageTime(d.usage_collected_at)}</p></td><td className="px-5 py-4"><span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800">{d.status}</span></td></tr>)}</tbody></table></div>}
       </section>
+      <p className="text-xs leading-5 text-slate-500">Database size is a logical estimate from MariaDB table data and index metadata. It is not the same as physical disk usage or the hosting account&apos;s disk quota.</p>
       <section className="rounded-2xl border border-slate-200 bg-white p-5"><div className="flex items-center gap-2"><Users size={17}/><h2 className="font-semibold">Users for {current?.name || "selected database"}</h2></div>
         {!selected?<p className="mt-3 text-sm text-slate-500">Select a database to view its users.</p>:users.length===0?<p className="mt-3 text-sm text-slate-500">No database users have been requested.</p>:<div className="mt-4 divide-y divide-slate-100">{users.map(u=><div key={u.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><p className="text-sm font-medium">{u.username}</p><p className="mt-1 text-xs text-slate-500">{JSON.parse(u.privileges).join(", ")}</p><p className="mt-1 text-xs text-slate-500">{u.status === "ACTIVE" ? "Localhost access · selected database only" : "Provisioning state"}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{u.status}</span>{u.status === "ACTIVE" && u.secret_available === 1 && <button type="button" onClick={() => void revealCredential(u.id)} className="rounded-lg border border-blue-200 px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50">Reveal one-time password</button>}{u.status === "ACTIVE" && <button type="button" onClick={() => void revokeDatabaseUser(u.id)} className="rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50">Revoke</button>}</div></div>)}</div>}
       </section>

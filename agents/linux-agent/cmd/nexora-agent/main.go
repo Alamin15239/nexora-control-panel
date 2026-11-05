@@ -40,16 +40,23 @@ type serviceCheck struct {
 	CheckedAt   string `json:"checkedAt"`
 }
 
+type databaseUsageMeasurement struct {
+	Name        string `json:"name"`
+	UsedBytes   uint64 `json:"usedBytes"`
+	CollectedAt string `json:"collectedAt"`
+}
+
 type telemetry struct {
-	AgentVersion string         `json:"agentVersion"`
-	CPUUsage     float64        `json:"cpuUsagePercent"`
-	MemoryTotal  uint64         `json:"memoryTotalBytes"`
-	MemoryUsed   uint64         `json:"memoryUsedBytes"`
-	DiskTotal    uint64         `json:"diskTotalBytes"`
-	DiskUsed     uint64         `json:"diskUsedBytes"`
-	Load1        float64        `json:"loadAverage1m"`
-	CollectedAt  string         `json:"collectedAt"`
-	Services     []serviceCheck `json:"services"`
+	AgentVersion  string                     `json:"agentVersion"`
+	CPUUsage      float64                    `json:"cpuUsagePercent"`
+	MemoryTotal   uint64                     `json:"memoryTotalBytes"`
+	MemoryUsed    uint64                     `json:"memoryUsedBytes"`
+	DiskTotal     uint64                     `json:"diskTotalBytes"`
+	DiskUsed      uint64                     `json:"diskUsedBytes"`
+	Load1         float64                    `json:"loadAverage1m"`
+	CollectedAt   string                     `json:"collectedAt"`
+	Services      []serviceCheck             `json:"services,omitempty"`
+	DatabaseUsage []databaseUsageMeasurement `json:"databaseUsage,omitempty"`
 }
 
 func main() {
@@ -225,6 +232,16 @@ func run(configPath string, interval time.Duration) error {
 			return
 		}
 		previousTotal, previousIdle = total, idle
+
+		if includeServices {
+			databaseUsage, usageErr := collectDatabaseUsage(ctx)
+			if usageErr != nil {
+				fmt.Fprintln(os.Stderr, "database usage:", usageErr)
+			} else {
+				sample.DatabaseUsage = databaseUsage
+			}
+		}
+
 		if heartbeatErr := sendHeartbeat(ctx, client, cfg, sample); heartbeatErr != nil {
 			fmt.Fprintln(os.Stderr, "heartbeat:", heartbeatErr)
 		}
@@ -490,6 +507,72 @@ func sendHeartbeat(ctx context.Context, client *http.Client, cfg Config, sample 
 		return fmt.Errorf("control plane returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
 	return nil
+}
+
+func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, error) {
+	requestBody, err := json.Marshal(map[string]string{"operation": "DATABASE_USAGE"})
+	if err != nil {
+		return nil, err
+	}
+
+	command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+	command.Stdin = bytes.NewReader(requestBody)
+
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("provisioning helper could not collect database usage")
+	}
+	if len(output) == 0 || len(output) > 64*1024 {
+		return nil, fmt.Errorf("database usage response exceeded its size limit")
+	}
+
+	var result struct {
+		Databases []struct {
+			Name      string `json:"name"`
+			UsedBytes uint64 `json:"usedBytes"`
+		} `json:"databases"`
+	}
+
+	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(output), 64*1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("provisioning helper returned invalid database usage data")
+	}
+	if result.Databases == nil {
+		return nil, fmt.Errorf("provisioning helper omitted the database usage array")
+	}
+
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("provisioning helper returned unexpected trailing data")
+	}
+	if len(result.Databases) > 100 {
+		return nil, fmt.Errorf("database usage response exceeded the database limit")
+	}
+
+	collectedAt := time.Now().UTC().Format(time.RFC3339)
+	measurements := make([]databaseUsageMeasurement, 0, len(result.Databases))
+	seen := make(map[string]bool, len(result.Databases))
+
+	for _, database := range result.Databases {
+		name := database.Name
+		if len(name) < 2 || len(name) > 64 ||
+			name[0] < 'a' || name[0] > 'z' || seen[name] {
+			return nil, fmt.Errorf("provisioning helper returned an invalid database name")
+		}
+		for _, char := range name[1:] {
+			if !((char >= 'a' && char <= 'z') ||
+				(char >= '0' && char <= '9') || char == '_') {
+				return nil, fmt.Errorf("provisioning helper returned an invalid database name")
+			}
+		}
+
+		seen[name] = true
+		measurements = append(measurements, databaseUsageMeasurement{
+			Name: name, UsedBytes: database.UsedBytes, CollectedAt: collectedAt,
+		})
+	}
+	return measurements, nil
 }
 
 func processNextJob(ctx context.Context, client *http.Client, cfg Config) error {
