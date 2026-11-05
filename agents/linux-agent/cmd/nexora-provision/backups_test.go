@@ -77,9 +77,9 @@ func writeBackupArchiveFixture(t *testing.T, headers []tar.Header) string {
 
 func TestValidateBackupArchiveAcceptsExpectedRoots(t *testing.T) {
 	path := writeBackupArchiveFixture(t, []tar.Header{
-		{Name: "public_html", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
 		{Name: "public_html/index.html", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
-		{Name: "databases", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
 		{Name: "databases/example.sql", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
 	})
 	if err := validateBackupArchive(path); err != nil {
@@ -100,7 +100,7 @@ func TestValidateBackupArchiveRejectsTraversal(t *testing.T) {
 
 func TestValidateBackupArchiveRejectsBackslashAndLinks(t *testing.T) {
 	for _, header := range []tar.Header{
-		{Name: "public_html\\\\escape", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+		{Name: \`public_html\\escape\`, Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
 		{Name: "public_html/link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd", Mode: 0777},
 	} {
 		path := writeBackupArchiveFixture(t, []tar.Header{
