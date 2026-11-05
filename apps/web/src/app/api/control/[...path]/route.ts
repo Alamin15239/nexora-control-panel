@@ -9,8 +9,10 @@ type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
 
 const COOKIE_NAME = "nexora_session";
 
-function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
+function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELETE"): boolean {
   if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
+  if (parts.length === 1 && parts[0] === "dns-records") return method === "GET" || method === "POST";
+  if (parts.length === 2 && parts[0] === "dns-records" && /^[a-f0-9]{32}$/i.test(parts[1])) return method === "PATCH" || method === "DELETE";
   if (parts.length === 1 && parts[0] === "overview") return method === "GET";
   if (parts.length === 1 && parts[0] === "incidents") return method === "GET";
   if (parts.length === 1 && parts[0] === "notification-settings") return true;
@@ -61,14 +63,14 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
 ) {
   const { path } = await context.params;
   if (!Array.isArray(path) || !allowedRoute(path, method)) {
     return NextResponse.json({ message: "Not found" }, { status: 404 });
   }
 
-  if (method === "POST") {
+  if (method !== "GET") {
     const origin = request.headers.get("origin");
     let sameOrigin = false;
     try { sameOrigin = !!origin && new URL(origin).origin === request.nextUrl.origin; }
@@ -91,9 +93,9 @@ async function proxy(
       method,
       headers: {
         authorization: `Bearer ${token}`,
-        ...(method === "POST" ? { "content-type": "application/json" } : {}),
+        ...(method !== "GET" ? { "content-type": "application/json" } : {}),
       },
-      ...(method === "POST" ? { body: await request.text() } : {}),
+      ...(method !== "GET" && method !== "DELETE" ? { body: await request.text() } : {}),
       cache: "no-store",
     }));
     const response = new NextResponse(await upstream.text(), {
@@ -121,4 +123,12 @@ export async function GET(request: NextRequest, context: { params: Promise<{ pat
 
 export async function POST(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   return proxy(request, context, "POST");
+}
+
+export async function PATCH(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  return proxy(request, context, "PATCH");
+}
+
+export async function DELETE(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  return proxy(request, context, "DELETE");
 }
