@@ -92,20 +92,96 @@ func accountBackupDirectory(username string) (string, error) {
 	return path, nil
 }
 
-func validateBackupTree(root string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+// Linux O_PATH lets us inspect an entry without opening a FIFO, device, or
+// other special file. O_NOFOLLOW makes a symlink itself inspectable so it can
+// be rejected rather than traversed.
+const linuxOPath = 0x200000
+
+func sameInode(a, b *syscall.Stat_t) bool {
+	return a.Dev == b.Dev && a.Ino == b.Ino && a.Mode&syscall.S_IFMT == b.Mode&syscall.S_IFMT
+}
+
+// snapshotBackupDirectory consumes sourceFD and copies only regular files and
+// directories. Every lookup is relative to a pinned directory descriptor, and
+// every opened child is checked against the inode inspected with O_PATH.
+func snapshotBackupDirectory(sourceFD int, destination string) error {
+	source := os.NewFile(uintptr(sourceFD), "backup-source-directory")
+	if source == nil {
+		_ = syscall.Close(sourceFD)
+		return fmt.Errorf("BACKUP_SOURCE_UNAVAILABLE: unable to open document root")
+	}
+	defer source.Close()
+
+	entries, err := source.ReadDir(-1)
+	if err != nil {
+		return fmt.Errorf("BACKUP_SOURCE_READ_FAILED: unable to enumerate document root")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: invalid directory entry")
 		}
-		info, err := os.Lstat(path)
+		pathFD, err := syscall.Openat(sourceFD, name, linuxOPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 		if err != nil {
-			return err
+			return fmt.Errorf("BACKUP_SOURCE_CHANGED: unable to safely inspect a document")
 		}
-		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+		var inspected syscall.Stat_t
+		statErr := syscall.Fstat(pathFD, &inspected)
+		_ = syscall.Close(pathFD)
+		if statErr != nil {
+			return fmt.Errorf("BACKUP_SOURCE_READ_FAILED: unable to inspect a document")
+		}
+
+		target := filepath.Join(destination, name)
+		switch inspected.Mode & syscall.S_IFMT {
+		case syscall.S_IFDIR:
+			childFD, openErr := syscall.Openat(sourceFD, name, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+			if openErr != nil {
+				return fmt.Errorf("BACKUP_SOURCE_CHANGED: directory changed during snapshot")
+			}
+			var opened syscall.Stat_t
+			if err := syscall.Fstat(childFD, &opened); err != nil || !sameInode(&inspected, &opened) {
+				_ = syscall.Close(childFD)
+				return fmt.Errorf("BACKUP_SOURCE_CHANGED: directory changed during snapshot")
+			}
+			if err := os.Mkdir(target, 0700); err != nil {
+				_ = syscall.Close(childFD)
+				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot directory")
+			}
+			if err := snapshotBackupDirectory(childFD, target); err != nil {
+				return err
+			}
+			if err := os.Chmod(target, os.FileMode(inspected.Mode).Perm()&0755); err != nil {
+				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to set snapshot directory mode")
+			}
+		case syscall.S_IFREG:
+			fileFD, openErr := syscall.Openat(sourceFD, name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+			if openErr != nil {
+				return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed during snapshot")
+			}
+			var opened syscall.Stat_t
+			if err := syscall.Fstat(fileFD, &opened); err != nil || !sameInode(&inspected, &opened) || opened.Mode&syscall.S_IFMT != syscall.S_IFREG {
+				_ = syscall.Close(fileFD)
+				return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed during snapshot")
+			}
+			input := os.NewFile(uintptr(fileFD), "backup-source-file")
+			output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if createErr != nil {
+				_ = input.Close()
+				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot file")
+			}
+			_, copyErr := io.Copy(output, input)
+			inputCloseErr := input.Close()
+			modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
+			outputCloseErr := output.Close()
+			if copyErr != nil || inputCloseErr != nil || modeErr != nil || outputCloseErr != nil {
+				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
+			}
+		default:
 			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: symbolic links and special files are not included in backups")
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 func validateBackupArchive(path string) error {
@@ -207,15 +283,16 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err != nil {
 		return err
 	}
-	publicHTML := filepath.Join(account.HomeDir, "public_html")
 	rootFD, err := openDirectoryChain("/", "home", username, "public_html")
 	if err != nil {
 		return fmt.Errorf("BACKUP_SOURCE_UNAVAILABLE: document root is missing or unsafe")
 	}
-	_ = syscall.Close(rootFD)
-	if err := validateBackupTree(publicHTML); err != nil {
-		return err
-	}
+	rootFDOpen := true
+	defer func() {
+		if rootFDOpen {
+			_ = syscall.Close(rootFD)
+		}
+	}()
 	if len(databaseNames) > 20 {
 		return fmt.Errorf("INVALID_DATABASE_LIST: too many databases requested")
 	}
@@ -250,6 +327,15 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err := os.Mkdir(dbDir, 0700); err != nil {
 		return err
 	}
+	snapshotDir := filepath.Join(work, "public_html")
+	if err := os.Mkdir(snapshotDir, 0700); err != nil {
+		return err
+	}
+	if err := snapshotBackupDirectory(rootFD, snapshotDir); err != nil {
+		rootFDOpen = false
+		return err
+	}
+	rootFDOpen = false
 
 	for _, name := range databaseNames {
 		dumpPath := filepath.Join(dbDir, name+".sql")
@@ -277,7 +363,7 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 		os.Remove(archivePath)
 		return err
 	}
-	cmd := exec.Command("/usr/bin/tar", "-czf", archivePath, "-C", account.HomeDir, "public_html", "-C", work, "databases")
+	cmd := exec.Command("/usr/bin/tar", "-czf", archivePath, "-C", work, "public_html", "databases")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(archivePath)
 		return fmt.Errorf("BACKUP_ARCHIVE_FAILED: %s", safeOutput(string(output)))
