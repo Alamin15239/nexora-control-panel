@@ -23,10 +23,13 @@ const backupStorageRoot = "/var/lib/nexora/backups"
 const restoreStagingRoot = "/var/lib/nexora/restore-staging"
 
 // Bound snapshot, database dump, and archive processing disk usage.
-const maxBackupArchiveUncompressedBytes int64 = 20 << 30
 const maxBackupSnapshotBytes int64 = 20 << 30
 const maxBackupDatabaseBytes int64 = 2 << 30
 const maxBackupDatabasesTotalBytes int64 = 10 << 30
+// Allow bounded tar headers, path metadata, directory entries, and block padding
+// in addition to the maximum combined website and database payload.
+const maxBackupArchiveOverheadBytes int64 = 2 << 30
+const maxBackupArchiveUncompressedBytes int64 = maxBackupSnapshotBytes + maxBackupDatabasesTotalBytes + maxBackupArchiveOverheadBytes
 
 var backupIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 
@@ -209,6 +212,13 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 }
 
 func validateBackupArchive(path string) error {
+	return validateBackupArchiveWithLimit(path, maxBackupArchiveUncompressedBytes)
+}
+
+func validateBackupArchiveWithLimit(path string, maxUncompressedBytes int64) error {
+	if maxUncompressedBytes < 1 {
+		return fmt.Errorf("invalid backup archive size limit")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -219,7 +229,7 @@ func validateBackupArchive(path string) error {
 		return err
 	}
 	defer gz.Close()
-	limited := &io.LimitedReader{R: gz, N: maxBackupArchiveUncompressedBytes + 1}
+	limited := &io.LimitedReader{R: gz, N: maxUncompressedBytes + 1}
 	reader := tar.NewReader(limited)
 	seen := make(map[string]bool)
 	regularFiles := make(map[string]bool)
@@ -266,7 +276,7 @@ func validateBackupArchive(path string) error {
 			(header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg) || header.Size < 0 {
 			return fmt.Errorf("unsafe archive path or file type")
 		}
-		if header.Size > maxBackupArchiveUncompressedBytes {
+		if header.Size > maxUncompressedBytes {
 			return fmt.Errorf("backup archive exceeds the uncompressed size limit")
 		}
 		// Reject file/directory hierarchy conflicts in either archive order.
