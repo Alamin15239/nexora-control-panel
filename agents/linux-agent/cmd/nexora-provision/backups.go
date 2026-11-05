@@ -122,6 +122,8 @@ func validateBackupArchive(path string) error {
 	limited := &io.LimitedReader{R: gz, N: maxBackupArchiveUncompressedBytes + 1}
 	reader := tar.NewReader(limited)
 	seen := make(map[string]bool)
+	regularFiles := make(map[string]bool)
+	descendantCounts := make(map[string]int)
 	hasPublicHTML := false
 	hasDatabases := false
 	entries := 0
@@ -167,10 +169,27 @@ func validateBackupArchive(path string) error {
 		if header.Size > maxBackupArchiveUncompressedBytes {
 			return fmt.Errorf("backup archive exceeds the uncompressed size limit")
 		}
+		// Reject file/directory hierarchy conflicts in either archive order.
+		// Otherwise extraction could place a child beneath a regular file, or
+		// replace a directory that already contains validated members.
+		for parent := filepath.Dir(name); parent != "."; parent = filepath.Dir(parent) {
+			if regularFiles[parent] {
+				return fmt.Errorf("backup archive contains a member beneath a regular file")
+			}
+		}
+		if header.Typeflag == tar.TypeReg && descendantCounts[name] > 0 {
+			return fmt.Errorf("backup archive replaces a directory containing members")
+		}
 		if seen[name] {
 			return fmt.Errorf("backup archive contains duplicate paths")
 		}
 		seen[name] = true
+		if header.Typeflag == tar.TypeReg {
+			regularFiles[name] = true
+		}
+		for parent := filepath.Dir(name); parent != "."; parent = filepath.Dir(parent) {
+			descendantCounts[parent]++
+		}
 		if name == "public_html" && header.Typeflag == tar.TypeDir {
 			hasPublicHTML = true
 		}
