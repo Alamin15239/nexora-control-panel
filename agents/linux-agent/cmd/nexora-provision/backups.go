@@ -139,8 +139,12 @@ func validateBackupArchive(path string) error {
 		if strings.Contains(header.Name, "\\") {
 			return fmt.Errorf("unsafe archive path separator")
 		}
-		name := filepath.Clean(filepath.FromSlash(header.Name))
-		if name == "." || name != header.Name || filepath.IsAbs(name) || name == ".." ||
+		rawName := header.Name
+		if header.Typeflag == tar.TypeDir {
+			rawName = strings.TrimSuffix(rawName, "/")
+		}
+		name := filepath.Clean(filepath.FromSlash(rawName))
+		if name == "." || name != rawName || filepath.IsAbs(name) || name == ".." ||
 			strings.HasPrefix(name, ".."+string(filepath.Separator)) ||
 			!(name == "public_html" || strings.HasPrefix(name, "public_html"+string(filepath.Separator)) ||
 				name == "databases" || strings.HasPrefix(name, "databases"+string(filepath.Separator))) ||
