@@ -55,6 +55,9 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 3 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "delete") return method === "POST";
   if (parts.length === 5 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users" && /^[0-9a-f-]{36}$/i.test(parts[3]) && parts[4] === "secret") return method === "GET";
   if (parts.length === 5 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users" && /^[0-9a-f-]{36}$/i.test(parts[3]) && parts[4] === "revoke") return method === "POST";
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "backups") return method === "GET" || method === "POST";
+  if (parts.length === 2 && parts[0] === "backups" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
+  if (parts.length === 3 && parts[0] === "backups" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "restore") return method === "POST";
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "files") return method === "POST";
   if (parts.length === 3 && parts[0] === "file-manager" && parts[1] === "jobs" && /^[0-9a-f-]{36}$/i.test(parts[2])) return method === "GET";
   return false;
