@@ -702,6 +702,52 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				}
 			}
 		}
+	} else if job.Operation == "CREATE_BACKUP" || job.Operation == "RESTORE_BACKUP" || job.Operation == "DELETE_BACKUP" {
+		var payload struct {
+			BackupID string `json:"backupId"`
+			DatabaseNames []string `json:"databaseNames"`
+		}
+		validID := func(value string) bool {
+			if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' { return false }
+			_, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+			return err == nil
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || !validID(payload.BackupID) || len(payload.DatabaseNames) > 20 {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The backup job payload is invalid"
+		} else {
+			for _, name := range payload.DatabaseNames {
+				if !strings.HasPrefix(name, job.Account.Username+"_") || len(name) < len(job.Account.Username)+3 || len(name) > 64 {
+					errorCode = "INVALID_JOB_PAYLOAD"
+					errorMessage = "The backup database list is invalid"
+					break
+				}
+				for _, ch := range name {
+					if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+						errorCode = "INVALID_JOB_PAYLOAD"
+						errorMessage = "The backup database list is invalid"
+						break
+					}
+				}
+				if errorCode != "" { break }
+			}
+			if errorCode == "" {
+				encoded, _ := json.Marshal(map[string]any{
+					"operation": job.Operation, "username": job.Account.Username,
+					"backupId": payload.BackupID, "databaseNames": payload.DatabaseNames,
+				})
+				command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+				command.Stdin = bytes.NewReader(encoded)
+				output, commandErr := command.CombinedOutput()
+				if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
+					success = true
+					resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)... )
+				} else {
+					errorCode = "BACKUP_OPERATION_FAILED"
+					errorMessage = "The requested backup operation could not be completed"
+				}
+			}
+		}
 	} else if job.Operation == "FILE_MANAGER" {
 		var payload map[string]any
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
