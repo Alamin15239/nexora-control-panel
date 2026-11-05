@@ -127,6 +127,12 @@ func validateBackupArchive(path string) error {
 			if !hasPublicHTML || !hasDatabases || entries == 0 {
 				return fmt.Errorf("backup archive is missing required top-level directories")
 			}
+			// tar.Reader stops at the tar end markers before necessarily
+			// consuming the gzip trailer. Drain the gzip stream so its CRC and
+			// uncompressed-size trailer are verified before accepting the archive.
+			if _, err := io.Copy(io.Discard, gz); err != nil {
+				return fmt.Errorf("backup archive gzip integrity check failed: %w", err)
+			}
 			return nil
 		}
 		if nextErr != nil {
