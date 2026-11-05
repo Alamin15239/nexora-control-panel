@@ -124,6 +124,32 @@ func writeBackupArchiveFixture(t *testing.T, headers []tar.Header) string {
 	return path
 }
 
+func TestBackupArchiveLimitCoversPayloadBudgetsAndOverhead(t *testing.T) {
+	want := maxBackupSnapshotBytes + maxBackupDatabasesTotalBytes + maxBackupArchiveOverheadBytes
+	if maxBackupArchiveUncompressedBytes != want {
+		t.Fatalf("archive limit = %d, want %d", maxBackupArchiveUncompressedBytes, want)
+	}
+	if maxBackupArchiveUncompressedBytes <= maxBackupSnapshotBytes+maxBackupDatabasesTotalBytes {
+		t.Fatal("archive limit must include overhead beyond maximum source payload")
+	}
+}
+
+func TestValidateBackupArchiveAcceptsPayloadAboveOldTwentyGiBLimit(t *testing.T) {
+	path := writeBackupArchiveFixture(t, []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "public_html/index.html", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+	})
+	// A small injected limit verifies that the validator uses its configured
+	// budget; production config is 32 GiB (20 GiB + 10 GiB + 2 GiB).
+	if err := validateBackupArchiveWithLimit(path, 4096); err != nil {
+		t.Fatalf("expected archive below configured limit to pass, got %v", err)
+	}
+	if err := validateBackupArchiveWithLimit(path, 1024); err == nil {
+		t.Fatal("expected archive above configured limit to be rejected")
+	}
+}
+
 func TestValidateBackupArchiveAcceptsExpectedRoots(t *testing.T) {
 	path := writeBackupArchiveFixture(t, []tar.Header{
 		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
