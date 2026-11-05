@@ -78,7 +78,10 @@ function normalizeRecord(input: Record<string, unknown>, env: DnsBindings): Reco
   const content = typeof input.content === "string" ? input.content.trim() : "";
   if (!content || content.length > 2048) throw new Error("Record content is required and must be 2,048 characters or fewer.");
   if (type === "A" && !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(content)) throw new Error("Enter a valid IPv4 address for an A record.");
-  if (type === "AAAA" && (!content.includes(":") || !/^[0-9a-f:]+$/i.test(content))) throw new Error("Enter a valid IPv6 address for an AAAA record.");
+  if (type === "AAAA") {
+    try { new URL("http://[" + content + "]/"); }
+    catch { throw new Error("Enter a valid IPv6 address for an AAAA record."); }
+  }
   if (type === "CNAME" || type === "MX") {
     const target = content.replace(/\.$/, "");
     if (target.length > 253 || !target.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(part))) {
@@ -90,7 +93,7 @@ function normalizeRecord(input: Record<string, unknown>, env: DnsBindings): Reco
   if (type === "CAA" && !/^\d+\s+(?:issue|issuewild|iodef)\s+.+$/i.test(content)) {
     throw new Error("CAA content must use the format: flags tag value.");
   }
-  const ttl = input.ttl === 1 ? 1 : Number(input.ttl ?? 3600);
+  const ttl = proxied ? 1 : input.ttl === 1 ? 1 : Number(input.ttl ?? 3600);
   if (!Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) throw new Error("TTL must be Auto or between 60 and 86,400 seconds.");
   const proxied = input.proxied === true;
   if (proxied && !["A", "AAAA", "CNAME"].includes(type)) throw new Error("Proxy status is only available for A, AAAA and CNAME records.");
