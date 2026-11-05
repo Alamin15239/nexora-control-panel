@@ -279,7 +279,7 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err := validateBackupID(backupID); err != nil {
 		return err
 	}
-	account, _, err := verifiedAccount(username)
+	_, _, err := verifiedAccount(username)
 	if err != nil {
 		return err
 	}
