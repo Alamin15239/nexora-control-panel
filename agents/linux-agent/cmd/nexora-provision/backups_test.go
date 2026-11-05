@@ -5,11 +5,59 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"syscall"
 )
+
+func TestWriteBoundedDatabaseDumpAcceptsOutputWithinLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.sql")
+	cmd := exec.Command("/bin/sh", "-c", "printf SQL")
+	written, err := writeBoundedDatabaseDump(cmd, path, 3)
+	if err != nil {
+		t.Fatalf("expected bounded dump to succeed, got %v", err)
+	}
+	if written != 3 {
+		t.Fatalf("expected 3 bytes written, got %d", written)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "SQL" {
+		t.Fatalf("unexpected dump content %q", got)
+	}
+}
+
+func TestWriteBoundedDatabaseDumpRejectsOverflowAndRemovesPartialFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.sql")
+	cmd := exec.Command("/bin/sh", "-c", "printf 12345")
+	written, err := writeBoundedDatabaseDump(cmd, path, 4)
+	if !errors.Is(err, errBackupDumpTooLarge) {
+		t.Fatalf("expected size-limit error, got %v", err)
+	}
+	if written != 4 {
+		t.Fatalf("expected writer to stop at 4 bytes, got %d", written)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("expected partial dump to be removed, stat error: %v", statErr)
+	}
+}
+
+func TestWriteBoundedDatabaseDumpAllowsEmptyOutputAtZeroLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.sql")
+	cmd := exec.Command("/bin/sh", "-c", "true")
+	written, err := writeBoundedDatabaseDump(cmd, path, 0)
+	if err != nil {
+		t.Fatalf("expected empty output at zero limit to succeed, got %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("expected zero bytes written, got %d", written)
+	}
+}
 
 func TestVerifyBackupDigestAcceptsMatchingArchive(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "backup.tar.gz")
