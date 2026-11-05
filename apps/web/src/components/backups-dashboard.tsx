@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, CheckCircle2, Clock3, DatabaseBackup, HardDrive, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, CheckCircle2, DatabaseBackup, HardDrive, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 
 type HostingAccount = { id: string; username: string; status: string; primary_domain: string | null };
 type Backup = {
