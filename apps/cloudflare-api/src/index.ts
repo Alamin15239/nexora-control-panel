@@ -1476,6 +1476,70 @@ app.get("/v1/file-manager/jobs/:id", async (c) => {
   return c.json({ job: { id: job.id, status: job.status, operation: job.operation, errorMessage: job.errorMessage, requestedAt: job.requestedAt, finishedAt: job.finishedAt, result } });
 });
 
+
+app.get("/v1/hosting-accounts/:id/backups", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Active hosting account not found" }, 404);
+  const result = await c.env.DB.prepare("SELECT id, status, archive_name AS archiveName, size_bytes AS sizeBytes, sha256, database_names_json AS databaseNamesJson, error_message AS errorMessage, created_at AS createdAt, completed_at AS completedAt, staged_at AS stagedAt FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? ORDER BY created_at DESC LIMIT 100").bind(account.id, identity.organizationId).all<{ id: string; status: string; archiveName: string | null; sizeBytes: number | null; sha256: string | null; databaseNamesJson: string; errorMessage: string | null; createdAt: string; completedAt: string | null; stagedAt: string | null }>();
+  const backups = (result.results ?? []).map((row) => ({ ...row, databaseNames: (() => { try { const parsed = JSON.parse(row.databaseNamesJson); return Array.isArray(parsed) ? parsed : []; } catch { return []; } })() }));
+  return c.json({ backups });
+});
+
+app.post("/v1/hosting-accounts/:id/backups", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare("SELECT id, username, server_id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; server_id: string }>();
+  if (!account) return c.json({ message: "Active hosting account not found" }, 404);
+  const databases = await c.env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE' ORDER BY name LIMIT 20").bind(account.id, identity.organizationId).all<{ name: string }>();
+  const databaseNames = (databases.results ?? []).map((row) => row.name);
+  const backupId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const requestPayload = JSON.stringify({ backupId, databaseNames });
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)").bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now),
+      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, account.id, "backup-create:" + backupId, requestPayload),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup.create_requested', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backupId, JSON.stringify({ accountId: account.id, username: account.username, databaseCount: databaseNames.length })),
+    ]);
+  } catch { return c.json({ message: "Unable to queue the hosting backup" }, 500); }
+  return c.json({ backup: { id: backupId, status: "QUEUED", databaseNames }, job: { id: jobId, status: "QUEUED" }, message: "Backup queued for the connected Linux agent." }, 202);
+});
+
+app.post("/v1/backups/:id/restore", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId, a.username FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string; username: string }>();
+  if (!backup) return c.json({ message: "Available backup not found" }, 404);
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_backups SET status = 'RESTORING', error_message = NULL WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'RESTORE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, backup.accountId, "backup-restore:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup.restore_requested', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id, JSON.stringify({ accountId: backup.accountId, username: backup.username, mode: "STAGING_ONLY" })),
+  ]);
+  return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Restore queued. Files and database dumps will be extracted to a protected staging directory; live website files and databases will not be overwritten." }, 202);
+});
+
+app.delete("/v1/backups/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const backup = await c.env.DB.prepare("SELECT id, hosting_account_id AS accountId FROM hosting_backups WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
+  if (!backup) return c.json({ message: "Available backup not found" }, 404);
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, backup.accountId, "backup-delete:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'backup.delete_requested', 'hosting_backup', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id),
+  ]);
+  return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Backup deletion queued." }, 202);
+});
+
 type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
 app.get("/v1/domains/:id/dns-check", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
@@ -2197,7 +2261,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -2212,8 +2276,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "JOIN provisioning_jobs j ON j.id = ? AND j.hosting_account_id = a.id " +
     "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
-    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE')) LIMIT 1",
-  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
+    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'RESTORE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'DELETE_BACKUP' AND a.status = 'ACTIVE')) LIMIT 1",
+  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
