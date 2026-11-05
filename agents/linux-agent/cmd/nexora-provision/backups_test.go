@@ -124,6 +124,18 @@ func writeBackupArchiveFixture(t *testing.T, headers []tar.Header) string {
 	return path
 }
 
+func TestBackupFreeSpaceSufficientUsesConservativePeakBudget(t *testing.T) {
+	if backupRequiredFreeBytes != (25<<30)+(64<<20) {
+		t.Fatalf("required free space = %d, want %d", backupRequiredFreeBytes, (25<<30)+(64<<20))
+	}
+	if !backupFreeSpaceSufficient(backupRequiredFreeBytes) {
+		t.Fatal("expected exact required free space to pass")
+	}
+	if backupFreeSpaceSufficient(backupRequiredFreeBytes - 1) {
+		t.Fatal("expected one byte below required free space to fail")
+	}
+}
+
 func TestBackupArchiveLimitCoversPayloadBudgetsAndOverhead(t *testing.T) {
 	want := maxBackupSnapshotBytes + maxBackupDatabasesTotalBytes + maxBackupArchiveOverheadBytes
 	if maxBackupArchiveUncompressedBytes != want {
