@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { FormEvent } from "react";
 import { Plus, RefreshCw, Pencil, Trash2, X, Globe2 } from "lucide-react";
 
 type RecordType = "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "CAA";
