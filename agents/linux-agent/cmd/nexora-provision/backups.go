@@ -54,7 +54,14 @@ func ensurePrivateDirectory(path string) error {
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("UNSAFE_STORAGE_PATH: backup storage contains an unsafe path component")
 		}
+		if strings.HasPrefix(current, "/var/lib/nexora") {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || stat.Uid != 0 {
+				return fmt.Errorf("UNSAFE_STORAGE_OWNER: backup storage directories must be root-owned")
+			}
+		}
 	}
+	if err := os.Chown(path, 0, 0); err != nil { return err }
 	return os.Chmod(path, 0700)
 }
 
