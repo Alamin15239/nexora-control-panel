@@ -151,3 +151,33 @@ func TestValidateBackupArchiveRejectsCorruptGzipTrailer(t *testing.T) {
 		t.Fatal("expected corrupt gzip trailer to be rejected")
 	}
 }
+
+func TestValidateBackupArchiveRejectsOversizedMember(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized.tar.gz")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(file)
+	writer := tar.NewWriter(gz)
+	for _, header := range []tar.Header{
+		{Name: "public_html/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "databases/", Typeflag: tar.TypeDir, Mode: 0700},
+		{Name: "public_html/huge.bin", Typeflag: tar.TypeReg, Mode: 0600, Size: maxBackupArchiveUncompressedBytes + 1},
+	} {
+		if err := writer.WriteHeader(&header); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The member body is intentionally absent: validation must reject its
+	// declared size immediately, without trying to read or extract it.
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected oversized archive member to be rejected")
+	}
+}
