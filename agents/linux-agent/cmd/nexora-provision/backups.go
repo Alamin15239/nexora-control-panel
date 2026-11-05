@@ -102,6 +102,39 @@ func accountBackupDirectory(username string) (string, error) {
 	return path, nil
 }
 
+func acquireBackupLock(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("BACKUP_LOCK_FAILED: unable to open backup lock")
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("BACKUP_LOCK_FAILED: unable to secure backup lock")
+	}
+	var info syscall.Stat_t
+	if err := syscall.Fstat(int(file.Fd()), &info); err != nil || info.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = file.Close()
+		return nil, fmt.Errorf("BACKUP_LOCK_FAILED: backup lock is not a regular file")
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("BACKUP_ALREADY_RUNNING: another backup is already using the backup workspace")
+	}
+	return file, nil
+}
+
+func publishBackupArchive(stagedPath, finalPath string) error {
+	if err := os.Chmod(stagedPath, 0600); err != nil {
+		return fmt.Errorf("BACKUP_PUBLISH_FAILED: unable to secure completed archive")
+	}
+	// A hard link publishes the verified archive atomically and fails if the
+	// destination already exists; unlike Rename, it never replaces an archive.
+	if err := os.Link(stagedPath, finalPath); err != nil {
+		return fmt.Errorf("BACKUP_PUBLISH_FAILED: unable to publish completed archive")
+	}
+	return nil
+}
+
 func backupFreeSpaceSufficient(availableBytes int64) bool {
 	return availableBytes >= backupRequiredFreeBytes
 }
@@ -427,6 +460,14 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if err != nil {
 		return err
 	}
+	lock, err := acquireBackupLock(filepath.Join(backupStorageRoot, ".backup.lock"))
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
 	if err := ensureBackupFreeSpace(storage); err != nil {
 		return err
 	}
@@ -482,43 +523,35 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 		totalDatabaseBytes += written
 	}
 
-	placeholder, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return fmt.Errorf("BACKUP_CREATE_FAILED: unable to reserve backup archive")
-	}
-	if err := placeholder.Close(); err != nil {
-		os.Remove(archivePath)
-		return err
-	}
-	cmd := exec.Command("/usr/bin/tar", "-czf", archivePath, "-C", work, "public_html", "databases")
+	stagedArchivePath := filepath.Join(work, archiveName)
+	cmd := exec.Command("/usr/bin/tar", "-czf", stagedArchivePath, "-C", work, "public_html", "databases")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		_ = os.Remove(archivePath)
 		return fmt.Errorf("BACKUP_ARCHIVE_FAILED: %s", safeOutput(string(output)))
 	}
-	if err := validateBackupArchive(archivePath); err != nil {
-		_ = os.Remove(archivePath)
+	if err := validateBackupArchive(stagedArchivePath); err != nil {
 		return fmt.Errorf("BACKUP_VERIFY_FAILED: generated archive failed validation")
 	}
-	file, err := os.Open(archivePath)
+	file, err := os.Open(stagedArchivePath)
 	if err != nil {
-		_ = os.Remove(archivePath)
 		return err
 	}
 	info, err := file.Stat()
 	if err != nil {
-		file.Close()
-		_ = os.Remove(archivePath)
+		_ = file.Close()
 		return err
 	}
 	hash := sha256.New()
 	_, copyErr := io.Copy(hash, file)
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(archivePath)
 		return fmt.Errorf("BACKUP_VERIFY_FAILED: archive could not be read for verification")
+	}
+	if err := publishBackupArchive(stagedArchivePath, archivePath); err != nil {
+		return err
 	}
 	result := backupResult{BackupID: backupID, ArchiveName: archiveName, SizeBytes: info.Size(), SHA256: hex.EncodeToString(hash.Sum(nil)), DatabaseNames: databaseNames, CreatedAt: time.Now().UTC().Format(time.RFC3339), Success: true}
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		_ = os.Remove(archivePath)
 		return err
 	}
 	return nil
