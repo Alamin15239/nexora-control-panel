@@ -118,7 +118,7 @@ func snapshotBackupDirectory(sourceFD int, destination string) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") {
+		if name == "" || name == "." || name == ".." || strings.Contains(name, "/") || strings.Contains(name, "\\") {
 			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: invalid directory entry")
 		}
 		pathFD, err := syscall.Openat(sourceFD, name, linuxOPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
@@ -367,6 +367,10 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	if output, err := cmd.CombinedOutput(); err != nil {
 		_ = os.Remove(archivePath)
 		return fmt.Errorf("BACKUP_ARCHIVE_FAILED: %s", safeOutput(string(output)))
+	}
+	if err := validateBackupArchive(archivePath); err != nil {
+		_ = os.Remove(archivePath)
+		return fmt.Errorf("BACKUP_VERIFY_FAILED: generated archive failed validation")
 	}
 	file, err := os.Open(archivePath)
 	if err != nil {
