@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"testing"
 	"syscall"
+	"testing"
 )
 
 func TestWriteBoundedDatabaseDumpAcceptsOutputWithinLimit(t *testing.T) {
@@ -388,7 +388,6 @@ func TestValidateBackupArchiveRejectsOversizedMember(t *testing.T) {
 	}
 }
 
-
 func openBackupFixtureDirectory(t *testing.T, path string) int {
 	t.Helper()
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
@@ -427,9 +426,15 @@ func TestSnapshotBackupDirectoryCopiesRegularFilesAndDirectories(t *testing.T) {
 func TestSnapshotBackupDirectoryEnforcesCumulativeSizeLimit(t *testing.T) {
 	source := t.TempDir()
 	destination := filepath.Join(t.TempDir(), "public_html")
-	if err := os.Mkdir(destination, 0700); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(source, "one.bin"), []byte("1234"), 0600); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(source, "two.bin"), []byte("5678"), 0600); err != nil { t.Fatal(err) }
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "one.bin"), []byte("1234"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "two.bin"), []byte("5678"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	budget := &backupSnapshotBudget{limit: 7}
 	if err := snapshotBackupDirectoryWithBudget(openBackupFixtureDirectory(t, source), destination, budget); err == nil {
 		t.Fatal("expected cumulative snapshot limit to reject files exceeding budget")

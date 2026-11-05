@@ -26,6 +26,7 @@ const restoreStagingRoot = "/var/lib/nexora/restore-staging"
 const maxBackupSnapshotBytes int64 = 8 << 30
 const maxBackupDatabaseBytes int64 = 1 << 30
 const maxBackupDatabasesTotalBytes int64 = 2 << 30
+
 // Allow bounded tar headers, path metadata, directory entries, and block padding
 // in addition to the maximum combined website and database payload.
 const maxBackupArchiveOverheadBytes int64 = 1 << 30
@@ -192,7 +193,7 @@ func sameInode(a, b *syscall.Stat_t) bool {
 }
 
 // backupSnapshotBudget tracks bytes copied from public_html across recursion.
-type backupSnapshotBudget struct { copied, limit int64 }
+type backupSnapshotBudget struct{ copied, limit int64 }
 
 // snapshotBackupDirectory consumes sourceFD and copies only regular files and
 // directories. Every lookup is relative to a pinned directory descriptor, and
@@ -266,28 +267,28 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 				return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
 			}
 			input := os.NewFile(uintptr(fileFD), "backup-source-file")
-		 output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 			if createErr != nil {
 				_ = input.Close()
 				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to create snapshot file")
 			}
-			limited := &io.LimitedReader{R: input, N: budget.limit-budget.copied+1}
-		 copied, copyErr := io.Copy(output, limited)
-		 var after syscall.Stat_t
-		 statAfterErr := syscall.Fstat(fileFD, &after)
-		 inputCloseErr := input.Close()
-		 modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
-		 outputCloseErr := output.Close()
-		 if copyErr != nil || inputCloseErr != nil || statAfterErr != nil || modeErr != nil || outputCloseErr != nil {
-			 return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
+			limited := &io.LimitedReader{R: input, N: budget.limit - budget.copied + 1}
+			copied, copyErr := io.Copy(output, limited)
+			var after syscall.Stat_t
+			statAfterErr := syscall.Fstat(fileFD, &after)
+			inputCloseErr := input.Close()
+			modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
+			outputCloseErr := output.Close()
+			if copyErr != nil || inputCloseErr != nil || statAfterErr != nil || modeErr != nil || outputCloseErr != nil {
+				return fmt.Errorf("BACKUP_SNAPSHOT_FAILED: unable to copy document safely")
 			}
-		 if copied > budget.limit-budget.copied {
-			 return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
+			if copied > budget.limit-budget.copied {
+				return fmt.Errorf("BACKUP_SIZE_LIMIT: document root exceeds the snapshot size limit")
 			}
-		 if !sameInode(&opened, &after) || opened.Size != after.Size || opened.Mtim != after.Mtim || opened.Ctim != after.Ctim || copied != opened.Size {
-			 return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed while being snapshotted")
+			if !sameInode(&opened, &after) || opened.Size != after.Size || opened.Mtim != after.Mtim || opened.Ctim != after.Ctim || copied != opened.Size {
+				return fmt.Errorf("BACKUP_SOURCE_CHANGED: file changed while being snapshotted")
 			}
-		 budget.copied += copied
+			budget.copied += copied
 		default:
 			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: symbolic links and special files are not included in backups")
 		}
