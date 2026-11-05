@@ -42,21 +42,17 @@ func ensurePrivateDirectory(path string) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("INVALID_STORAGE_PATH: backup storage path is invalid")
 	}
+	if err := os.MkdirAll(path, 0700); err != nil { return err }
 	current := string(filepath.Separator)
 	for _, part := range strings.Split(strings.TrimPrefix(path, current), current) {
 		if part == "" { continue }
 		current = filepath.Join(current, part)
 		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0700); err != nil { return err }
-			info, err = os.Lstat(current)
-		}
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("UNSAFE_STORAGE_PATH: backup storage contains an unsafe path component")
 		}
-		if err := os.Chmod(current, 0700); err != nil { return err }
 	}
-	return nil
+	return os.Chmod(path, 0700)
 }
 
 func accountBackupDirectory(username string) (string, error) {
