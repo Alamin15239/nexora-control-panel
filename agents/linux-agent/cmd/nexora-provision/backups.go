@@ -59,7 +59,7 @@ func ensurePrivateDirectory(path string) error {
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("UNSAFE_STORAGE_PATH: backup storage contains an unsafe path component")
 		}
-		if strings.HasPrefix(current, "/var/lib/nexora") {
+		if current == "/var/lib/nexora" || strings.HasPrefix(current, "/var/lib/nexora"+string(filepath.Separator)) {
 			stat, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || stat.Uid != 0 {
 				return fmt.Errorf("UNSAFE_STORAGE_OWNER: backup storage directories must be root-owned")
@@ -114,21 +114,45 @@ func validateBackupArchive(path string) error {
 	}
 	defer gz.Close()
 	reader := tar.NewReader(gz)
+	seen := make(map[string]bool)
+	hasPublicHTML := false
+	hasDatabases := false
+	entries := 0
 	for {
 		header, nextErr := reader.Next()
 		if errors.Is(nextErr, io.EOF) {
+			if !hasPublicHTML || !hasDatabases || entries == 0 {
+				return fmt.Errorf("backup archive is missing required top-level directories")
+			}
 			return nil
 		}
 		if nextErr != nil {
 			return nextErr
 		}
+		entries++
+		if entries > 1_000_000 {
+			return fmt.Errorf("backup archive contains too many entries")
+		}
+		if strings.Contains(header.Name, "\\\\") {
+			return fmt.Errorf("unsafe archive path separator")
+		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
-		if name == "." || filepath.IsAbs(name) || name == ".." ||
+		if name == "." || name != header.Name || filepath.IsAbs(name) || name == ".." ||
 			strings.HasPrefix(name, ".."+string(filepath.Separator)) ||
 			!(name == "public_html" || strings.HasPrefix(name, "public_html"+string(filepath.Separator)) ||
 				name == "databases" || strings.HasPrefix(name, "databases"+string(filepath.Separator))) ||
-			(header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg) {
+			(header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg) || header.Size < 0 {
 			return fmt.Errorf("unsafe archive path or file type")
+		}
+		if seen[name] {
+			return fmt.Errorf("backup archive contains duplicate paths")
+		}
+		seen[name] = true
+		if name == "public_html" && header.Typeflag == tar.TypeDir {
+			hasPublicHTML = true
+		}
+		if name == "databases" && header.Typeflag == tar.TypeDir {
+			hasDatabases = true
 		}
 	}
 }
