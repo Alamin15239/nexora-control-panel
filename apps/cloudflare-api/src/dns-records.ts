@@ -54,7 +54,7 @@ async function request<T>(
   return payload.result as T;
 }
 
-function normalizedName(raw: unknown, zoneName: string, allowUnderscore = false): string {
+function normalizedName(raw: unknown, zoneName: string): string {
   if (typeof raw !== "string") throw new Error("A DNS record name is required.");
   const name = raw.trim().toLowerCase().replace(/\.$/, "");
   const zone = zoneName.toLowerCase().replace(/\.$/, "");
@@ -62,8 +62,7 @@ function normalizedName(raw: unknown, zoneName: string, allowUnderscore = false)
     throw new Error("Record name must be the zone apex or a subdomain of " + zone + ".");
   }
   const validLabel = (part: string) =>
-    /^(?:\*|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)$/.test(part) ||
-    (allowUnderscore && /^_[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?$/.test(part));
+    /^(?:\*|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|_[a-z0-9](?:[a-z0-9-]{0,60}[a-z0-9])?)$/.test(part);
   if (name.split(".").some((part) => !validLabel(part))) {
     throw new Error("DNS record name contains an invalid label.");
   }
@@ -77,7 +76,7 @@ function normalizeRecord(input: Record<string, unknown>, env: DnsBindings): Reco
   if (!["A", "AAAA", "CNAME", "MX", "TXT", "CAA"].includes(type)) {
     throw new Error("Supported DNS types are A, AAAA, CNAME, MX, TXT and CAA.");
   }
-  const name = normalizedName(input.name, zone, type === "TXT");
+  const name = normalizedName(input.name, zone);
   const content = typeof input.content === "string" ? input.content.trim() : "";
   if (!content || content.length > 2048) throw new Error("Record content is required and must be 2,048 characters or fewer.");
   if (type === "A" && !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(content)) throw new Error("Enter a valid IPv4 address for an A record.");
