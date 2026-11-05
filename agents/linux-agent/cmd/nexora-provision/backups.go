@@ -2,6 +2,9 @@ package main
 
 import (
 	"crypto/sha256"
+	"archive/tar"
+	"compress/gzip"
+	"syscall"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -63,10 +66,51 @@ func accountBackupDirectory(username string) (string, error) {
 	return path, nil
 }
 
+
+func validateBackupTree(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil { return walkErr }
+		info, err := os.Lstat(path)
+		if err != nil { return err }
+		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return fmt.Errorf("UNSAFE_BACKUP_CONTENT: symbolic links and special files are not included in backups")
+		}
+		return nil
+	})
+}
+
+func validateBackupArchive(path string) error {
+	file, err := os.Open(path)
+	if err != nil { return err }
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil { return err }
+	defer gz.Close()
+	reader := tar.NewReader(gz)
+	for {
+		header, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) { return nil }
+		if nextErr != nil { return nextErr }
+		name := filepath.Clean(filepath.FromSlash(header.Name))
+		if name == "." || filepath.IsAbs(name) || name == ".." ||
+			strings.HasPrefix(name, ".."+string(filepath.Separator)) ||
+			!(name == "public_html" || strings.HasPrefix(name, "public_html"+string(filepath.Separator)) ||
+				name == "databases" || strings.HasPrefix(name, "databases"+string(filepath.Separator))) ||
+			(header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg) {
+			return fmt.Errorf("unsafe archive path or file type")
+		}
+	}
+}
+
 func createAccountBackup(username, backupID string, databaseNames []string) error {
 	if err := validateBackupID(backupID); err != nil { return err }
 	account, _, err := verifiedAccount(username)
 	if err != nil { return err }
+	publicHTML := filepath.Join(account.HomeDir, "public_html")
+	rootFD, err := openDirectoryChain("/", "home", username, "public_html")
+	if err != nil { return fmt.Errorf("BACKUP_SOURCE_UNAVAILABLE: document root is missing or unsafe") }
+	_ = syscall.Close(rootFD)
+	if err := validateBackupTree(publicHTML); err != nil { return err }
 	if len(databaseNames) > 20 { return fmt.Errorf("INVALID_DATABASE_LIST: too many databases requested") }
 	seen := make(map[string]bool, len(databaseNames))
 	for _, name := range databaseNames {
@@ -150,17 +194,9 @@ func stageAccountBackupRestore(username, backupID string) error {
 	if _, err := os.Lstat(stage); err == nil { return fmt.Errorf("RESTORE_STAGE_EXISTS: staging directory already exists") } else if !errors.Is(err, os.ErrNotExist) { return err }
 	if err := os.Mkdir(stage, 0700); err != nil { return fmt.Errorf("RESTORE_STAGE_FAILED: unable to create restore staging directory") }
 
-	// Verify archive member names before extraction. The archive is root-owned,
-	// but this also guards against malformed or unexpectedly modified archives.
-	listing, err := exec.Command("/usr/bin/tar", "-tzf", archivePath).Output()
-	if err != nil { _ = os.RemoveAll(stage); return fmt.Errorf("BACKUP_VERIFY_FAILED: archive listing failed") }
-	for _, name := range strings.Split(strings.TrimSpace(string(listing)), "\n") {
-		clean := filepath.Clean(name)
-		if clean == "." || filepath.IsAbs(name) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) ||
-			!(clean == "public_html" || strings.HasPrefix(clean, "public_html"+string(filepath.Separator)) || clean == "databases" || strings.HasPrefix(clean, "databases"+string(filepath.Separator))) {
-			_ = os.RemoveAll(stage)
-			return fmt.Errorf("BACKUP_VERIFY_FAILED: archive contains an unsafe path")
-		}
+	if err := validateBackupArchive(archivePath); err != nil {
+		_ = os.RemoveAll(stage)
+		return fmt.Errorf("BACKUP_VERIFY_FAILED: archive contains an unsafe or invalid member")
 	}
 	cmd := exec.Command("/usr/bin/tar", "--extract", "--gzip", "--file", archivePath, "--directory", stage, "--no-same-owner", "--no-same-permissions")
 	if output, err := cmd.CombinedOutput(); err != nil {
