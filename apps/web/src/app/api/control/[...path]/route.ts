@@ -50,6 +50,7 @@ function allowedRoute(parts: string[], method: "GET" | "POST"): boolean {
     return method === "POST";
   }
   if (parts.length === 3 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users") return true;
+  if (parts.length === 3 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "delete") return method === "POST";
   if (parts.length === 5 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users" && /^[0-9a-f-]{36}$/i.test(parts[3]) && parts[4] === "secret") return method === "GET";
   if (parts.length === 5 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users" && /^[0-9a-f-]{36}$/i.test(parts[3]) && parts[4] === "revoke") return method === "POST";
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "files") return method === "POST";

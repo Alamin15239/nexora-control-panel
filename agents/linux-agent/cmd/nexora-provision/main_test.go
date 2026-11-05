@@ -277,3 +277,31 @@ func TestValidateManagedDatabaseName(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDatabaseDeletionUsers(t *testing.T) {
+	tests := []struct {
+		name    string
+		account string
+		users   []string
+		wantErr bool
+	}{
+		{"valid users", "nxoratest01", []string{"nxoratest01_app", "nxoratest01_readonly"}, false},
+		{"empty user list", "nxoratest01", nil, false},
+		{"foreign account user", "nxoratest01", []string{"otheracct_app"}, true},
+		{"missing suffix", "nxoratest01", []string{"nxoratest01_"}, true},
+		{"invalid suffix", "nxoratest01", []string{"nxoratest01_bad-name"}, true},
+		{"duplicate user", "nxoratest01", []string{"nxoratest01_app", "nxoratest01_app"}, true},
+		{"invalid account", "Invalid!", []string{"nxoratest01_app"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateDatabaseDeletionUsers(tt.account, tt.users)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateDatabaseDeletionUsers() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && len(got) != len(tt.users) {
+				t.Fatalf("got %d names, want %d", len(got), len(tt.users))
+			}
+		})
+	}
+}

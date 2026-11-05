@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.7.0"
+const version = "0.8.0"
 
 type Config struct {
 	NodeID       string `json:"node_id"`
@@ -655,12 +655,13 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 	} else if job.Operation == "REVOKE_DATABASE_USER" {
 		var payload struct {
 			DatabaseUserName string `json:"databaseUserName"`
+			DatabaseName     string `json:"databaseName"`
 		}
-		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" {
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseUserName == "" || payload.DatabaseName == "" {
 			errorCode = "INVALID_JOB_PAYLOAD"
 			errorMessage = "The database-user revocation payload is invalid"
 		} else {
-			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName})
+			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName, "databaseName": payload.DatabaseName})
 			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
 			command.Stdin = bytes.NewReader(encoded)
 			_, commandErr := command.CombinedOutput()
@@ -669,6 +670,36 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			} else {
 				errorCode = "DATABASE_USER_REVOKE_FAILED"
 				errorMessage = "The MariaDB database user could not be revoked"
+			}
+		}
+	} else if job.Operation == "DELETE_DATABASE" {
+		var payload struct {
+			DatabaseName      string   `json:"databaseName"`
+			DatabaseUserNames []string `json:"databaseUserNames"`
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil ||
+			payload.DatabaseName == "" || len(payload.DatabaseUserNames) > 100 {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The database deletion payload is invalid"
+		} else {
+			encoded, _ := json.Marshal(map[string]any{
+				"operation": "DELETE_DATABASE", "username": job.Account.Username,
+				"databaseName": payload.DatabaseName, "databaseUserNames": payload.DatabaseUserNames,
+			})
+			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
+			command.Stdin = bytes.NewReader(encoded)
+			output, commandErr := command.CombinedOutput()
+			if commandErr == nil {
+				success = true
+			} else {
+				errorCode = "DATABASE_DELETE_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if errorMessage == "" {
+					errorMessage = "The MariaDB database could not be deleted"
+				}
+				if len(errorMessage) > 400 {
+					errorMessage = errorMessage[:400]
+				}
 			}
 		}
 	} else if job.Operation == "FILE_MANAGER" {

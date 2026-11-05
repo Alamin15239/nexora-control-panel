@@ -25,17 +25,18 @@ const (
 )
 
 type request struct {
-	Operation        string   `json:"operation"`
-	Username         string   `json:"username"`
-	Domain           string   `json:"domain,omitempty"`
-	DocumentRoot     string   `json:"documentRoot,omitempty"`
-	Path             string   `json:"path,omitempty"`
-	NewPath          string   `json:"newPath,omitempty"`
-	ContentBase64    string   `json:"contentBase64,omitempty"`
-	FileOperation    string   `json:"fileOperation,omitempty"`
-	DatabaseName     string   `json:"databaseName,omitempty"`
-	DatabaseUserName string   `json:"databaseUserName,omitempty"`
-	Privileges       []string `json:"privileges,omitempty"`
+	Operation         string   `json:"operation"`
+	Username          string   `json:"username"`
+	Domain            string   `json:"domain,omitempty"`
+	DocumentRoot      string   `json:"documentRoot,omitempty"`
+	Path              string   `json:"path,omitempty"`
+	NewPath           string   `json:"newPath,omitempty"`
+	ContentBase64     string   `json:"contentBase64,omitempty"`
+	FileOperation     string   `json:"fileOperation,omitempty"`
+	DatabaseName      string   `json:"databaseName,omitempty"`
+	DatabaseUserName  string   `json:"databaseUserName,omitempty"`
+	DatabaseUserNames []string `json:"databaseUserNames,omitempty"`
+	Privileges        []string `json:"privileges,omitempty"`
 }
 
 var (
@@ -86,6 +87,8 @@ func main() {
 		return
 	case "REVOKE_DATABASE_USER":
 		err = revokeDatabaseUser(input.Username, input.DatabaseUserName, input.DatabaseName)
+	case "DELETE_DATABASE":
+		err = deleteDatabase(input.Username, input.DatabaseName, input.DatabaseUserNames)
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
 	}
@@ -246,6 +249,50 @@ func revokeDatabaseUser(accountName, requestedUser, databaseName string) error {
 	output, err := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names", "-e", statement).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("DATABASE_USER_REVOKE_FAILED: %s", safeOutput(string(output)))
+	}
+	return nil
+}
+
+func validateDatabaseDeletionUsers(accountName string, databaseUserNames []string) ([]string, error) {
+	if !usernamePattern.MatchString(accountName) {
+		return nil, fmt.Errorf("INVALID_USERNAME: hosting account name is invalid")
+	}
+	if len(databaseUserNames) > 100 {
+		return nil, fmt.Errorf("INVALID_DATABASE_USERS: too many database users")
+	}
+	prefix := accountName + "_"
+	seen := make(map[string]bool, len(databaseUserNames))
+	for _, fullName := range databaseUserNames {
+		if !strings.HasPrefix(fullName, prefix) || len(fullName) > 80 {
+			return nil, fmt.Errorf("INVALID_DATABASE_USER: database username does not belong to the hosting account")
+		}
+		suffix := strings.TrimPrefix(fullName, prefix)
+		if !databaseNamePattern.MatchString(suffix) || seen[fullName] {
+			return nil, fmt.Errorf("INVALID_DATABASE_USER: database username is invalid or duplicated")
+		}
+		seen[fullName] = true
+	}
+	return append([]string(nil), databaseUserNames...), nil
+}
+
+func deleteDatabase(accountName, databaseName string, databaseUserNames []string) error {
+	if err := validateManagedDatabaseName(databaseName, accountName); err != nil {
+		return err
+	}
+	users, err := validateDatabaseDeletionUsers(accountName, databaseUserNames)
+	if err != nil {
+		return err
+	}
+	statements := make([]string, 0, len(users)+1)
+	for _, fullName := range users {
+		statements = append(statements, "DROP USER IF EXISTS "+sqlString(fullName)+"@'localhost'")
+	}
+	statements = append(statements, "DROP DATABASE IF EXISTS `"+databaseName+"`")
+	command := exec.Command("/usr/bin/mariadb", "--batch", "--skip-column-names")
+	command.Stdin = strings.NewReader(strings.Join(statements, "; ") + ";")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("DATABASE_DELETE_FAILED: %s", safeOutput(string(output)))
 	}
 	return nil
 }
