@@ -38,7 +38,7 @@ type request struct {
 	DatabaseUserNames []string `json:"databaseUserNames,omitempty"`
 	Privileges        []string `json:"privileges,omitempty"`
 	BackupID          string   `json:"backupId,omitempty"`
-	DatabaseNames     []string `json:"databaseNames,omitempty"
+	DatabaseNames     []string `json:"databaseNames,omitempty"`
 }
 
 var (
