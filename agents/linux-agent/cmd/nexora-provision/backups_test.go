@@ -100,7 +100,7 @@ func TestValidateBackupArchiveRejectsTraversal(t *testing.T) {
 
 func TestValidateBackupArchiveRejectsBackslashAndLinks(t *testing.T) {
 	for _, header := range []tar.Header{
-		{Name: \`public_html\\escape\`, Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
+		{Name: "public_html\\escape", Typeflag: tar.TypeReg, Mode: 0600, Size: 1},
 		{Name: "public_html/link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd", Mode: 0777},
 	} {
 		path := writeBackupArchiveFixture(t, []tar.Header{
