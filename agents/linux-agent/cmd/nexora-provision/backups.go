@@ -299,6 +299,69 @@ func validateBackupArchive(path string) error {
 	}
 }
 
+var errBackupDumpTooLarge = errors.New("database dump exceeds its size limit")
+
+type boundedBackupWriter struct {
+	dst       io.Writer
+	remaining int64
+	written   int64
+	overflow  bool
+}
+
+func (w *boundedBackupWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > w.remaining {
+		allowed := int(w.remaining)
+		n, err := w.dst.Write(p[:allowed])
+		w.written += int64(n)
+		w.remaining -= int64(n)
+		if err != nil {
+			return n, err
+		}
+		if n != allowed {
+			return n, io.ErrShortWrite
+		}
+		w.overflow = true
+		return n, errBackupDumpTooLarge
+	}
+	n, err := w.dst.Write(p)
+	w.written += int64(n)
+	w.remaining -= int64(n)
+	if err == nil && n != len(p) {
+		err = io.ErrShortWrite
+	}
+	return n, err
+}
+
+// writeBoundedDatabaseDump removes incomplete output on every failure. Stdout
+// is copied by os/exec because the bounded writer is not an *os.File; this
+// propagates the writer's size-limit error back through cmd.Run.
+func writeBoundedDatabaseDump(cmd *exec.Cmd, path string, limit int64) (int64, error) {
+	if limit < 0 {
+		return 0, fmt.Errorf("invalid database dump size limit")
+	}
+	dump, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return 0, err
+	}
+	writer := &boundedBackupWriter{dst: dump, remaining: limit}
+	cmd.Stdout = writer
+	cmd.Stderr = io.Discard
+	runErr := cmd.Run()
+	closeErr := dump.Close()
+	if writer.overflow {
+		_ = os.Remove(path)
+		return writer.written, errBackupDumpTooLarge
+	}
+	if runErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		if runErr != nil {
+			return writer.written, runErr
+		}
+		return writer.written, closeErr
+	}
+	return writer.written, nil
+}
+
 func createAccountBackup(username, backupID string, databaseNames []string) error {
 	if err := validateBackupID(backupID); err != nil {
 		return err
@@ -361,22 +424,26 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 	}
 	rootFDOpen = false
 
+	var totalDatabaseBytes int64
 	for _, name := range databaseNames {
-		dumpPath := filepath.Join(dbDir, name+".sql")
-		dump, err := os.OpenFile(dumpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return fmt.Errorf("DATABASE_DUMP_FAILED: unable to create database dump")
+		remaining := maxBackupDatabasesTotalBytes - totalDatabaseBytes
+		if remaining <= 0 {
+			return fmt.Errorf("DATABASE_DUMP_SIZE_LIMIT: combined database dumps exceed the size limit")
 		}
+		limit := maxBackupDatabaseBytes
+		if remaining < limit {
+			limit = remaining
+		}
+		dumpPath := filepath.Join(dbDir, name+".sql")
 		cmd := exec.Command("/usr/bin/mariadb-dump", "--single-transaction", "--routines", "--triggers", "--hex-blob", "--databases", name)
-		cmd.Stdout = dump
-		cmd.Stderr = io.Discard
-		if err := cmd.Run(); err != nil {
-			dump.Close()
+		written, dumpErr := writeBoundedDatabaseDump(cmd, dumpPath, limit)
+		if errors.Is(dumpErr, errBackupDumpTooLarge) {
+			return fmt.Errorf("DATABASE_DUMP_SIZE_LIMIT: database dump exceeds the per-database or combined size limit")
+		}
+		if dumpErr != nil {
 			return fmt.Errorf("DATABASE_DUMP_FAILED: database dump did not complete")
 		}
-		if err := dump.Close(); err != nil {
-			return fmt.Errorf("DATABASE_DUMP_FAILED: database dump could not be closed")
-		}
+		totalDatabaseBytes += written
 	}
 
 	placeholder, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
