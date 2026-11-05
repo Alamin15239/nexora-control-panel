@@ -1,8 +1,6 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -100,11 +98,8 @@ func createAccountBackup(username, backupID string, databaseNames []string) erro
 		if err != nil { return fmt.Errorf("DATABASE_DUMP_FAILED: unable to create database dump") }
 		cmd := exec.Command("/usr/bin/mariadb-dump", "--single-transaction", "--routines", "--triggers", "--hex-blob", "--databases", name)
 		cmd.Stdout = dump
-		output, commandErr := cmd.StderrPipe()
-		if commandErr != nil { dump.Close(); return fmt.Errorf("DATABASE_DUMP_FAILED: unable to start database dump") }
-		if err := cmd.Start(); err != nil { dump.Close(); return fmt.Errorf("DATABASE_DUMP_FAILED: unable to start database dump") }
-		_, _ = io.Copy(io.Discard, io.LimitReader(output, 4096))
-		if err := cmd.Wait(); err != nil { dump.Close(); return fmt.Errorf("DATABASE_DUMP_FAILED: database dump did not complete") }
+		cmd.Stderr = io.Discard
+		if err := cmd.Run(); err != nil { dump.Close(); return fmt.Errorf("DATABASE_DUMP_FAILED: database dump did not complete") }
 		if err := dump.Close(); err != nil { return fmt.Errorf("DATABASE_DUMP_FAILED: database dump could not be closed") }
 	}
 
@@ -180,6 +175,3 @@ func stageAccountBackupRestore(username, backupID string) error {
 	return json.NewEncoder(os.Stdout).Encode(backupResult{BackupID: backupID, StagingPath: stage, Success: true})
 }
 
-// Keep these imports and helpers exercised by the compiler on all supported builds.
-var _ = tar.TypeReg
-var _ = gzip.BestSpeed
