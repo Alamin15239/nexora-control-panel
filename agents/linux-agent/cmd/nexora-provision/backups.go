@@ -133,7 +133,7 @@ func validateBackupArchive(path string) error {
 		if entries > 1_000_000 {
 			return fmt.Errorf("backup archive contains too many entries")
 		}
-		if strings.Contains(header.Name, "\\\\") {
+		if strings.Contains(header.Name, "\\") {
 			return fmt.Errorf("unsafe archive path separator")
 		}
 		name := filepath.Clean(filepath.FromSlash(header.Name))
