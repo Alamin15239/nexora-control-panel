@@ -186,9 +186,9 @@ func snapshotBackupDirectoryWithBudget(sourceFD int, destination string, budget 
 			}
 			limited := &io.LimitedReader{R: input, N: budget.limit-budget.copied+1}
 		 copied, copyErr := io.Copy(output, limited)
-		 inputCloseErr := input.Close()
 		 var after syscall.Stat_t
 		 statAfterErr := syscall.Fstat(fileFD, &after)
+		 inputCloseErr := input.Close()
 		 modeErr := output.Chmod(os.FileMode(inspected.Mode).Perm() & 0755)
 		 outputCloseErr := output.Close()
 		 if copyErr != nil || inputCloseErr != nil || statAfterErr != nil || modeErr != nil || outputCloseErr != nil {
