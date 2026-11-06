@@ -11,3 +11,14 @@ coverage
 *.log
 .DS_Store
 .vercel
+
+# Generated Cloudflare / Next.js build output
+.open-next/
+.wrangler/
+*.tsbuildinfo
+
+# Locally compiled Linux agent binaries
+/agents/linux-agent/nexora-agent
+/agents/linux-agent/nexora-ipc-check
+/agents/linux-agent/nexora-provision
+/agents/linux-agent/nexora-provisiond

@@ -140,7 +140,7 @@ export default function BackupsDashboard() {
     </header>
     <section className="mx-auto max-w-[1500px] space-y-6 px-6 py-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <div><p className="text-sm font-medium text-blue-700">Customer hosting</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Account backups</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">Create compressed archives of a hosting account's public_html and its active account-owned databases. Archives are stored outside customer web roots with root-only permissions.</p></div>
+        <div><p className="text-sm font-medium text-blue-700">Customer hosting</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Account backups</h1><p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">Create compressed archives of a hosting account&apos;s public_html and its active account-owned databases. Archives are stored outside customer web roots with root-only permissions.</p></div>
         <button onClick={() => void createBackup()} disabled={!accountId || busy !== "" || loading} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><DatabaseBackup size={17}/>{busy === "create" ? "Queueing…" : "Create backup"}</button>
       </div>
 
@@ -185,7 +185,7 @@ export default function BackupsDashboard() {
           </table>
         </div>}
       </section>
-      <div className="flex items-start gap-2 text-xs leading-5 text-slate-500"><CheckCircle2 size={15} className="mt-0.5 shrink-0"/>Backups include the account's active managed databases and website document root. Files outside public_html, email data, and external object-storage replication are not included in this initial implementation.</div>
+      <div className="flex items-start gap-2 text-xs leading-5 text-slate-500"><CheckCircle2 size={15} className="mt-0.5 shrink-0"/>Backups include the account&apos;s active managed databases and website document root. Files outside public_html, email data, and external object-storage replication are not included in this initial implementation.</div>
     </section>
   </main>;
 }
