@@ -66,10 +66,28 @@ type header struct {
 	KeyID string `json:"kid"`
 }
 
-// Verify validates an RS256 JWS using an explicitly pinned key ring and binds
-// every deployment identity field to the caller's expected values. Replay
-// prevention is deliberately left to the receiver's durable single-use store.
+// Verify validates an RS256 JWS and binds every deployment identity field
+// to the caller's independently obtained expected values.
 func Verify(token string, keys map[string]*rsa.PublicKey, expected Expected, now time.Time) (Claims, error) {
+	claims, err := VerifySigned(token, keys, expected.Issuer, expected.Audience, now)
+	if err != nil {
+		return Claims{}, err
+	}
+	if claims.OrganizationID != expected.OrganizationID ||
+		claims.ProjectID != expected.ProjectID ||
+		claims.DeploymentID != expected.DeploymentID ||
+		claims.HostingAccountID != expected.HostingAccountID ||
+		claims.RepositoryID != expected.RepositoryID ||
+		claims.CommitSHA != expected.CommitSHA {
+		return Claims{}, errors.New("deployment envelope identity does not match the requested deployment")
+	}
+	return claims, nil
+}
+
+// VerifySigned validates the signature, issuer, audience, claims structure,
+// and time bounds. The returned identity fields are trustworthy only after
+// this succeeds; callers must still authorize the hosting account locally.
+func VerifySigned(token string, keys map[string]*rsa.PublicKey, issuer, audience string, now time.Time) (Claims, error) {
 	var zero Claims
 	if len(token) == 0 || len(token) > maxTokenBytes {
 		return zero, errors.New("deployment envelope has an invalid size")
@@ -102,17 +120,11 @@ func Verify(token string, keys map[string]*rsa.PublicKey, expected Expected, now
 	if err := decodeStrictJSONSegment(parts[1], &claims); err != nil {
 		return zero, fmt.Errorf("invalid deployment claims: %w", err)
 	}
-	if expected.Issuer == "" || expected.Audience == "" {
-		return zero, errors.New("expected issuer and audience must be configured")
+	if issuer == "" || audience == "" {
+		return zero, errors.New("trusted issuer and audience must be configured")
 	}
-	if claims.Issuer != expected.Issuer || claims.Audience != expected.Audience ||
-		claims.OrganizationID != expected.OrganizationID ||
-		claims.ProjectID != expected.ProjectID ||
-		claims.DeploymentID != expected.DeploymentID ||
-		claims.HostingAccountID != expected.HostingAccountID ||
-		claims.RepositoryID != expected.RepositoryID ||
-		claims.CommitSHA != expected.CommitSHA {
-		return zero, errors.New("deployment envelope identity does not match the requested deployment")
+	if claims.Issuer != issuer || claims.Audience != audience {
+		return zero, errors.New("deployment envelope issuer or audience does not match")
 	}
 	if !idPattern.MatchString(claims.OrganizationID) ||
 		!idPattern.MatchString(claims.ProjectID) ||
