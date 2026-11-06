@@ -518,8 +518,8 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 	}
 
 	ipcResult, err := provisionipc.Run(ctx, "", requestBody)
-	if err != nil || ipcResult.ExitCode != 0 {
-		return nil, fmt.Errorf("provisioning service could not collect database usage")
+	if err != nil || ipcResult.ExitCode != 0 || ipcResult.OutputTruncated {
+		return nil, fmt.Errorf("provisioning service could not collect complete database usage data")
 	}
 	output := ipcResult.Stdout
 	if len(output) == 0 || len(output) > 64*1024 {
@@ -583,6 +583,9 @@ func runProvisionerCombined(ctx context.Context, request []byte) ([]byte, error)
 	output := make([]byte, 0, len(result.Stdout)+len(result.Stderr))
 	output = append(output, result.Stdout...)
 	output = append(output, result.Stderr...)
+	if result.OutputTruncated {
+		return output, fmt.Errorf("provisioner output exceeded the IPC capture limit")
+	}
 	if result.ExitCode != 0 {
 		return output, fmt.Errorf("provisioner exited with status %d", result.ExitCode)
 	}
