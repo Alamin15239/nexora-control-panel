@@ -1073,7 +1073,7 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
   }
 
   const deployment = await c.env.DB.prepare(
-    \`SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
+    `SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
             d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes,
             d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId,
             p.github_repository_id AS repositoryId
@@ -1083,7 +1083,7 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
      WHERE d.id = ? AND d.organization_id = ? AND h.server_id = ?
        AND d.status = 'building' AND d.artifact_key IS NOT NULL
        AND d.artifact_bytes IS NOT NULL AND d.artifact_sha256 IS NOT NULL
-     LIMIT 1\`,
+     LIMIT 1`,
   ).bind(c.req.param("deploymentId"), credential.organizationId, credential.serverId).first<{
     deploymentId: string;
     organizationId: string;
