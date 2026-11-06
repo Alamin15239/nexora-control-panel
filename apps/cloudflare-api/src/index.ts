@@ -3253,6 +3253,10 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
   if (!Number.isSafeInteger(contentLength) || contentLength < 1 || contentLength > maxBytes) {
     return c.json({ message: "Artifact size must be between 1 byte and 100 MiB." }, 413);
   }
+  const artifactSHA256 = (c.req.header("x-artifact-sha256") ?? "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(artifactSHA256)) {
+    return c.json({ message: "A lowercase SHA-256 artifact checksum is required." }, 400);
+  }
   if (!c.req.raw.body) return c.json({ message: "Artifact body is required." }, 400);
 
   const deploymentId = c.req.param("deploymentId");
@@ -3300,17 +3304,19 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
 
   try {
     await c.env.ARTIFACTS.put(objectKey, limitedBody, {
+      sha256: artifactSHA256,
       httpMetadata: { contentType: "application/gzip" },
       customMetadata: {
         organizationId: token.organizationId,
         projectId: token.projectId,
         deploymentId: token.deploymentId,
         commitSha: token.commitSha,
+        artifactSha256,
       },
     });
     const updated = await c.env.DB.prepare(
-      "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
-    ).bind(objectKey, receivedBytes, token.deploymentId, token.organizationId).run();
+      "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
+    ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId).run();
     if ((updated.meta.changes ?? 0) !== 1) {
       await c.env.ARTIFACTS.delete(objectKey);
       return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
