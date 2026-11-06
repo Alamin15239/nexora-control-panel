@@ -1,6 +1,6 @@
 # Privileged Provisioning IPC Design
 
-Status: design approved for implementation planning; not yet deployed.
+Status: IPC daemon, client, helper isolation, and agent call-site migration are implemented in the repository. A harmless authenticated socket smoke test passed on the development VM. Full operation-by-operation validation and final systemd hardening/rollout remain pending; do not treat this document as deployment approval.
 
 ## Objective
 
@@ -10,7 +10,7 @@ The existing provisioner remains the policy enforcement point: it owns the opera
 
 ## Current constraints discovered in the code
 
-The agent currently invokes /usr/local/libexec/nexora-provision through sudo -n in eight code paths: database usage, create database, create database user, revoke database user, delete database, backup operations, File Manager, and account/domain provisioning.
+The agent routes privileged operations through the shared provisionipc client. Database usage and queued provisioning jobs use the authenticated Unix socket; the daemon starts the fixed /usr/local/libexec/nexora-provision helper as a separate child. The provisioner remains the validation boundary.
 
 The helper is a one-request executable. Its File Manager operation opens the validated document-root directory, calls chroot, then setgroups, setgid, and setuid. These operations permanently change the process security context. Therefore, a persistent server must not execute File Manager work in its own request-serving process.
 
@@ -46,7 +46,7 @@ The daemon must use a fixed executable path and a fixed argument vector. It must
 - Maximum request size: no greater than the helper's existing 1 MiB limit.
 - Explicit maximum response size; select a value that safely accommodates the largest legitimate File Manager listing and backup metadata response, and enforce it while reading child output to avoid unbounded memory growth.
 - Response includes exit status, stdout bytes, and stderr bytes. Use base64 or a binary frame for arbitrary bytes; do not concatenate streams because the database-usage path relies on stdout-only parsing.
-- Apply connection and child-process deadlines. The current implementation bounds each helper child to two minutes and reaps it on timeout or daemon shutdown. Immediate cancellation on client disconnect remains a follow-up hardening requirement.
+- Apply connection and child-process deadlines. The helper child is bounded to two minutes and is killed as a process group on timeout, daemon shutdown, or client disconnect. The client keeps its write side open while waiting so the daemon can distinguish a live request from a disconnected client; trailing bytes are rejected.
 - Reject extra/trailing frame data and malformed lengths.
 - Never log request bodies, database credentials, or File Manager file contents.
 
@@ -69,14 +69,14 @@ The daemon must not run with a writable socket path outside its root-owned runti
 - Unit tests for peer-credential authorization, wrong UID rejection, socket permissions, framing, truncated frames, oversized requests/responses, deadlines, child cancellation/reaping, and concurrent-request limits.
 - Integration tests for every currently supported operation through the socket, including File Manager chroot/drop-privilege behavior and JSON stdout results.
 - Verify a File Manager request does not affect the daemon's UID/GID, root directory, or ability to serve the next request.
-- Verify helper executable ownership/mode and reject a missing, non-regular, or non-root-owned helper binary.
-- Confirm no remaining sudo invocation exists in the agent code.
+- The daemon validates that the helper exists, is a regular file, is root-owned, and is not group/world writable.
+- Confirm no remaining sudo invocation exists in the agent code path and audit all privileged process execution.
 - Run gofmt, go test ./..., go test -race ./..., and go vet ./...; add CI coverage for the IPC package and provisioner integration tests.
 - On a disposable test VM, validate the service units with systemd-analyze verify, inspect systemd-analyze security, and test every operation with the final filesystem/capability sandbox. A security score is not a substitute for operation tests.
 
 ## Migration and rollback
 
-Do not edit the live VM's unit files, drop-ins, sudoers rule, or binaries during development.
+Do not edit the live VM's unit files, drop-ins, sudoers rule, or binaries during development. The repository implementation and a harmless socket smoke test do not establish that every privileged operation is safe under the final systemd sandbox.
 
 Migration must be staged: install the daemon and its unit/socket; validate the socket and helper with a harmless/read-only request; switch the agent to IPC; verify heartbeat plus each operation; then restore agent hardening and remove the obsolete sudoers rule/drop-ins. Keep the previous binaries and configuration available for rollback until all tests pass. Do not stop or restart the currently healthy agent as part of an unverified rollout.
 
