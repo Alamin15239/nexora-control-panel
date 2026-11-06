@@ -20,6 +20,10 @@ type Bindings = {
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_OIDC_AUDIENCE?: string;
+  GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY?: string;
+  GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID?: string;
+  GITHUB_DEPLOYMENT_ENVELOPE_ISSUER?: string;
+  GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE?: string;
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
 };
@@ -43,6 +47,90 @@ function randomHex(length: number): string {
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return hex(new Uint8Array(digest));
+}
+
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function utf8Base64Url(value: string): string {
+  return base64UrlEncode(new TextEncoder().encode(value));
+}
+
+function decodePKCS8PEM(pem: string): Uint8Array {
+  const normalized = pem.trim();
+  const match = /^-----BEGIN PRIVATE KEY-----([\s\S]+)-----END PRIVATE KEY-----$/.exec(normalized);
+  if (!match) throw new Error("Deployment signing key must be an unencrypted PKCS#8 PEM private key");
+  const base64 = match[1].replace(/\s/g, "");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+type DeploymentEnvelopeInput = {
+  organizationId: string;
+  projectId: string;
+  deploymentId: string;
+  hostingAccountId: string;
+  repositoryId: string;
+  commitSha: string;
+  artifactSha256: string;
+  artifactBytes: number;
+};
+
+async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeInput): Promise<string> {
+  const privateKeyPEM = env.GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY;
+  const keyId = env.GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID ?? "";
+  const issuer = env.GITHUB_DEPLOYMENT_ENVELOPE_ISSUER ?? "";
+  const audience = env.GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE ?? "";
+  if (!privateKeyPEM || !/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || !issuer || !audience) {
+    throw new Error("Deployment envelope signing is not configured");
+  }
+  if (!/^[a-f0-9]{40}$/.test(input.commitSha) ||
+      !/^[a-f0-9]{64}$/.test(input.artifactSha256) ||
+      !Number.isSafeInteger(input.artifactBytes) || input.artifactBytes < 1 || input.artifactBytes > 100 * 1024 * 1024) {
+    throw new Error("Deployment envelope artifact claims are invalid");
+  }
+  for (const value of [input.organizationId, input.projectId, input.deploymentId, input.hostingAccountId]) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Deployment envelope identity is invalid");
+  }
+  if (!/^[1-9][0-9]{0,19}$/.test(input.repositoryId)) throw new Error("Deployment repository ID is invalid");
+
+  const now = Math.floor(Date.now() / 1000);
+  const claims = {
+    iss: issuer,
+    aud: audience,
+    organization_id: input.organizationId,
+    project_id: input.projectId,
+    deployment_id: input.deploymentId,
+    hosting_account_id: input.hostingAccountId,
+    repository_id: input.repositoryId,
+    commit_sha: input.commitSha,
+    artifact_sha256: input.artifactSha256,
+    artifact_bytes: input.artifactBytes,
+    jti: randomHex(16),
+    iat: now,
+    exp: now + 300,
+  };
+  const header = { alg: "RS256", typ: "JWT", kid: keyId };
+  const signingInput = utf8Base64Url(JSON.stringify(header)) + "." + utf8Base64Url(JSON.stringify(claims));
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    decodePKCS8PEM(privateKeyPEM),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    key,
+    new TextEncoder().encode(signingInput),
+  );
+  return signingInput + "." + base64UrlEncode(new Uint8Array(signature));
 }
 
 
