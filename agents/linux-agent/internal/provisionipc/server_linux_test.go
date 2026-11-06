@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"os"
-	"syscall"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -101,5 +103,90 @@ func TestResultExitCodeIsPreserved(t *testing.T) {
 	}
 	if got.ExitCode != 23 || string(got.Stdout) != "out" || string(got.Stderr) != "err" {
 		t.Fatalf("round trip mismatch: %+v", got)
+	}
+}
+
+func TestServerCancellationKillsHelperProcessGroup(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	pidFile := filepath.Join(dir, "child.pid")
+
+	quotedPIDFile := "'" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'"
+	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + quotedPIDFile + "\nwait\n"
+
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath, cancelServer := startTestServer(t, uid, helper)
+
+	type runResult struct {
+		result Result
+		err    error
+	}
+	resultCh := make(chan runResult, 1)
+
+	go func() {
+		result, err := Run(context.Background(), socketPath, []byte(`{"operation":"DATABASE_USAGE"}`))
+		resultCh <- runResult{result: result, err: err}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var childPID int
+
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			childPID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil && childPID > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if childPID <= 0 {
+		cancelServer()
+		t.Fatal("helper did not start its child process")
+	}
+
+	defer func() {
+		// Safety cleanup if the regression under test fails.
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+	}()
+
+	cancelServer()
+
+	select {
+	case <-resultCh:
+	case <-time.After(4 * time.Second):
+		t.Fatal("IPC request did not finish after server cancellation")
+	}
+
+	// A killed process may briefly remain as a zombie until reaped.
+	terminated := false
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile("/proc/" + strconv.Itoa(childPID) + "/stat")
+		if errors.Is(err, os.ErrNotExist) {
+			terminated = true
+			break
+		}
+		if err == nil {
+			closeParen := strings.LastIndex(string(data), ")")
+			if closeParen >= 0 {
+				fields := strings.Fields(string(data)[closeParen+1:])
+				if len(fields) > 0 && fields[0] == "Z" {
+					terminated = true
+					break
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if !terminated {
+		t.Fatalf("helper child process %d survived server cancellation", childPID)
 	}
 }

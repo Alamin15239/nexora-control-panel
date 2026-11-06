@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -118,6 +119,18 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	defer cancel()
 
 	command := exec.CommandContext(ctx, s.HelperPath)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error {
+		if command.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	command.WaitDelay = 2 * time.Second
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	command.Stdin = bytesReader(request)
 	stdout := &cappedBuffer{limit: MaxResponseBytes / 2}
@@ -160,4 +173,3 @@ func (r *byteReader) Read(p []byte) (int, error) {
 	r.data = r.data[n:]
 	return n, nil
 }
-

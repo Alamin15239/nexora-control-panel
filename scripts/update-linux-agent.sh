@@ -44,7 +44,12 @@ echo "Building agent, helper, and IPC daemon..."
   go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/nexora-agent" ./cmd/nexora-agent
   go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/nexora-provision" ./cmd/nexora-provision
   go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/nexora-provisiond" ./cmd/nexora-provisiond
+  go build -trimpath -ldflags="-s -w" -o "$BUILD_DIR/nexora-ipc-check" ./cmd/nexora-ipc-check
 )
+
+# The IPC checker runs as nexora-agent. This directory contains only
+# temporary build artifacts and must be traversable by that account.
+chmod 0755 "$BUILD_DIR"
 
 echo "Installing root-owned helper and IPC daemon..."
 sudo install -D -o root -g root -m 0755 "$BUILD_DIR/nexora-provision" /usr/local/libexec/nexora-provision
@@ -70,6 +75,12 @@ fi
 SOCKET_META="$(stat -c '%U:%G:%a' "$SOCKET_PATH")"
 if [[ "$SOCKET_META" != "root:nexora-agent:660" ]]; then
   echo "Unexpected provisioning socket ownership or mode: $SOCKET_META" >&2
+  exit 1
+fi
+
+echo "Testing authenticated IPC as nexora-agent..."
+if ! sudo -u nexora-agent -- "$BUILD_DIR/nexora-ipc-check"; then
+  echo "IPC smoke test failed. The existing agent binary has not been changed." >&2
   exit 1
 fi
 
