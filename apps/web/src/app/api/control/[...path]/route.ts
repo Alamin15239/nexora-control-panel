@@ -4,7 +4,7 @@ import { getCloudflareContext } from "@opennextjs/cloudflare";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DEFAULT_API_BASE = "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
+const DEFAULT_API_BASE = "https://api.nexoraedge.digital";
 type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
 
 const COOKIE_NAME = "nexora_session";
@@ -86,7 +86,7 @@ async function proxy(
 
   try {
     const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, DEFAULT_API_BASE);
-    if (apiUrl.protocol !== "https:" || !apiUrl.hostname.endsWith(".workers.dev")) {
+    if (apiUrl.protocol !== "https:" || apiUrl.hostname !== "api.nexoraedge.digital") {
       return NextResponse.json({ message: "Invalid Nexora API URL configuration" }, { status: 503 });
     }
     const { env } = getCloudflareContext();

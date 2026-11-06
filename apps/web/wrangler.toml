@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat", "nodejs_compat_populate_process_env"]
 upload_source_maps = true
 
 [vars]
-NEXORA_API_URL = "https://nexora-api.alamin-kha-saadfreeh.workers.dev"
+NEXORA_API_URL = "https://api.nexoraedge.digital"
 
 [[services]]
 binding = "NEXORA_API"

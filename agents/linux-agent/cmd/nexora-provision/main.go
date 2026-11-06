@@ -539,26 +539,54 @@ func fileManager(input request) error {
 	if err != nil {
 		return err
 	}
+
 	uid, _ := strconv.Atoi(account.Uid)
 	gid := mustGID(group.Gid)
+
 	rootFD, err := openDirectoryChain("/", "home", input.Username, "public_html")
 	if err != nil {
 		return fmt.Errorf("FILE_ROOT_UNAVAILABLE: hosting document root is missing or unsafe")
 	}
+	defer syscall.Close(rootFD)
+
+	writeResult := func(value any) error {
+		return json.NewEncoder(os.Stdout).Encode(value)
+	}
+
+	// DELETE must happen before dropping privileges. The document-root
+	// descriptor remains anchored to the verified directory.
+	if input.FileOperation == "DELETE_PATH" {
+		quarantineFD, err := openFileManagerQuarantine(input.Username)
+		if err != nil {
+			return fmt.Errorf("DELETE_FAILED: protected quarantine is unavailable")
+		}
+		defer syscall.Close(quarantineFD)
+
+		if err := secureFileManagerDelete(rootFD, quarantineFD, input.Path); err != nil {
+			return err
+		}
+
+		return writeResult(map[string]any{
+			"success": true,
+			"path":    input.Path,
+		})
+	}
+
 	runtime.LockOSThread()
+
 	if err := syscall.Fchdir(rootFD); err != nil {
-		_ = syscall.Close(rootFD)
 		return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root")
 	}
-	_ = syscall.Close(rootFD)
-	// Chroot to the already-open directory descriptor's working directory.
-	// This prevents a path replacement between validation and chroot.
+
+	// The working directory is anchored to the verified document root.
 	if err := syscall.Chroot("."); err != nil {
 		return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root")
 	}
+
 	if err := os.Chdir("/"); err != nil {
 		return fmt.Errorf("FILE_SANDBOX_FAILED: unable to enter the hosting document root")
 	}
+
 	if err := syscall.Setgroups([]int{gid}); err != nil {
 		return fmt.Errorf("FILE_SANDBOX_FAILED: unable to set account groups")
 	}
@@ -568,8 +596,8 @@ func fileManager(input request) error {
 	if err := syscall.Setuid(uid); err != nil {
 		return fmt.Errorf("FILE_SANDBOX_FAILED: unable to drop user privileges")
 	}
-	writeResult := func(value any) error { return json.NewEncoder(os.Stdout).Encode(value) }
-	return fileManagerOperation(input, "/", writeResult)
+
+	return secureFileManagerOperation(input, "/", -1, writeResult)
 }
 
 func managedParentPath(value string) string {

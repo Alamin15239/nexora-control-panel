@@ -2317,14 +2317,55 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const resultPayload = pendingJob.operation === "CREATE_DATABASE_USER" ? null : (incomingResult ? JSON.stringify(incomingResult) : null);
   const now = new Date().toISOString();
   const status = input.success ? "SUCCEEDED" : "FAILED";
-  const update = await c.env.DB.prepare(
+  const updateStatement = c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
     "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
-    jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId).run();
+    jobId, auth.credential.nodeId, now, auth.credential.serverId, auth.credential.organizationId);
+
+  if (pendingJob.operation === "FILE_MANAGER") {
+    const auditAction = input.success
+      ? "file_manager.operation_completed"
+      : "file_manager.operation_failed";
+
+    const auditStatement = c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) " +
+      "SELECT ?, ?, ?, 'provisioning_job', ?, ? WHERE EXISTS (" +
+      "SELECT 1 FROM provisioning_jobs WHERE id = ? AND operation = 'FILE_MANAGER' " +
+      "AND status = ? AND finished_at = ? AND claimed_by_node_id = ? " +
+      "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?))"
+    ).bind(
+      crypto.randomUUID(),
+      auth.credential.organizationId,
+      auditAction,
+      jobId,
+      JSON.stringify({
+        serverId: auth.credential.serverId,
+        operation: "FILE_MANAGER",
+        errorCode: input.success ? null : errorCode,
+      }),
+      jobId,
+      status,
+      now,
+      auth.credential.nodeId,
+      auth.credential.serverId,
+      auth.credential.organizationId,
+    );
+
+    const results = await c.env.DB.batch([updateStatement, auditStatement]);
+
+    if ((results[0]?.meta?.changes ?? 0) !== 1 ||
+        (results[1]?.meta?.changes ?? 0) !== 1) {
+      return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
+    }
+
+    return c.json({ accepted: true, jobId, status });
+  }
+
+  const update = await updateStatement.run();
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
   const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
     .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string }>();

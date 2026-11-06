@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const API_BASE =
   process.env.NEXORA_API_URL ||
-  "https://nexora-api.alamin-kha-saadfreeh.workers.dev";
+  "https://api.nexoraedge.digital";
 
 const SESSION_COOKIE = "nexora_session";
 const SESSION_MAX_AGE = 15 * 60;
