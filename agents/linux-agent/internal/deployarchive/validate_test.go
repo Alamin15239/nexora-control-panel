@@ -53,7 +53,16 @@ func TestValidateGzipTarRejectsUnsafeEntryTypes(t *testing.T) {
 }
 
 func TestValidateGzipTarRejectsTraversalAndAbsolutePaths(t *testing.T) {
-	for _, name := range []string{"../outside", "nested/../../outside", "/etc/passwd", "C:\\Windows\\system.ini", "nested\\file.txt"} {
+	for _, name := range []string{
+		"../outside",
+		"nested/../../outside",
+		"/etc/passwd",
+		"C:\\Windows\\system.ini",
+		"nested\\file.txt",
+		"./C:/site/index.html",
+		"././C:/site/index.html",
+		"./C:relative-file",
+	} {
 		t.Run(name, func(t *testing.T) {
 			archive := makeArchive(t, testEntry{name: name, kind: tar.TypeReg, body: "x"})
 			if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{}); err == nil {
