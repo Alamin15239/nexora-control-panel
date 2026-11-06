@@ -103,6 +103,14 @@ The deployment handoff must use a dedicated streaming receiver, separate from th
 9. After complete extraction and validation, activate the release with an atomic rename or symlink swap performed relative to a verified parent directory. Keep the prior release until health checks pass; rollback must atomically restore the previous pointer. Cleanup is bounded and must never follow archive-created links.
 10. Record deployment state transitions and audit metadata (deployment ID, account ID, commit SHA, digest, sizes, timestamps, outcome). Never log the bearer capability, signed envelope secret material, or artifact contents.
 
+### Deployment envelope verifier foundation (implemented, not wired)
+
+The Go package `internal/deployenvelope` now verifies compact JWS deployment envelopes using RS256 and an explicit key-ID-to-RSA-public-key key ring. The verifier rejects malformed/oversized tokens, unsupported algorithms or token types, unknown JSON fields, untrusted/undersized keys, invalid signatures, malformed identifiers/digests, artifact sizes outside 1 byte–100 MiB, identity mismatches, expired tokens, future-issued tokens beyond clock skew, and lifetimes longer than five minutes.
+
+The required signed claims bind issuer, single audience, organization ID, project ID, deployment ID, hosting account ID, immutable GitHub repository ID, commit SHA, artifact SHA-256, exact artifact byte count, unique JTI, issued-at, and expiry. The caller supplies the expected deployment identity and trusted public-key ring. The verifier does not fetch keys, load mutable key files, persist replay state, create files, or authorize a filesystem destination. The receiver must provide a root-owned pinned key ring, enforce JTI single-use/revocation durably, and compare the streamed byte count and SHA-256 with the verified claims before finalizing the staged file.
+
+The Worker signing endpoint/key distribution and receiver integration are not implemented. No private signing key or public key has been provisioned. This package is a tested cryptographic boundary primitive, not an enabled deployment path.
+
 ### Explicit implementation blockers
 
 - The Worker currently stages artifacts in R2 only when the ARTIFACTS binding exists; that binding/bucket has not been provisioned.
