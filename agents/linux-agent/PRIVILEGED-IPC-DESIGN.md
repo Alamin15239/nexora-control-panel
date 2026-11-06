@@ -1,6 +1,6 @@
 # Privileged Provisioning IPC Design
 
-Status: IPC daemon, client, helper isolation, and agent call-site migration are implemented in the repository. A harmless authenticated socket smoke test passed on the development VM. GitHub CI has passed provisioner tests, full Go tests, race tests, vet, build, CLI, and systemd-unit validation on the earlier hardening revision; the latest PR revision is running CI. Full operation-by-operation validation and final systemd hardening/rollout remain pending; do not treat this document as deployment approval.
+Status: IPC daemon, client, helper isolation, and agent call-site migration are implemented in the repository. A harmless authenticated socket smoke test passed on the development VM. GitHub CI passed provisioner tests, the full Go test suite, race tests, vet, build, CLI verification, systemd-unit verification, and Cloudflare Tunnel installer syntax validation on commit 6c8c14e7181de58059dcdcc10b68e4533e3be663. Full operation-by-operation validation and final systemd hardening/rollout remain pending; do not treat this document as deployment approval.
 
 ## Objective
 
