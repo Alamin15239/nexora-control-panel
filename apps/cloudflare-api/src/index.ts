@@ -19,6 +19,8 @@ type Bindings = {
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_OIDC_AUDIENCE?: string;
+  ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
 };
 
@@ -3079,6 +3081,129 @@ app.get("/v1/github/projects", async (c) => {
   return c.json({ projects: result.results ?? [] });
 });
 
+
+
+const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const GITHUB_OIDC_DEFAULT_AUDIENCE = "https://api.nexoraedge.digital/github-deployments";
+
+function decodeBase64Url(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+}
+
+async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Record<string, unknown>> {
+  if (token.length > 16_384) throw new Error("OIDC token is too large");
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new Error("Malformed OIDC token");
+  const header = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[0]))) as Record<string, unknown>;
+  const claims = JSON.parse(new TextDecoder().decode(decodeBase64Url(parts[1]))) as Record<string, unknown>;
+  if (header.alg !== "RS256" || typeof header.kid !== "string") throw new Error("Unsupported OIDC signing algorithm");
+  if (claims.iss !== GITHUB_OIDC_ISSUER) throw new Error("Unexpected OIDC issuer");
+  const expectedAudience = env.GITHUB_OIDC_AUDIENCE || GITHUB_OIDC_DEFAULT_AUDIENCE;
+  const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  if (!audiences.includes(expectedAudience)) throw new Error("Unexpected OIDC audience");
+
+  const now = Math.floor(Date.now() / 1000);
+  const exp = Number(claims.exp);
+  const iat = Number(claims.iat);
+  if (!Number.isFinite(exp) || !Number.isFinite(iat) || exp <= now || exp > now + 600 || iat > now + 60 || iat < now - 600) {
+    throw new Error("OIDC token is expired or outside the accepted time window");
+  }
+  if (claims.nbf !== undefined && Number(claims.nbf) > now + 60) throw new Error("OIDC token is not active yet");
+
+  const response = await fetch(GITHUB_OIDC_ISSUER + "/.well-known/jwks", { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error("Unable to retrieve GitHub OIDC signing keys");
+  const jwks = await response.json() as { keys?: (JsonWebKey & { kid?: string })[] };
+  const jwk = (jwks.keys ?? []).find((key) => key.kid === header.kid);
+  if (!jwk) throw new Error("Unknown GitHub OIDC signing key");
+  const publicKey = await crypto.subtle.importKey(
+    "jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"],
+  );
+  const valid = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5", publicKey, decodeBase64Url(parts[2]),
+    new TextEncoder().encode(parts[0] + "." + parts[1]),
+  );
+  if (!valid) throw new Error("Invalid GitHub OIDC signature");
+  return claims;
+}
+
+app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
+  const authorization = c.req.header("authorization") ?? "";
+  const match = /^Bearer\\s+([A-Za-z0-9._-]+)$/.exec(authorization);
+  if (!match) return c.json({ message: "GitHub Actions OIDC bearer token is required." }, 401);
+
+  let claims: Record<string, unknown>;
+  try {
+    claims = await verifyGitHubActionsOidc(c.env, match[1]);
+  } catch (error) {
+    console.warn("GitHub OIDC verification rejected:", error instanceof Error ? error.message : "invalid token");
+    return c.json({ message: "GitHub Actions identity could not be verified." }, 401);
+  }
+
+  const deployment = await c.env.DB.prepare(
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
+  ).bind(c.req.param("deploymentId")).first<{
+    id: string; organizationId: string; projectId: string; commitSha: string; branch: string;
+    status: string; repositoryId: string; repositoryFullName: string;
+  }>();
+  if (!deployment || deployment.status !== "queued") {
+    return c.json({ message: "Deployment not found or no longer accepting a runner." }, 409);
+  }
+
+  const expectedWorkflowRef = deployment.repositoryFullName + "/.github/workflows/nexora-deploy.yml@refs/heads/" + deployment.branch;
+  const runId = String(claims.run_id ?? "");
+  const runAttempt = Number(claims.run_attempt);
+  const workflowSha = String(claims.workflow_sha ?? "");
+  if (
+    claims.repository !== deployment.repositoryFullName ||
+    String(claims.repository_id ?? "") !== deployment.repositoryId ||
+    claims.ref !== "refs/heads/" + deployment.branch ||
+    claims.sha !== deployment.commitSha ||
+    claims.event_name !== "workflow_dispatch" ||
+    claims.workflow_ref !== expectedWorkflowRef ||
+    claims.runner_environment !== "github-hosted" ||
+    !/^[a-f0-9]{40}$/i.test(workflowSha) ||
+    !/^\\d{1,20}$/.test(runId) ||
+    !Number.isSafeInteger(runAttempt) || runAttempt < 1 || runAttempt > 100
+  ) {
+    return c.json({ message: "GitHub Actions identity does not match this deployment." }, 403);
+  }
+
+  // The capability is withheld until a private R2 bucket is bound to this Worker.
+  if (!c.env.ARTIFACTS) {
+    return c.json({ message: "Private artifact storage is not configured; no upload capability was issued." }, 503);
+  }
+
+  const capability = randomHex(32);
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  try {
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO github_deployment_upload_tokens (id, token_hash, organization_id, project_id, deployment_id, repository_id, branch, commit_sha, run_id, run_attempt, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM github_deployments WHERE id = ? AND organization_id = ? AND status = 'queued')",
+      ).bind(
+        crypto.randomUUID(), await sha256(capability), deployment.organizationId, deployment.projectId,
+        deployment.id, deployment.repositoryId, deployment.branch, deployment.commitSha,
+        runId, runAttempt, expiresAt, deployment.id, deployment.organizationId,
+      ),
+      c.env.DB.prepare(
+        "UPDATE github_deployments SET status = 'building', started_at = datetime('now') WHERE id = ? AND organization_id = ? AND status = 'queued'",
+      ).bind(deployment.id, deployment.organizationId),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+      return c.json({ message: "A runner has already claimed this deployment." }, 409);
+    }
+  } catch {
+    return c.json({ message: "This deployment already has an upload capability or could not be claimed." }, 409);
+  }
+
+  return c.json({
+    uploadToken: capability,
+    expiresAt,
+    maxBytes: 104857600,
+    contentType: "application/gzip",
+  }, 201);
+});
 
 app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
