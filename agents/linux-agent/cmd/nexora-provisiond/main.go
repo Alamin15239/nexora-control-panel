@@ -53,25 +53,9 @@ func main() {
 	if err := os.Chmod("/run/nexora", 0750); err != nil {
 		fatal("set runtime directory mode: %v", err)
 	}
-	if _, err := os.Lstat(socketPath); err == nil {
-		fatal("socket path already exists; refusing to replace it")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		fatal("inspect socket path: %v", err)
-	}
-
-	address := &net.UnixAddr{Name: socketPath, Net: "unix"}
-	listener, err := net.ListenUnix("unix", address)
+	listener, err := listenProvisionSocket(socketPath, 0, int(gid))
 	if err != nil {
-		fatal("listen on provisioning socket: %v", err)
-	}
-	listener.SetUnlinkOnClose(true)
-	if err := os.Chown(socketPath, 0, int(gid)); err != nil {
-		_ = listener.Close()
-		fatal("set socket ownership: %v", err)
-	}
-	if err := os.Chmod(socketPath, 0660); err != nil {
-		_ = listener.Close()
-		fatal("set socket permissions: %v", err)
+		fatal("configure provisioning socket: %v", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -80,6 +64,29 @@ func main() {
 	if err := server.Serve(ctx, listener); err != nil {
 		fatal("provisioning IPC server stopped: %v", err)
 	}
+}
+
+func listenProvisionSocket(path string, ownerUID, ownerGID int) (*net.UnixListener, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return nil, errors.New("socket path already exists; refusing to replace it")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect socket path: %w", err)
+	}
+
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return nil, fmt.Errorf("listen on provisioning socket: %w", err)
+	}
+	listener.SetUnlinkOnClose(true)
+	if err := os.Chown(path, ownerUID, ownerGID); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("set socket ownership: %w", err)
+	}
+	if err := os.Chmod(path, 0660); err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("set socket permissions: %w", err)
+	}
+	return listener, nil
 }
 
 func validateHelper(path string) error {
