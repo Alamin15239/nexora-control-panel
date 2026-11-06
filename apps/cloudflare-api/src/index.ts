@@ -2765,7 +2765,7 @@ function githubDashboardRedirect(env: Bindings, status: string): string {
   let url: URL;
   try { url = new URL(base); } catch { throw new Error("Dashboard URL is not configured"); }
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Dashboard URL must be an HTTPS origin");
-  url.pathname = "/settings/deployments";
+  url.pathname = "/github-deployments";
   url.search = new URLSearchParams({ github: status }).toString();
   url.hash = "";
   return url.toString();
