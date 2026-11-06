@@ -517,11 +517,11 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 		return nil, err
 	}
 
-	result, err := provisionipc.Run(ctx, "", requestBody)
-	if err != nil || result.ExitCode != 0 {
+	ipcResult, err := provisionipc.Run(ctx, "", requestBody)
+	if err != nil || ipcResult.ExitCode != 0 {
 		return nil, fmt.Errorf("provisioning service could not collect database usage")
 	}
-	output := result.Stdout
+	output := ipcResult.Stdout
 	if len(output) == 0 || len(output) > 64*1024 {
 		return nil, fmt.Errorf("database usage response exceeded its size limit")
 	}
