@@ -2798,7 +2798,7 @@ app.post("/v1/github/connect", async (c) => {
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) {
     return c.json({ message: "GitHub App credentials, callback URL, and token encryption key must be configured first." }, 503);
   }
-  try { githubEncryptionKey(c.env); new URL(c.env.GITHUB_OAUTH_CALLBACK_URL); }
+  try { const callback = new URL(c.env.GITHUB_OAUTH_CALLBACK_URL); githubEncryptionKey(c.env); if (callback.protocol !== "https:" || callback.username || callback.password) throw new Error("Invalid callback URL"); }
   catch { return c.json({ message: "GitHub OAuth configuration is invalid." }, 503); }
   const state = randomHex(32);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -2916,10 +2916,11 @@ app.post("/v1/github/projects", async (c) => {
   if (!connection) return c.json({ message: "Connect GitHub first." }, 409);
   try {
     const token = await decryptGithubToken(c.env, connection.encrypted_access_token, connection.access_token_iv);
-    const response = await githubApi(token, `/repositories/${repositoryId}`);
-    if (!response.ok) return c.json({ message: "Repository is not accessible through the connected GitHub App." }, 403);
-    const repo = await response.json() as { id?: number; full_name?: string; default_branch?: string };
-    if (repo.id !== repositoryId || repo.full_name?.toLowerCase() !== repositoryFullName.toLowerCase()) return c.json({ message: "Repository identity does not match the selected repository." }, 400);
+    const installationResponse = await githubApi(token, `/user/installations/${installationId}/repositories?per_page=100`);
+    if (!installationResponse.ok) return c.json({ message: "GitHub App installation is not accessible to this workspace." }, 403);
+    const installationData = await installationResponse.json() as { repositories?: Array<{ id: number; full_name: string; default_branch: string }> };
+    const repo = (installationData.repositories ?? []).find((item) => item.id === repositoryId);
+    if (!repo || repo.full_name?.toLowerCase() !== repositoryFullName.toLowerCase()) return c.json({ message: "Repository does not belong to the selected GitHub App installation." }, 400);
     const id = crypto.randomUUID();
     await c.env.DB.prepare(
       `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, status)
