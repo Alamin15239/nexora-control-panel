@@ -41,8 +41,11 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
+          go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provisiond ./cmd/nexora-provisiond
       - name: Verify CLI
         run: /tmp/nexora-agent version
+      - name: Verify provisioning systemd unit
+        run: systemd-analyze verify systemd/nexora-provisiond.service
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
