@@ -55,7 +55,7 @@ func TestCappedBufferEnforcesLimit(t *testing.T) {
 	if n, err := buffer.Write([]byte("xyz")); n != 1 || err == nil {
 		t.Fatalf("overflow write = %d, %v", n, err)
 	}
-	if string(buffer.data) != "abcd" {
+	if string(buffer.data) != "abcx" {
 		t.Fatalf("unexpected capped output %q", buffer.data)
 	}
 }
