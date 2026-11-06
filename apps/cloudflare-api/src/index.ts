@@ -3104,6 +3104,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
 
   const deploymentId = crypto.randomUUID();
   let deploymentCreated = false;
+  let dispatchAccepted = false;
   try {
     const token = await githubInstallationToken(c.env, project.installationId, project.repositoryId);
     const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(project.productionBranch)}`, {
@@ -3151,6 +3152,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       }, dispatch.status === 404 ? 409 : 502);
     }
 
+    dispatchAccepted = true;
     await c.env.DB.batch([
       c.env.DB.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
         .bind(project.id, identity.organizationId),
@@ -3163,9 +3165,9 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       message: "GitHub Actions accepted the workflow dispatch. Build execution is not complete until the isolated runner reports a verified artifact.",
     }, 202);
   } catch (error) {
-    if (deploymentCreated) {
+    if (deploymentCreated && !dispatchAccepted) {
       await c.env.DB.prepare(
-        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Dispatch failed before GitHub accepted the workflow.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'GitHub did not accept the workflow dispatch.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
     }
     console.error("GitHub deployment dispatch failed:", error instanceof Error ? error.message : "unknown error");
