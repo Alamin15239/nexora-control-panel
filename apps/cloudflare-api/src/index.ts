@@ -1041,6 +1041,106 @@ app.post("/v1/agent/enroll", async (c) => {
   return c.json({ nodeId, serverId, secret, message: "Node enrolled. Store this secret securely; it is shown only once." }, 201);
 });
 
+app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
+  if (!c.env.ARTIFACTS) return c.json({ message: "Private deployment artifact storage is unavailable." }, 503);
+
+  const nodeId = c.req.header("X-Nexora-Node") ?? "";
+  const timestamp = c.req.header("X-Nexora-Timestamp") ?? "";
+  const nonce = c.req.header("X-Nexora-Nonce") ?? "";
+  const signature = (c.req.header("X-Nexora-Signature") ?? "").toLowerCase();
+  if (!nodeId || !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid agent authentication headers." }, 401);
+  }
+  const requestTime = Number(timestamp);
+  if (!Number.isSafeInteger(requestTime) || Math.abs(Date.now() / 1000 - requestTime) > 300) {
+    return c.json({ message: "Agent request timestamp is outside the allowed five-minute window." }, 401);
+  }
+
+  const credential = await c.env.DB.prepare(
+    "SELECT ac.secret_hash AS secretHash, ac.server_id AS serverId, ac.organization_id AS organizationId FROM agent_credentials ac JOIN servers s ON s.id = ac.server_id AND s.organization_id = ac.organization_id WHERE ac.node_id = ? AND ac.revoked_at IS NULL LIMIT 1",
+  ).bind(nodeId).first<{ secretHash: string; serverId: string; organizationId: string }>();
+  if (!credential) return c.json({ message: "Agent identity is unknown or revoked." }, 401);
+
+  const canonical = [timestamp, nonce, "GET", new URL(c.req.url).pathname, await sha256("")].join("\n");
+  const proofExpected = await hmacSha256(credential.secretHash, canonical);
+  if (!constantTimeEqual(proofExpected, signature)) {
+    return c.json({ message: "Agent signature is invalid." }, 401);
+  }
+  try {
+    await c.env.DB.prepare("INSERT INTO agent_nonces (node_id, nonce) VALUES (?, ?)").bind(nodeId, nonce).run();
+  } catch {
+    return c.json({ message: "Agent request nonce has already been used." }, 409);
+  }
+
+  const deployment = await c.env.DB.prepare(
+    \`SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
+            d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes,
+            d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId,
+            p.github_repository_id AS repositoryId
+     FROM github_deployments d
+     JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id
+     WHERE d.id = ? AND d.organization_id = ? AND h.server_id = ?
+       AND d.status = 'building' AND d.artifact_key IS NOT NULL
+       AND d.artifact_bytes IS NOT NULL AND d.artifact_sha256 IS NOT NULL
+     LIMIT 1\`,
+  ).bind(c.req.param("deploymentId"), credential.organizationId, credential.serverId).first<{
+    deploymentId: string;
+    organizationId: string;
+    projectId: string;
+    commitSha: string;
+    artifactKey: string;
+    artifactBytes: number;
+    artifactSha256: string;
+    hostingAccountId: string;
+    repositoryId: string;
+  }>();
+  if (!deployment) return c.json({ message: "No staged artifact is available for this server deployment." }, 404);
+  if (!Number.isSafeInteger(deployment.artifactBytes) || deployment.artifactBytes < 1 ||
+      deployment.artifactBytes > 100 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(deployment.artifactSha256)) {
+    return c.json({ message: "Staged artifact metadata is invalid." }, 409);
+  }
+
+  const object = await c.env.ARTIFACTS.get(deployment.artifactKey);
+  if (!object || object.size !== deployment.artifactBytes ||
+      object.customMetadata?.organizationId !== deployment.organizationId ||
+      object.customMetadata?.projectId !== deployment.projectId ||
+      object.customMetadata?.deploymentId !== deployment.deploymentId ||
+      object.customMetadata?.commitSha !== deployment.commitSha ||
+      object.customMetadata?.artifactSha256 !== deployment.artifactSha256) {
+    return c.json({ message: "Staged artifact integrity metadata does not match the deployment record." }, 409);
+  }
+
+  let envelope: string;
+  try {
+    envelope = await signDeploymentEnvelope(c.env, {
+      organizationId: deployment.organizationId,
+      projectId: deployment.projectId,
+      deploymentId: deployment.deploymentId,
+      hostingAccountId: deployment.hostingAccountId,
+      repositoryId: deployment.repositoryId,
+      commitSha: deployment.commitSha,
+      artifactSha256: deployment.artifactSha256,
+      artifactBytes: deployment.artifactBytes,
+    });
+  } catch (error) {
+    console.error("Deployment envelope signing unavailable:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Deployment envelope signing is not configured." }, 503);
+  }
+
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/gzip",
+      "Content-Length": String(deployment.artifactBytes),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Nexora-Deployment-Envelope": envelope,
+      "X-Nexora-Artifact-SHA256": deployment.artifactSha256,
+    },
+  });
+});
+
 app.post("/v1/agent/heartbeat", async (c) => {
   const nodeId = c.req.header("X-Nexora-Node") ?? "";
   const timestamp = c.req.header("X-Nexora-Timestamp") ?? "";
