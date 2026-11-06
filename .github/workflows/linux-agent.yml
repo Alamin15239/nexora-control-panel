@@ -45,7 +45,9 @@ jobs:
       - name: Verify CLI
         run: /tmp/nexora-agent version
       - name: Verify provisioning systemd unit
-        run: systemd-analyze verify systemd/nexora-provisiond.service
+        run: |
+          sudo install -D -o root -g root -m 0755 /tmp/nexora-provisiond /usr/local/sbin/nexora-provisiond
+          systemd-analyze verify systemd/nexora-provisiond.service
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
