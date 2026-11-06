@@ -27,11 +27,10 @@ func writeFrame(w io.Writer, payload []byte, limit int) error {
 	}
 	var header [frameHeaderBytes]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeAll(w, header[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(payload)
-	return err
+	return writeAll(w, payload)
 }
 
 func readFrame(r io.Reader, limit int) ([]byte, error) {
@@ -60,4 +59,18 @@ func unmarshalResult(payload []byte) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
