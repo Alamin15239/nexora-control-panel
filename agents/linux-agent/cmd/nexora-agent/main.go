@@ -22,6 +22,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/provisionipc"
 )
 
 const version = "0.8.0"
@@ -515,13 +517,11 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 		return nil, err
 	}
 
-	command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-	command.Stdin = bytes.NewReader(requestBody)
-
-	output, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("provisioning helper could not collect database usage")
+	result, err := provisionipc.Run(ctx, "", requestBody)
+	if err != nil || result.ExitCode != 0 {
+		return nil, fmt.Errorf("provisioning service could not collect database usage")
 	}
+	output := result.Stdout
 	if len(output) == 0 || len(output) > 64*1024 {
 		return nil, fmt.Errorf("database usage response exceeded its size limit")
 	}
@@ -575,6 +575,20 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 	return measurements, nil
 }
 
+func runProvisionerCombined(ctx context.Context, request []byte) ([]byte, error) {
+	result, err := provisionipc.Run(ctx, "", request)
+	if err != nil {
+		return nil, err
+	}
+	output := make([]byte, 0, len(result.Stdout)+len(result.Stderr))
+	output = append(output, result.Stdout...)
+	output = append(output, result.Stderr...)
+	if result.ExitCode != 0 {
+		return output, fmt.Errorf("provisioner exited with status %d", result.ExitCode)
+	}
+	return output, nil
+}
+
 func processNextJob(ctx context.Context, client *http.Client, cfg Config) error {
 	resp, err := signedRequest(ctx, client, cfg, http.MethodGet, "/v1/agent/jobs/next", nil)
 	if err != nil {
@@ -612,9 +626,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database job payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]string{"operation": "CREATE_DATABASE", "username": job.Account.Username, "databaseName": payload.DatabaseName})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 				fmt.Printf("Provisioning job %s (CREATE_DATABASE) completed for account %s\\n", job.ID, job.Account.Username)
@@ -640,9 +652,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database-user job payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]any{"operation": "CREATE_DATABASE_USER", "username": job.Account.Username, "databaseName": payload.DatabaseName, "databaseUserName": payload.DatabaseUserName, "privileges": payload.Privileges})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
 				success = true
 				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
@@ -662,9 +672,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database-user revocation payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName, "databaseName": payload.DatabaseName})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			_, commandErr := command.CombinedOutput()
+			_, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 			} else {
@@ -686,9 +694,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				"operation": "DELETE_DATABASE", "username": job.Account.Username,
 				"databaseName": payload.DatabaseName, "databaseUserNames": payload.DatabaseUserNames,
 			})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 			} else {
@@ -742,9 +748,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 					"operation": job.Operation, "username": job.Account.Username,
 					"backupId": payload.BackupID, "databaseNames": payload.DatabaseNames, "sha256": payload.SHA256,
 				})
-				command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-				command.Stdin = bytes.NewReader(encoded)
-				output, commandErr := command.CombinedOutput()
+				output, commandErr := runProvisionerCombined(ctx, encoded)
 				if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
 					success = true
 					resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)... )
@@ -763,9 +767,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			payload["operation"] = "FILE_MANAGER"
 			payload["username"] = job.Account.Username
 			encoded, _ := json.Marshal(payload)
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
 				success = true
 				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
@@ -799,9 +801,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 		}
 		if errorCode == "" {
 			encoded, _ := json.Marshal(payload)
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 				fmt.Printf("Provisioning job %s (%s) completed for account %s\\n", job.ID, job.Operation, job.Account.Username)
