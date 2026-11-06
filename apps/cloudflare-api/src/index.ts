@@ -3170,7 +3170,11 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'GitHub did not accept the workflow dispatch.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
     }
-    console.error("GitHub deployment dispatch failed:", error instanceof Error ? error.message : "unknown error");
+    const detail = error instanceof Error ? error.message : "unknown error";
+    console.error("GitHub deployment dispatch failed:", detail);
+    if (/UNIQUE constraint failed/i.test(detail)) {
+      return c.json({ message: "A deployment is already queued or running for this project." }, 409);
+    }
     return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
   }
 });
