@@ -278,3 +278,63 @@ func TestServerKeepsEncodedResponseWithinFrameLimit(t *testing.T) {
 		t.Fatalf("encoded response is %d bytes, limit is %d", len(payload), MaxResponseBytes)
 	}
 }
+
+
+func TestServerEnforcesConcurrentRequestLimit(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	markerDir := filepath.Join(dir, "active")
+	if err := os.Mkdir(markerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	quotedDir := "'" + strings.ReplaceAll(markerDir, "'", "'\\''") + "'"
+	script := "#!/bin/sh\\ntouch " + quotedDir + "/$$\\nsleep 3\\nrm -f " + quotedDir + "/$$\\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath, _ := startTestServer(t, uid, helper)
+	type outcome struct {
+		err error
+	}
+	results := make(chan outcome, maxConcurrentRequests)
+	for i := 0; i < maxConcurrentRequests; i++ {
+		go func() {
+			_, err := Run(context.Background(), socketPath, []byte("request"))
+			results <- outcome{err: err}
+		}()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(markerDir)
+		if err == nil && len(entries) == maxConcurrentRequests {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, err := os.ReadDir(markerDir)
+	if err != nil || len(entries) != maxConcurrentRequests {
+		t.Fatalf("expected %d active helpers, found %d (err=%v)", maxConcurrentRequests, len(entries), err)
+	}
+
+	// All worker slots are occupied. The next accepted connection must be
+	// closed without starting a fifth privileged helper.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := Run(ctx, socketPath, []byte("overflow")); err == nil {
+		t.Fatal("expected request beyond concurrency limit to be rejected")
+	}
+
+	for i := 0; i < maxConcurrentRequests; i++ {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatalf("active request %d failed: %v", i+1, got.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for active helper requests")
+		}
+	}
+}
