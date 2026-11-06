@@ -341,3 +341,30 @@ func TestServerEnforcesConcurrentRequestLimit(t *testing.T) {
 		}
 	}
 }
+
+
+func TestServerReportsUnexpectedListenerClose(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "provision.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &Server{AllowedUID: uint32(os.Getuid()), HelperPath: "/usr/bin/cat"}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve(ctx, listener)
+	}()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("unexpected listener close must be reported as an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not return after listener close")
+	}
+}
