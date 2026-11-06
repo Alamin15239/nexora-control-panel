@@ -3205,6 +3205,94 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   }, 201);
 });
 
+
+app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
+  const authorization = c.req.header("authorization") ?? "";
+  const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
+  if (!match) return c.json({ message: "A valid one-time upload token is required." }, 401);
+  if (!c.env.ARTIFACTS) return c.json({ message: "Private artifact storage is not configured." }, 503);
+  if ((c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase() !== "application/gzip") {
+    return c.json({ message: "Artifact must be a gzip-compressed tar archive." }, 415);
+  }
+
+  const contentLength = Number(c.req.header("content-length"));
+  const maxBytes = 100 * 1024 * 1024;
+  if (!Number.isSafeInteger(contentLength) || contentLength < 1 || contentLength > maxBytes) {
+    return c.json({ message: "Artifact size must be between 1 byte and 100 MiB." }, 413);
+  }
+  if (!c.req.raw.body) return c.json({ message: "Artifact body is required." }, 400);
+
+  const deploymentId = c.req.param("deploymentId");
+  const tokenHash = await sha256(match[1]);
+  const token = await c.env.DB.prepare(
+    "SELECT t.organization_id AS organizationId, t.project_id AS projectId, t.deployment_id AS deploymentId, t.commit_sha AS commitSha, d.status FROM github_deployment_upload_tokens t JOIN github_deployments d ON d.id = t.deployment_id AND d.organization_id = t.organization_id WHERE t.token_hash = ? AND t.deployment_id = ? AND t.consumed_at IS NULL AND t.expires_at > ? LIMIT 1",
+  ).bind(tokenHash, deploymentId, new Date().toISOString()).first<{
+    organizationId: string; projectId: string; deploymentId: string; commitSha: string; status: string;
+  }>();
+  if (!token || token.status !== "building") {
+    return c.json({ message: "Upload token is invalid, expired, or already used." }, 401);
+  }
+
+  const consumed = await c.env.DB.prepare(
+    "UPDATE github_deployment_upload_tokens SET consumed_at = datetime('now') WHERE token_hash = ? AND deployment_id = ? AND consumed_at IS NULL AND expires_at > datetime('now')",
+  ).bind(tokenHash, deploymentId).run();
+  if ((consumed.meta.changes ?? 0) !== 1) return c.json({ message: "Upload token has already been consumed." }, 409);
+
+  const objectKey = "staging/" + token.organizationId + "/" + token.projectId + "/" + token.deploymentId + "/" + randomHex(16) + ".tar.gz";
+  let receivedBytes = 0;
+  const reader = c.req.raw.body.getReader();
+  const limitedBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          if (receivedBytes !== contentLength) throw new Error("Content-Length mismatch");
+          controller.close();
+          return;
+        }
+        receivedBytes += chunk.value.byteLength;
+        if (receivedBytes > maxBytes || receivedBytes > contentLength) {
+          throw new Error("Artifact exceeds its declared or maximum size");
+        }
+        controller.enqueue(chunk.value);
+      } catch (error) {
+        controller.error(error);
+        await reader.cancel(error).catch(() => undefined);
+      }
+    },
+    async cancel(reason) {
+      await reader.cancel(reason);
+    },
+  });
+
+  try {
+    await c.env.ARTIFACTS.put(objectKey, limitedBody, {
+      httpMetadata: { contentType: "application/gzip" },
+      customMetadata: {
+        organizationId: token.organizationId,
+        projectId: token.projectId,
+        deploymentId: token.deploymentId,
+        commitSha: token.commitSha,
+      },
+    });
+    const updated = await c.env.DB.prepare(
+      "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
+    ).bind(objectKey, receivedBytes, token.deploymentId, token.organizationId).run();
+    if ((updated.meta.changes ?? 0) !== 1) {
+      await c.env.ARTIFACTS.delete(objectKey);
+      return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
+    }
+    return c.json({ received: true, deploymentId: token.deploymentId, bytes: receivedBytes }, 202);
+  } catch (error) {
+    await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
+    await c.env.DB.prepare(
+      "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
+    ).bind(token.deploymentId, token.organizationId).run().catch(() => undefined);
+    console.error("GitHub artifact upload failed:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Artifact upload failed; the one-time capability has been consumed." }, 502);
+  }
+});
+
 app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
