@@ -18,7 +18,8 @@ const (
 type Result struct {
 	ExitCode int    `json:"exitCode"`
 	Stdout   []byte `json:"stdout"`
-	Stderr   []byte `json:"stderr"`
+	Stderr          []byte `json:"stderr"`
+	OutputTruncated bool   `json:"outputTruncated,omitempty"`
 }
 
 func writeFrame(w io.Writer, payload []byte, limit int) error {

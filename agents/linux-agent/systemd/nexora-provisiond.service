@@ -33,7 +33,9 @@ ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
 LockPersonality=true
-RestrictSUIDSGID=true
+# The one-shot helper must call setgroups/setgid/setuid after chroot for File Manager.
+# Keep this false; the helper starts as root and performs an explicit privilege drop.
+RestrictSUIDSGID=false
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SYS_CHROOT

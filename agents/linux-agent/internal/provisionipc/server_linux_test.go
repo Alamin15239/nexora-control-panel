@@ -190,3 +190,220 @@ func TestServerCancellationKillsHelperProcessGroup(t *testing.T) {
 		t.Fatalf("helper child process %d survived server cancellation", childPID)
 	}
 }
+
+
+func TestClientDisconnectCancelsHelperProcessGroup(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	pidFile := filepath.Join(dir, "child.pid")
+	quotedPIDFile := "'" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'"
+	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + quotedPIDFile + "\nwait\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath, _ := startTestServer(t, uid, helper)
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(conn, []byte("request"), MaxRequestBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var childPID int
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			childPID, readErr = strconv.Atoi(strings.TrimSpace(string(data)))
+			if readErr == nil && childPID > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPID <= 0 {
+		_ = conn.Close()
+		t.Fatal("helper did not start its child process")
+	}
+	defer func() { _ = syscall.Kill(childPID, syscall.SIGKILL) }()
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile("/proc/" + strconv.Itoa(childPID) + "/stat")
+		if errors.Is(readErr, os.ErrNotExist) {
+			return
+		}
+		if readErr == nil {
+			closeParen := strings.LastIndex(string(data), ")")
+			if closeParen >= 0 {
+				fields := strings.Fields(string(data)[closeParen+1:])
+				if len(fields) > 0 && fields[0] == "Z" {
+					return
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("helper child process %d survived client disconnect", childPID)
+}
+
+func TestServerKeepsEncodedResponseWithinFrameLimit(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	script := "#!/bin/sh\n/usr/bin/head -c 6291456 /dev/zero\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath, _ := startTestServer(t, uid, helper)
+	result, err := Run(context.Background(), socketPath, []byte("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Stdout) > maxCapturedStreamBytes || len(result.Stderr) > maxCapturedStreamBytes {
+		t.Fatalf("captured output exceeded per-stream cap: stdout=%d stderr=%d", len(result.Stdout), len(result.Stderr))
+	}
+	if !result.OutputTruncated {
+		t.Fatal("expected response to report truncated helper output")
+	}
+	payload, err := marshalResult(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > MaxResponseBytes {
+		t.Fatalf("encoded response is %d bytes, limit is %d", len(payload), MaxResponseBytes)
+	}
+}
+
+
+func TestServerEnforcesConcurrentRequestLimit(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	markerDir := filepath.Join(dir, "active")
+	if err := os.Mkdir(markerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	quotedDir := "'" + strings.ReplaceAll(markerDir, "'", "'\\''") + "'"
+	script := "#!/bin/sh\ntouch " + quotedDir + "/$$\nsleep 3\nrm -f " + quotedDir + "/$$\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath, _ := startTestServer(t, uid, helper)
+	type outcome struct {
+		err error
+	}
+	results := make(chan outcome, maxConcurrentRequests)
+	for i := 0; i < maxConcurrentRequests; i++ {
+		go func() {
+			_, err := Run(context.Background(), socketPath, []byte("request"))
+			results <- outcome{err: err}
+		}()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(markerDir)
+		if err == nil && len(entries) == maxConcurrentRequests {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, err := os.ReadDir(markerDir)
+	if err != nil || len(entries) != maxConcurrentRequests {
+		t.Fatalf("expected %d active helpers, found %d (err=%v)", maxConcurrentRequests, len(entries), err)
+	}
+
+	// All worker slots are occupied. The next accepted connection must be
+	// closed without starting a fifth privileged helper.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := Run(ctx, socketPath, []byte("overflow")); err == nil {
+		t.Fatal("expected request beyond concurrency limit to be rejected")
+	}
+
+	for i := 0; i < maxConcurrentRequests; i++ {
+		select {
+		case got := <-results:
+			if got.err != nil {
+				t.Fatalf("active request %d failed: %v", i+1, got.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for active helper requests")
+		}
+	}
+}
+
+
+func TestServerReportsUnexpectedListenerClose(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "provision.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &Server{AllowedUID: uint32(os.Getuid()), HelperPath: "/usr/bin/cat"}
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve(ctx, listener)
+	}()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("unexpected listener close must be reported as an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not return after listener close")
+	}
+}
+
+
+func TestServerRequestReadDeadline(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "provision.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &Server{
+		AllowedUID:         uint32(os.Getuid()),
+		HelperPath:         "/usr/bin/cat",
+		requestReadTimeout: 100 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var response [1]byte
+	if n, readErr := conn.Read(response[:]); n != 0 || !(errors.Is(readErr, io.EOF) || errors.Is(readErr, syscall.ECONNRESET)) {
+		t.Fatalf("idle request connection was not closed at read deadline: read=%d err=%v", n, readErr)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not stop after cancellation")
+	}
+}

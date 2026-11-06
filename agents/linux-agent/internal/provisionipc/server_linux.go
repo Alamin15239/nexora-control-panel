@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -17,27 +18,35 @@ import (
 
 const (
 	maxConcurrentRequests = 4
+	requestReadTimeout    = 10 * time.Second
 	helperTimeout         = 2 * time.Minute
+	// JSON encodes []byte as base64. Keeping the combined raw streams below
+	// half the frame budget leaves ample room for base64 expansion and JSON.
+	maxCapturedStreamBytes = MaxResponseBytes / 4
 )
 
 type Server struct {
-	AllowedUID uint32
-	HelperPath string
+	AllowedUID        uint32
+	HelperPath        string
+	requestReadTimeout time.Duration // zero uses the production default
 }
 
 type cappedBuffer struct {
-	data  []byte
-	limit int
+	data      []byte
+	limit     int
+	truncated bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
 	remaining := b.limit - len(b.data)
 	if remaining <= 0 {
-		return 0, errors.New("provisioner output limit exceeded")
+		b.truncated = true
+		return len(p), nil
 	}
 	if len(p) > remaining {
 		b.data = append(b.data, p[:remaining]...)
-		return remaining, errors.New("provisioner output limit exceeded")
+		b.truncated = true
+		return len(p), nil
 	}
 	b.data = append(b.data, p...)
 	return len(p), nil
@@ -73,18 +82,29 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 	}
 	slots := make(chan struct{}, maxConcurrentRequests)
 	var workers sync.WaitGroup
+	shutdownWatcherDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-shutdownWatcherDone:
+		}
 	}()
+	defer close(shutdownWatcherDone)
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
 				workers.Wait()
 				return nil
 			}
-			continue
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Temporary() {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			workers.Wait()
+			return fmt.Errorf("accept provisioning connection: %w", err)
 		}
 		select {
 		case slots <- struct{}{}:
@@ -102,7 +122,11 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 }
 
 func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
-	_ = conn.SetDeadline(time.Now().Add(helperTimeout + 5*time.Second))
+	readTimeout := s.requestReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = requestReadTimeout
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	uid, err := peerUID(conn)
 	if err != nil || uid != s.AllowedUID {
 		return
@@ -111,12 +135,27 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	if err != nil {
 		return
 	}
-	var trailing [1]byte
-	if n, readErr := conn.Read(trailing[:]); n != 0 || readErr != io.EOF {
+	if err := conn.SetDeadline(time.Now().Add(helperTimeout + 5*time.Second)); err != nil {
 		return
 	}
+
 	ctx, cancel := context.WithTimeout(parent, helperTimeout)
 	defer cancel()
+
+	// Keep the client write side open while the helper runs. EOF means the
+	// client disconnected; any additional byte means it violated the
+	// one-request protocol. Either condition cancels and reaps the helper.
+	disconnected := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		var extra [1]byte
+		n, readErr := conn.Read(extra[:])
+		if n > 0 || errors.Is(readErr, io.EOF) {
+			close(disconnected)
+			cancel()
+		}
+	}()
 
 	command := exec.CommandContext(ctx, s.HelperPath)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -133,8 +172,8 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	command.WaitDelay = 2 * time.Second
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	command.Stdin = bytesReader(request)
-	stdout := &cappedBuffer{limit: MaxResponseBytes / 2}
-	stderr := &cappedBuffer{limit: MaxResponseBytes / 2}
+	stdout := &cappedBuffer{limit: maxCapturedStreamBytes}
+	stderr := &cappedBuffer{limit: maxCapturedStreamBytes}
 	command.Stdout = stdout
 	command.Stderr = stderr
 
@@ -146,10 +185,24 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 			exitCode = exitErr.ExitCode()
 		}
 		if ctx.Err() != nil && len(stderr.data) == 0 {
-			stderr.data = []byte("provisioning request timed out")
+			stderr.data = []byte("provisioning request timed out or was cancelled")
 		}
 	}
-	result := Result{ExitCode: exitCode, Stdout: stdout.data, Stderr: stderr.data}
+
+	// Stop the connection watcher without affecting the write side used for
+	// the response. A read timeout here is expected after the helper exits.
+	_ = conn.SetReadDeadline(time.Now())
+	select {
+	case <-watcherDone:
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-disconnected:
+		return
+	default:
+	}
+
+	result := Result{ExitCode: exitCode, Stdout: stdout.data, Stderr: stderr.data, OutputTruncated: stdout.truncated || stderr.truncated}
 	payload, err := json.Marshal(result)
 	if err != nil || len(payload) > MaxResponseBytes {
 		payload, _ = json.Marshal(Result{ExitCode: 1, Stderr: []byte("provisioner response exceeded the IPC size limit")})
