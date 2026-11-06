@@ -26,8 +26,9 @@ const (
 )
 
 type Server struct {
-	AllowedUID uint32
-	HelperPath string
+	AllowedUID        uint32
+	HelperPath        string
+	requestReadTimeout time.Duration // zero uses the production default
 }
 
 type cappedBuffer struct {
@@ -121,7 +122,11 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 }
 
 func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
-	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
+	readTimeout := s.requestReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = requestReadTimeout
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 	uid, err := peerUID(conn)
 	if err != nil || uid != s.AllowedUID {
 		return
