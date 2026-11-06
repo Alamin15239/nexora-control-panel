@@ -14,7 +14,7 @@ Migration `0012_github_deployments.sql` stores:
 - a repository-to-hosting-account project configuration;
 - immutable commit-specific deployment records and bounded log excerpts.
 
-The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption, installation repository listing, and project-to-hosting-account configuration. Access and refresh tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. When GitHub token expiration is enabled, the API refreshes tokens shortly before expiry and atomically stores the rotated access/refresh token pair. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
+The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption and refresh-token rotation, installation repository listing, and project-to-hosting-account configuration. The API verifies a selected repository against the chosen installation before saving it. Disconnect attempts to revoke the GitHub grant and always removes local credentials; linked project configuration is removed by the foreign-key cascade, while published website files are untouched. Access and refresh tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. When GitHub token expiration is enabled, the API refreshes tokens shortly before expiry and atomically stores the rotated access/refresh token pair. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
 
 ## Deployment pipeline
 
@@ -45,6 +45,7 @@ Required Worker secrets/vars:
 - `GITHUB_OAUTH_CALLBACK_URL` (exact HTTPS callback URL configured in the GitHub App)
 - `GITHUB_TOKEN_ENCRYPTION_KEY` (32-byte hex key)
 - `DASHBOARD_URL` (HTTPS dashboard origin used for the OAuth completion redirect)
+- For the future build worker only: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, used to mint short-lived installation access tokens. Keep the private key off the dashboard and out of browser/API responses.
 - A dedicated build-worker runtime and authenticated job/result protocol
 
 The dashboard currently provides GitHub connection, repository selection, and project configuration. Actual builds remain disabled until the isolated build worker is implemented and deployed. The OAuth configuration must be added to the Worker before the Connect GitHub action can succeed.
