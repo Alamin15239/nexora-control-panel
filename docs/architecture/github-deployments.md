@@ -108,7 +108,7 @@ The API now exposes `POST /v1/github/deployments/:deploymentId/oidc/exchange`. I
 
 The exchange creates a random 256-bit upload capability, stores only its SHA-256 hash, binds it to one organization/project/deployment/repository/branch/commit and GitHub run ID/attempt, and expires it after five minutes. A unique deployment constraint and conditional state transition allow only one runner claim. The capability is withheld unless a private R2 bucket is bound as `ARTIFACTS`; no bucket binding is currently configured, so the exchange returns HTTP 503 rather than issuing a credential that cannot be used. Migration `0016_github_oidc_artifact_capabilities.sql` adds the capability table and verified run identity columns.
 
-The artifact PUT endpoint, streaming size enforcement, archive validation, and publisher are not implemented yet. Do not add an `ARTIFACTS` binding or apply the migration in production until the storage bucket and upload/publish lifecycle are ready and tested.
+The artifact PUT endpoint and streaming size enforcement are implemented. Archive validation and the publisher are not implemented yet. Do not add an `ARTIFACTS` binding or apply the migration in production until the storage bucket and upload/publish lifecycle are ready and tested.
 
 
 ## Private artifact upload endpoint
