@@ -4,17 +4,21 @@ on:
   push:
     paths:
       - "apps/api/**"
+      - "apps/cloudflare-api/**"
       - "packages/database/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/api.yml"
+      - ".github/workflows/deploy-api.yml"
   pull_request:
     paths:
       - "apps/api/**"
+      - "apps/cloudflare-api/**"
       - "packages/database/**"
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - ".github/workflows/api.yml"
+      - ".github/workflows/deploy-api.yml"
 
 permissions:
   contents: read
@@ -29,9 +33,9 @@ jobs:
           version: 9.15.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Install workspace dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Generate Prisma client
         env:
           DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora
@@ -40,6 +44,8 @@ jobs:
         run: pnpm --filter @nexora/api test
       - name: API typecheck
         run: pnpm --filter @nexora/api typecheck
+      - name: Cloudflare API typecheck
+        run: pnpm --filter @nexora/cloudflare-api typecheck
       - name: Validate Prisma schema
         env:
           DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora
