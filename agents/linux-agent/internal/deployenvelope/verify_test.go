@@ -118,7 +118,7 @@ func TestVerifyRejectsUnknownClaimsAndMalformedToken(t *testing.T) {
 	expected := testExpected()
 	claims := validClaims(expected, now)
 	raw, _ := json.Marshal(claims)
-	raw = append(raw[:len(raw)-1], []byte(\`, "untrusted": true}\`)...)
+	raw = append(raw[:len(raw)-1], []byte(", \"untrusted\": true}")...)
 	headerJSON, _ := json.Marshal(header{Algorithm: "RS256", Type: "JWT", KeyID: "test-key-1"})
 	encode := base64.RawURLEncoding.EncodeToString
 	unsigned := encode(headerJSON) + "." + encode(raw)
