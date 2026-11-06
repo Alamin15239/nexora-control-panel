@@ -43,13 +43,19 @@ func normalizeArchivePath(name string, kind byte) (string, bool, error) {
 		return "", false, fmt.Errorf("absolute archive path is not allowed: %q", name)
 	}
 	parts := strings.Split(name, "/")
-	for i, part := range parts {
+	firstComponent := ""
+	for _, part := range parts {
 		if part == ".." {
 			return "", false, fmt.Errorf("path traversal is not allowed: %q", name)
 		}
-		if i == 0 && strings.Contains(part, ":") {
-			return "", false, fmt.Errorf("volume-qualified path is not allowed: %q", name)
+		if part != "" && part != "." && firstComponent == "" {
+			firstComponent = part
 		}
+	}
+	// Ignore leading "./" components before checking for a drive/volume prefix.
+	// Otherwise "./C:/site/index.html" would bypass the volume-qualified check.
+	if strings.Contains(firstComponent, ":") {
+		return "", false, fmt.Errorf("volume-qualified path is not allowed: %q", name)
 	}
 	clean := path.Clean(name)
 	if clean == "." {
