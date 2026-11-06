@@ -292,7 +292,7 @@ func TestServerEnforcesConcurrentRequestLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	quotedDir := "'" + strings.ReplaceAll(markerDir, "'", "'\\''") + "'"
-	script := "#!/bin/sh\\ntouch " + quotedDir + "/$$\\nsleep 3\\nrm -f " + quotedDir + "/$$\\n"
+	script := "#!/bin/sh\ntouch " + quotedDir + "/$$\nsleep 3\nrm -f " + quotedDir + "/$$\n"
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
