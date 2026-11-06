@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os/exec"
@@ -111,6 +110,10 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	if err != nil {
 		return
 	}
+	var trailing [1]byte
+	if n, readErr := conn.Read(trailing[:]); n != 0 || readErr != io.EOF {
+		return
+	}
 	ctx, cancel := context.WithTimeout(parent, helperTimeout)
 	defer cancel()
 
@@ -158,4 +161,3 @@ func (r *byteReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-var _ = fmt.Sprintf
