@@ -109,6 +109,8 @@ The Go package `internal/deployenvelope` now verifies compact JWS deployment env
 
 The required signed claims bind issuer, single audience, organization ID, project ID, deployment ID, hosting account ID, immutable GitHub repository ID, commit SHA, artifact SHA-256, exact artifact byte count, unique JTI, issued-at, and expiry. The caller supplies the expected deployment identity and trusted public-key ring. The verifier does not fetch keys, load mutable key files, persist replay state, create files, or authorize a filesystem destination. The receiver must provide a root-owned pinned key ring, enforce JTI single-use/revocation durably, and compare the streamed byte count and SHA-256 with the verified claims before finalizing the staged file.
 
+The verifier exposes two APIs: `Verify` additionally binds claims to caller-supplied expected deployment identity, while `VerifySigned` verifies the pinned-key signature, issuer, audience, strict claim structure, and time bounds and returns signed identity claims for a receiver to authorize against local server/account state. `VerifySigned` does not itself authorize an account or prevent replay. A receiver must reject envelopes whose organization/server/account mapping is not present in its own trusted control-plane state and must atomically consume the JTI/deployment before accepting bytes.
+
 The Worker signing endpoint/key distribution and receiver integration are not implemented. No private signing key or public key has been provisioned. This package is a tested cryptographic boundary primitive, not an enabled deployment path.
 
 ### Explicit implementation blockers
