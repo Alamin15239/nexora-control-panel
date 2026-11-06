@@ -3187,8 +3187,8 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
         runId, runAttempt, expiresAt, deployment.id, deployment.organizationId,
       ),
       c.env.DB.prepare(
-        "UPDATE github_deployments SET status = 'building', started_at = datetime('now') WHERE id = ? AND organization_id = ? AND status = 'queued'",
-      ).bind(deployment.id, deployment.organizationId),
+        "UPDATE github_deployments SET status = 'building', started_at = datetime('now'), workflow_run_id = ?, workflow_run_attempt = ?, workflow_sha = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
+      ).bind(runId, runAttempt, workflowSha, deployment.id, deployment.organizationId),
     ]);
     if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
       return c.json({ message: "A runner has already claimed this deployment." }, 409);
