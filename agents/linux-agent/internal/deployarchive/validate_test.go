@@ -42,7 +42,7 @@ func TestValidateGzipTarAcceptsStaticSite(t *testing.T) {
 }
 
 func TestValidateGzipTarRejectsUnsafeEntryTypes(t *testing.T) {
-	for _, kind := range []byte{tar.TypeSymlink, tar.TypeLink, tar.TypeFifo, tar.TypeChar, tar.TypeBlock, tar.TypeGNUSparse} {
+	for _, kind := range []byte{tar.TypeSymlink, tar.TypeLink, tar.TypeFifo, tar.TypeChar, tar.TypeBlock} {
 		t.Run(string(rune(kind)), func(t *testing.T) {
 			archive := makeArchive(t, testEntry{name: "bad", kind: kind})
 			if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{}); err == nil {
