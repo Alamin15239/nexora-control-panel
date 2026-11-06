@@ -198,7 +198,7 @@ func TestClientDisconnectCancelsHelperProcessGroup(t *testing.T) {
 	helper := filepath.Join(dir, "helper.sh")
 	pidFile := filepath.Join(dir, "child.pid")
 	quotedPIDFile := "'" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'"
-	script := "#!/bin/sh\\n/bin/sleep 30 &\\necho $! > " + quotedPIDFile + "\\nwait\\n"
+	script := "#!/bin/sh\n/bin/sleep 30 &\necho $! > " + quotedPIDFile + "\nwait\n"
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestServerKeepsEncodedResponseWithinFrameLimit(t *testing.T) {
 	uid := uint32(os.Getuid())
 	dir := t.TempDir()
 	helper := filepath.Join(dir, "helper.sh")
-	script := "#!/bin/sh\\n/usr/bin/head -c 6291456 /dev/zero\\n"
+	script := "#!/bin/sh\n/usr/bin/head -c 6291456 /dev/zero\n"
 	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
