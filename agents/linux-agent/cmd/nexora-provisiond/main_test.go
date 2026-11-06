@@ -57,3 +57,58 @@ func TestListenProvisionSocketRefusesExistingPath(t *testing.T) {
 		t.Fatalf("existing path was modified: %q", data)
 	}
 }
+
+func TestListenProvisionSocketRefusesExistingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "provision.sock")
+	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if listener, err := listenProvisionSocket(link, os.Getuid(), os.Getgid()); err == nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		t.Fatal("expected existing symlink path to be rejected")
+	}
+	resolved, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != target {
+		t.Fatalf("existing symlink was modified: %q", resolved)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep" {
+		t.Fatalf("symlink target was modified: %q", data)
+	}
+}
+
+func TestListenProvisionSocketRefusesExistingUnixSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "existing.sock")
+	original, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+
+	if listener, err := listenProvisionSocket(socketPath, os.Getuid(), os.Getgid()); err == nil {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		t.Fatal("expected existing Unix socket path to be rejected")
+	}
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("existing socket path was replaced: %v", info.Mode())
+	}
+}
