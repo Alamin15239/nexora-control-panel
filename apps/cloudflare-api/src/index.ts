@@ -3311,7 +3311,7 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
         projectId: token.projectId,
         deploymentId: token.deploymentId,
         commitSha: token.commitSha,
-        artifactSha256,
+        artifactSha256: artifactSHA256,
       },
     });
     const updated = await c.env.DB.prepare(
