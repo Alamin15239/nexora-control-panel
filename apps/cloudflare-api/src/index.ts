@@ -17,6 +17,8 @@ type Bindings = {
   GITHUB_APP_CLIENT_SECRET?: string;
   GITHUB_OAUTH_CALLBACK_URL?: string;
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
   DASHBOARD_URL?: string;
 };
 
@@ -2807,6 +2809,54 @@ async function githubAccessToken(env: Bindings, db: D1Database, organizationId: 
   }
 }
 
+
+function base64Url(bytes: Uint8Array): string {
+  return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))
+    .replace(/=/g, "").replace(/\\+/g, "-").replace(/\\//g, "_");
+}
+
+function githubPrivateKeyDer(pem: string): Uint8Array {
+  const normalized = pem.replace(/\\r/g, "").trim();
+  const match = /^-----BEGIN PRIVATE KEY-----([\\s\\S]+)-----END PRIVATE KEY-----$/.exec(normalized);
+  if (!match) throw new Error("GitHub App private key must be PKCS#8 PEM");
+  const binary = atob(match[1].replace(/\\s/g, ""));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function githubAppJwt(env: Bindings): Promise<string> {
+  const appId = env.GITHUB_APP_ID ?? "";
+  if (!/^\\d+$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY) throw new Error("GitHub App signing credentials are not configured");
+  const header = base64Url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64Url(new TextEncoder().encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId })));
+  const message = header + "." + payload;
+  const key = await crypto.subtle.importKey("pkcs8", githubPrivateKeyDer(env.GITHUB_APP_PRIVATE_KEY), {
+    name: "RSASSA-PKCS1-v1_5", hash: "SHA-256",
+  }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(message));
+  return message + "." + base64Url(new Uint8Array(signature));
+}
+
+async function githubInstallationToken(env: Bindings, installationId: string, repositoryId: string): Promise<string> {
+  const jwt = await githubAppJwt(env);
+  const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json",
+      "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "Nexora-Control-Panel",
+    },
+    body: JSON.stringify({
+      repository_ids: [Number(repositoryId)],
+      permissions: { actions: "write", contents: "read", metadata: "read" },
+    }),
+  });
+  if (!response.ok) throw new Error("Unable to mint a repository-scoped GitHub installation token");
+  const data = await response.json() as { token?: string; expires_at?: string };
+  if (!data.token || !data.expires_at || Date.parse(data.expires_at) <= Date.now()) throw new Error("GitHub returned an invalid installation token");
+  return data.token;
+}
+
 function githubDashboardRedirect(env: Bindings, status: string): string {
   const base = env.DASHBOARD_URL ?? "";
   let url: URL;
@@ -3001,6 +3051,105 @@ app.get("/v1/github/projects", async (c) => {
      FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
   ).bind(identity.organizationId).all();
   return c.json({ projects: result.results ?? [] });
+});
+
+
+app.post("/v1/github/projects/:projectId/deployments", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!c.env.GITHUB_APP_ID || !c.env.GITHUB_APP_PRIVATE_KEY) {
+    return c.json({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
+  }
+  const project = await c.env.DB.prepare(
+    `SELECT id, github_repository_id AS repositoryId, repository_full_name AS repositoryFullName,
+            github_installation_id AS installationId, production_branch AS productionBranch, status
+     FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("projectId"), identity.organizationId).first<{
+    id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
+    productionBranch: string; status: string;
+  }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  if (!project.installationId) return c.json({ message: "Reconnect the GitHub App and relink this repository." }, 409);
+  const active = await c.env.DB.prepare(
+    "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
+  ).bind(project.id).first<{ id: string }>();
+  if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
+
+  let deploymentId = crypto.randomUUID();
+  try {
+    const token = await githubInstallationToken(c.env, project.installationId, project.repositoryId);
+    const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(project.productionBranch)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Nexora-Control-Panel",
+      },
+    });
+    if (!refResponse.ok) return c.json({ message: "Unable to resolve the configured production branch in GitHub." }, 502);
+    const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
+    if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
+
+    const workflowPath = ".github/workflows/nexora-deploy.yml";
+    const dispatch = await fetch(
+      `https://api.github.com/repos/${project.repositoryFullName}/actions/workflows/${encodeURIComponent(workflowPath)}/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
+          "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "Nexora-Control-Panel",
+        },
+        body: JSON.stringify({
+          ref: project.productionBranch,
+          inputs: { deployment_id: deploymentId, commit_sha: commitData.sha },
+        }),
+      },
+    );
+    if (dispatch.status !== 204) {
+      return c.json({
+        message: dispatch.status === 404
+          ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
+          : "GitHub did not accept the deployment workflow dispatch.",
+      }, dispatch.status === 404 ? 409 : 502);
+    }
+
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
+         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
+      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha, project.productionBranch,
+        (commitData.commit?.message ?? "").slice(0, 500)),
+      c.env.DB.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
+        .bind(project.id, identity.organizationId),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
+        .bind(crypto.randomUUID(), identity.organizationId, identity.id, deploymentId,
+          JSON.stringify({ repository: project.repositoryFullName, branch: project.productionBranch, commitSha: commitData.sha })),
+    ]);
+    return c.json({
+      deployment: { id: deploymentId, commitSha: commitData.sha, branch: project.productionBranch, status: "queued" },
+      message: "GitHub Actions accepted the workflow dispatch. Build execution is not complete until the isolated runner reports a verified artifact.",
+    }, 202);
+  } catch (error) {
+    console.error("GitHub deployment dispatch failed:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions." }, 502);
+  }
+});
+
+app.get("/v1/github/projects/:projectId/deployments", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const project = await c.env.DB.prepare(
+    "SELECT id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("projectId"), identity.organizationId).first<{ id: string }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  const rows = await c.env.DB.prepare(
+    `SELECT id, commit_sha AS commitSha, branch, trigger_type AS triggerType, status,
+            commit_message AS commitMessage, deployment_url AS deploymentUrl, log_excerpt AS logExcerpt,
+            requested_at AS requestedAt, started_at AS startedAt, finished_at AS finishedAt
+     FROM github_deployments WHERE project_id = ? AND organization_id = ?
+     ORDER BY requested_at DESC LIMIT 50`,
+  ).bind(project.id, identity.organizationId).all();
+  return c.json({ deployments: rows.results ?? [] });
 });
 
 app.delete("/v1/github/connection", async (c) => {
