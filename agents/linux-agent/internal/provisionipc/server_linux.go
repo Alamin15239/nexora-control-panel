@@ -18,6 +18,9 @@ import (
 const (
 	maxConcurrentRequests = 4
 	helperTimeout         = 2 * time.Minute
+	// JSON encodes []byte as base64. Keeping the combined raw streams below
+	// half the frame budget leaves ample room for base64 expansion and JSON.
+	maxCapturedStreamBytes = MaxResponseBytes / 4
 )
 
 type Server struct {
@@ -111,12 +114,24 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	if err != nil {
 		return
 	}
-	var trailing [1]byte
-	if n, readErr := conn.Read(trailing[:]); n != 0 || readErr != io.EOF {
-		return
-	}
+
 	ctx, cancel := context.WithTimeout(parent, helperTimeout)
 	defer cancel()
+
+	// Keep the client write side open while the helper runs. EOF means the
+	// client disconnected; any additional byte means it violated the
+	// one-request protocol. Either condition cancels and reaps the helper.
+	disconnected := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		var extra [1]byte
+		n, readErr := conn.Read(extra[:])
+		if n > 0 || errors.Is(readErr, io.EOF) {
+			close(disconnected)
+			cancel()
+		}
+	}()
 
 	command := exec.CommandContext(ctx, s.HelperPath)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -133,8 +148,8 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	command.WaitDelay = 2 * time.Second
 	command.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8"}
 	command.Stdin = bytesReader(request)
-	stdout := &cappedBuffer{limit: MaxResponseBytes / 2}
-	stderr := &cappedBuffer{limit: MaxResponseBytes / 2}
+	stdout := &cappedBuffer{limit: maxCapturedStreamBytes}
+	stderr := &cappedBuffer{limit: maxCapturedStreamBytes}
 	command.Stdout = stdout
 	command.Stderr = stderr
 
@@ -146,9 +161,23 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 			exitCode = exitErr.ExitCode()
 		}
 		if ctx.Err() != nil && len(stderr.data) == 0 {
-			stderr.data = []byte("provisioning request timed out")
+			stderr.data = []byte("provisioning request timed out or was cancelled")
 		}
 	}
+
+	// Stop the connection watcher without affecting the write side used for
+	// the response. A read timeout here is expected after the helper exits.
+	_ = conn.SetReadDeadline(time.Now())
+	select {
+	case <-watcherDone:
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case <-disconnected:
+		return
+	default:
+	}
+
 	result := Result{ExitCode: exitCode, Stdout: stdout.data, Stderr: stderr.data}
 	payload, err := json.Marshal(result)
 	if err != nil || len(payload) > MaxResponseBytes {
