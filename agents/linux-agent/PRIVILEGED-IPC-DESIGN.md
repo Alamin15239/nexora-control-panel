@@ -46,7 +46,7 @@ The daemon must use a fixed executable path and a fixed argument vector. It must
 - Maximum request size: no greater than the helper's existing 1 MiB limit.
 - Explicit maximum response size; select a value that safely accommodates the largest legitimate File Manager listing and backup metadata response, and enforce it while reading child output to avoid unbounded memory growth.
 - Response includes exit status, stdout bytes, and stderr bytes. Use base64 or a binary frame for arbitrary bytes; do not concatenate streams because the database-usage path relies on stdout-only parsing.
-- Apply connection and child-process deadlines. On client disconnect or deadline expiry, cancel and reap the child process.
+- Apply connection and child-process deadlines. The current implementation bounds each helper child to two minutes and reaps it on timeout or daemon shutdown. Immediate cancellation on client disconnect remains a follow-up hardening requirement.
 - Reject extra/trailing frame data and malformed lengths.
 - Never log request bodies, database credentials, or File Manager file contents.
 
