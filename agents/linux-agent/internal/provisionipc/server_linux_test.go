@@ -270,6 +270,9 @@ func TestServerKeepsEncodedResponseWithinFrameLimit(t *testing.T) {
 	if len(result.Stdout) > maxCapturedStreamBytes || len(result.Stderr) > maxCapturedStreamBytes {
 		t.Fatalf("captured output exceeded per-stream cap: stdout=%d stderr=%d", len(result.Stdout), len(result.Stderr))
 	}
+	if !result.OutputTruncated {
+		t.Fatal("expected response to report truncated helper output")
+	}
 	payload, err := marshalResult(result)
 	if err != nil {
 		t.Fatal(err)
