@@ -2,9 +2,9 @@
 import { useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, ChevronDown, Cloud, Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole, Mail, Menu, Network, Server, Settings2, ShieldCheck, Users, X } from "lucide-react";
+import { Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, ChevronDown, Cloud, Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole, Mail, Menu, Network, Server, Settings2, ShieldCheck, Users, X, Github } from "lucide-react";
 const workspaceLinks = [
-  {label:"Overview",href:"/",icon:LayoutDashboard},{label:"Servers",href:"/servers",icon:Server},{label:"Hosting plans",href:"/hosting-plans",icon:Box},{label:"Hosting accounts",href:"/hosting-accounts",icon:Users},{label:"File Manager",href:"/file-manager",icon:FolderOpen},{label:"Websites & domains",href:"/websites-domains",icon:Globe2},{label:"Databases",href:"/databases",icon:Database},{label:"Email",href:"/email",icon:Mail},{label:"DNS management",href:"/dns",icon:Network},{label:"Backups",href:"/backups",icon:HardDrive}
+  {label:"Overview",href:"/",icon:LayoutDashboard},{label:"Servers",href:"/servers",icon:Server},{label:"Hosting plans",href:"/hosting-plans",icon:Box},{label:"Hosting accounts",href:"/hosting-accounts",icon:Users},{label:"File Manager",href:"/file-manager",icon:FolderOpen},{label:"Websites & domains",href:"/websites-domains",icon:Globe2},{label:"GitHub deployments",href:"/github-deployments",icon:Github},{label:"Databases",href:"/databases",icon:Database},{label:"Email",href:"/email",icon:Mail},{label:"DNS management",href:"/dns",icon:Network},{label:"Backups",href:"/backups",icon:HardDrive}
 ];
 const systemLinks = [{label:"Access & security",href:"/security",icon:LockKeyhole},{label:"Settings",href:"/settings",icon:Settings2},{label:"Monitoring",href:"/monitoring",icon:Activity}];
 export default function AppShell({children}:{children:ReactNode}) {

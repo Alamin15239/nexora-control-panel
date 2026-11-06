@@ -86,3 +86,51 @@ Migration must be staged: install the daemon and its unit/socket; validate the s
 - No broad root API or generic filesystem proxy.
 - No change to existing account/database/backup business rules as part of the IPC refactor.
 - No automatic service start/enable/restart behavior. Preserve existing Nginx/PHP-FPM validate-before-reload and active-only reload rules.
+## GitHub deployment artifact handoff — design gate (not implemented)
+
+The existing provision IPC is deliberately limited to 1 MiB JSON requests. Do not raise that limit to carry deployment archives, base64-encode archives into JSON, or send archive bytes through helper stdout/stderr. The GitHub artifact upload limit and the IPC request limit serve different trust and resource boundaries.
+
+The deployment handoff must use a dedicated streaming receiver, separate from the general provisioning request socket:
+
+1. The unprivileged agent downloads the artifact from private R2 using a short-lived, single-use capability issued by the Worker. The Worker capability remains scoped to one organization, project, deployment, repository, branch, commit, object, and byte limit.
+2. The agent streams the response to a dedicated Unix socket. The receiver accepts only the configured agent UID using SO_PEERCRED, enforces a hard byte limit while streaming, applies read/write deadlines, and allows only a small bounded number of concurrent transfers.
+3. The receiver creates the destination itself inside a root-owned, non-agent-writable staging directory. Use an unpredictable server-generated identifier, exclusive creation, no-follow semantics, restrictive mode, and descriptor-relative operations. Never accept a destination path or filename from the agent.
+4. The receiver computes SHA-256 while writing, verifies the exact byte count and expected digest supplied in a signed, short-lived deployment envelope, fsyncs the file, and atomically finalizes the staged object. A plain JSON claim from the agent is not a trusted deployment envelope.
+5. The signed envelope must be verified by the privileged boundary against a pinned public key and bind the artifact digest/size to the deployment ID, hosting account ID, repository immutable ID, commit SHA, and expiry. Key rotation and revocation must be designed before implementation. Do not treat SO_PEERCRED as proof that an artifact is authorized for a particular customer account.
+6. The normal provisioner IPC receives only a strict opaque artifact identifier plus the hosting account identifier. It resolves the identifier under the fixed staging directory; it never accepts an arbitrary local path, URL, command, or archive destination from the caller.
+7. The provisioner re-verifies the staged file's owner, type, mode, size, digest, and signed deployment envelope immediately before validation. It then runs the archive validator and a separately implemented safe extractor. Validation and extraction must operate on the same immutable file descriptor/inode to prevent a time-of-check/time-of-use swap.
+8. Publish into a server-generated release directory under the verified account's deployment root. Extract with descriptor-relative no-follow operations; create only regular files and directories; set ownership and conservative modes from policy, not archive metadata. Never preserve executable bits, setuid/setgid bits, ownership, ACLs, or extended attributes from the archive.
+9. After complete extraction and validation, activate the release with an atomic rename or symlink swap performed relative to a verified parent directory. Keep the prior release until health checks pass; rollback must atomically restore the previous pointer. Cleanup is bounded and must never follow archive-created links.
+10. Record deployment state transitions and audit metadata (deployment ID, account ID, commit SHA, digest, sizes, timestamps, outcome). Never log the bearer capability, signed envelope secret material, or artifact contents.
+
+### Deployment envelope verifier foundation (implemented, not wired)
+
+The Go package `internal/deployenvelope` now verifies compact JWS deployment envelopes using RS256 and an explicit key-ID-to-RSA-public-key key ring. The verifier rejects malformed/oversized tokens, unsupported algorithms or token types, unknown JSON fields, untrusted/undersized keys, invalid signatures, malformed identifiers/digests, artifact sizes outside 1 byte–100 MiB, identity mismatches, expired tokens, future-issued tokens beyond clock skew, and lifetimes longer than five minutes.
+
+The required signed claims bind issuer, single audience, organization ID, project ID, deployment ID, hosting account ID, immutable GitHub repository ID, commit SHA, artifact SHA-256, exact artifact byte count, unique JTI, issued-at, and expiry. The caller supplies the expected deployment identity and trusted public-key ring. The verifier does not fetch keys, load mutable key files, persist replay state, create files, or authorize a filesystem destination. The receiver must provide a root-owned pinned key ring, enforce JTI single-use/revocation durably, and compare the streamed byte count and SHA-256 with the verified claims before finalizing the staged file.
+
+The Worker artifact upload now requires a lowercase SHA-256 header and passes that checksum to the R2 `put` operation, which validates it against the streamed body. The checksum is also stored in R2 custom metadata and `github_deployments.artifact_sha256` (migration `0019_github_deployment_artifact_checksum.sql`). This allows a later envelope issuer to sign a checksum verified by R2 rather than trusting a digest asserted by the agent. The GitHub-hosted workflow must compute the archive SHA-256 and send it as `X-Artifact-SHA256`; the Worker/R2 checksum validation is authoritative.
+
+The verifier exposes two APIs: `Verify` additionally binds claims to caller-supplied expected deployment identity, while `VerifySigned` verifies the pinned-key signature, issuer, audience, strict claim structure, and time bounds and returns signed identity claims for a receiver to authorize against local server/account state. `VerifySigned` does not itself authorize an account or prevent replay. A receiver must reject envelopes whose organization/server/account mapping is not present in its own trusted control-plane state and must atomically consume the JTI/deployment before accepting bytes.
+
+The Worker signing endpoint/key distribution and receiver integration are not implemented. No private signing key or public key has been provisioned. This package is a tested cryptographic boundary primitive, not an enabled deployment path.
+
+### Worker-to-agent artifact delivery endpoint (implemented, receiver pending)
+
+The API now exposes `GET /v1/agent/deployments/:deploymentId/artifact`. It authenticates the enrolled node using the existing `X-Nexora-Node`, timestamp, nonce, and HMAC request-signature scheme; rejects stale timestamps and replayed nonces; and scopes the deployment lookup through the credential's organization and server ID joined to the project's hosting account. A node cannot fetch an artifact belonging to another organization or server.
+
+Before streaming, the Worker checks the D1 artifact key, exact byte count and SHA-256, and verifies the R2 object's size and server-written custom metadata against the deployment record. It signs a five-minute RS256 envelope containing the organization/project/deployment/account IDs, immutable repository ID, commit SHA, artifact digest/size, JTI, issuer, audience, and time bounds. The gzip stream is returned directly from private R2 with the envelope in `X-Nexora-Deployment-Envelope`, the digest in `X-Nexora-Artifact-SHA256`, and `Cache-Control: no-store`. The endpoint is unavailable unless the private R2 binding and signing secrets are configured.
+
+Signing secrets (not provisioned): `GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY` (unencrypted PKCS#8 PEM), `GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID`, `GITHUB_DEPLOYMENT_ENVELOPE_ISSUER`, and `GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE`. The corresponding public key must be pinned independently at the privileged receiver. Never place the private key on the agent, VM, browser, or GitHub runner.
+
+This endpoint only authenticates and streams a staged artifact. The Linux agent does not yet call it, and no privileged receiver, durable JTI replay store, root-owned staging lifecycle, safe extractor, or publisher is wired. Repeated authenticated GETs can issue distinct short-lived JTIs; the receiver must additionally enforce deployment-level state/atomic consumption so a completed deployment cannot be replay-published.
+
+### Explicit implementation blockers
+
+- The Worker currently stages artifacts in R2 only when the ARTIFACTS binding exists; that binding/bucket has not been provisioned.
+- The Worker-to-agent delivery/polling protocol and signed deployment envelope issuer/verifier do not yet exist.
+- The dedicated streaming receiver and root-owned staging lifecycle do not yet exist.
+- The safe extractor, release manager, atomic activation, health check, rollback, and deployment audit transitions are not implemented.
+- The standalone deployarchive.ValidateGzipTar package validates archive structure but does not extract or publish anything.
+
+Until these components and disposable-VM integration tests exist, keep the dashboard Deploy action disabled and auto_deploy off. Do not install or enable a deployment receiver on the live VM as part of this design work.
