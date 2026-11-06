@@ -131,7 +131,7 @@ func Verify(token string, keys map[string]*rsa.PublicKey, expected Expected, now
 	if claims.IssuedAt <= 0 || claims.ExpiresAt <= claims.IssuedAt ||
 		claims.IssuedAt > nowUnix+int64(clockSkew.Seconds()) ||
 		claims.ExpiresAt <= nowUnix ||
-		time.Duration(claims.ExpiresAt-claims.IssuedAt)*time.Second > maxLifetime {
+		claims.ExpiresAt-claims.IssuedAt > int64(maxLifetime/time.Second) {
 		return zero, errors.New("deployment envelope is expired or has an invalid lifetime")
 	}
 	return claims, nil
