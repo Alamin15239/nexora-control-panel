@@ -162,7 +162,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -325,9 +325,9 @@ app.get("/v1/overview", async (c) => {
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM domains d JOIN hosting_accounts h ON h.id = d.hosting_account_id WHERE h.organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_plans WHERE organization_id = ? AND active = 1").bind(identity.organizationId).first<{ count: number }>(),
       c.env.DB.prepare("SELECT COUNT(*) AS count FROM hosting_databases WHERE organization_id = ?").bind(identity.organizationId).first<{ count: number }>(),
-      c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents')").all<{ name: string }>(),
+      c.env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users','organizations','memberships','auth_sessions','servers','hosting_plans','hosting_accounts','domains','hosting_databases','agent_credentials','server_telemetry','server_service_checks','server_incidents','hosting_backups')").all<{ name: string }>(),
     ]);
-    const requiredTables = ["users", "organizations", "memberships", "auth_sessions", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "agent_credentials", "server_telemetry", "server_service_checks", "server_incidents"];
+    const requiredTables = ["users", "organizations", "memberships", "auth_sessions", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "agent_credentials", "server_telemetry", "server_service_checks", "server_incidents", "hosting_backups"];
     const presentTables = new Set((schemaRows.results ?? []).map((row) => row.name));
     const schemaReady = requiredTables.every((name) => presentTables.has(name));
     return c.json({
@@ -1476,6 +1476,73 @@ app.get("/v1/file-manager/jobs/:id", async (c) => {
   return c.json({ job: { id: job.id, status: job.status, operation: job.operation, errorMessage: job.errorMessage, requestedAt: job.requestedAt, finishedAt: job.finishedAt, result } });
 });
 
+
+app.get("/v1/hosting-accounts/:id/backups", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Active hosting account not found" }, 404);
+  const result = await c.env.DB.prepare("SELECT id, status, archive_name AS archiveName, size_bytes AS sizeBytes, sha256, database_names_json AS databaseNamesJson, error_message AS errorMessage, created_at AS createdAt, completed_at AS completedAt, staged_at AS stagedAt FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? ORDER BY created_at DESC LIMIT 100").bind(account.id, identity.organizationId).all<{ id: string; status: string; archiveName: string | null; sizeBytes: number | null; sha256: string | null; databaseNamesJson: string; errorMessage: string | null; createdAt: string; completedAt: string | null; stagedAt: string | null }>();
+  const backups = (result.results ?? []).map((row) => ({ ...row, databaseNames: (() => { try { const parsed = JSON.parse(row.databaseNamesJson); return Array.isArray(parsed) ? parsed : []; } catch { return []; } })() }));
+  return c.json({ backups });
+});
+
+app.post("/v1/hosting-accounts/:id/backups", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare("SELECT id, username, server_id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; server_id: string }>();
+  if (!account) return c.json({ message: "Active hosting account not found" }, 404);
+  const databases = await c.env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE' ORDER BY name LIMIT 20").bind(account.id, identity.organizationId).all<{ name: string }>();
+  const databaseNames = (databases.results ?? []).map((row) => row.name);
+  const backupId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const requestPayload = JSON.stringify({ backupId, databaseNames });
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare("INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)").bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now),
+      c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, account.id, "backup-create:" + backupId, requestPayload),
+      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup.create_requested', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backupId, JSON.stringify({ accountId: account.id, username: account.username, databaseCount: databaseNames.length })),
+    ]);
+  } catch { return c.json({ message: "Unable to queue the hosting backup" }, 500); }
+  return c.json({ backup: { id: backupId, status: "QUEUED", databaseNames }, job: { id: jobId, status: "QUEUED" }, message: "Backup queued for the connected Linux agent." }, 202);
+});
+
+app.post("/v1/backups/:id/restore", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId, a.username, b.sha256 AS sha256 FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string; username: string; sha256: string | null }>();
+  if (!backup) return c.json({ message: "Available backup not found" }, 404);
+  if (!backup.sha256 || !/^[a-f0-9]{64}$/.test(backup.sha256)) return c.json({ message: "Backup integrity metadata is missing or invalid; restore is blocked." }, 409);
+  const jobId = crypto.randomUUID();
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_backups SET status = 'RESTORING', error_message = NULL WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) SELECT ?, ?, 'RESTORE_BACKUP', 'QUEUED', ?, ? WHERE changes() = 1").bind(jobId, backup.accountId, "backup-restore:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [], sha256: backup.sha256 })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) SELECT ?, ?, ?, 'backup.restore_requested', 'hosting_backup', ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id, JSON.stringify({ accountId: backup.accountId, username: backup.username, mode: "STAGING_ONLY" })),
+  ]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Backup is already being processed. Refresh and try again later." }, 409);
+  return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Restore queued. Files and database dumps will be extracted to a protected staging directory; live website files and databases will not be overwritten." }, 202);
+});
+
+app.delete("/v1/backups/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
+  if (!backup) return c.json({ message: "Available backup not found" }, 404);
+  const jobId = crypto.randomUUID();
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND organization_id = ? AND status = 'AVAILABLE'").bind(backup.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) SELECT ?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ? WHERE changes() = 1").bind(jobId, backup.accountId, "backup-delete:" + backup.id + ":" + jobId, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) SELECT ?, ?, ?, 'backup.delete_requested', 'hosting_backup', ? WHERE changes() = 1").bind(crypto.randomUUID(), identity.organizationId, identity.id, backup.id),
+  ]);
+  if ((results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Backup is already being processed. Refresh and try again later." }, 409);
+  return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Backup deletion queued." }, 202);
+});
+
 type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
 app.get("/v1/domains/:id/dns-check", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
@@ -2197,7 +2264,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -2205,6 +2272,11 @@ app.get("/v1/agent/jobs/next", async (c) => {
   ).bind(now, leaseUntil, auth.credential.nodeId, auth.credential.serverId, now, now)
     .first<{ id: string; hostingAccountId: string; operation: string; attempts: number; requestPayload: string | null }>();
   if (!claimed) return c.json({ job: null });
+  if (claimed.operation === "CREATE_BACKUP") {
+    const key = await c.env.DB.prepare("SELECT idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? LIMIT 1").bind(claimed.id).first<{ idempotencyKey: string }>();
+    const backupId = key?.idempotencyKey.split(":")[1] ?? "";
+    if (backupId) await c.env.DB.prepare("UPDATE hosting_backups SET status = 'RUNNING' WHERE id = ? AND status = 'QUEUED' AND server_id = ? AND organization_id = ?").bind(backupId, auth.credential.serverId, auth.credential.organizationId).run();
+  }
   const account = await c.env.DB.prepare(
     "SELECT a.id AS accountId, a.username, a.primary_domain AS primaryDomain, p.disk_limit_bytes AS diskLimitBytes, " +
     "d.name AS domain, d.document_root AS documentRoot " +
@@ -2212,8 +2284,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "JOIN provisioning_jobs j ON j.id = ? AND j.hosting_account_id = a.id " +
     "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
-    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE')) LIMIT 1",
-  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
+    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'RESTORE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'DELETE_BACKUP' AND a.status = 'ACTIVE')) LIMIT 1",
+  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
@@ -2248,7 +2320,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const update = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
@@ -2256,6 +2328,45 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
   const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
     .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string }>();
+  if (completedJob?.operation === "CREATE_BACKUP" || completedJob?.operation === "RESTORE_BACKUP" || completedJob?.operation === "DELETE_BACKUP") {
+    const parts = completedJob.idempotencyKey.split(":");
+    const backupId = parts[1] ?? "";
+    if (completedJob.operation === "CREATE_BACKUP") {
+      if (input.success) {
+        const result = incomingResult;
+        const archiveName = result && typeof result.archiveName === "string" ? result.archiveName : "";
+        const sizeBytes = result && typeof result.sizeBytes === "number" ? result.sizeBytes : 0;
+        const digest = result && typeof result.sha256 === "string" ? result.sha256 : "";
+        const resultBackupId = result && typeof result.backupId === "string" ? result.backupId : "";
+        if (!/^[a-f0-9-]{36}$/.test(backupId) || resultBackupId !== backupId || archiveName !== backupId + ".tar.gz" || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || !/^[a-f0-9]{64}$/.test(digest)) {
+          await c.env.DB.prepare("UPDATE hosting_backups SET status = 'FAILED', error_message = 'The agent returned invalid backup metadata' WHERE id = ? AND organization_id = ?").bind(backupId, auth.credential.organizationId).run();
+          return c.json({ message: "The agent returned invalid backup metadata." }, 422);
+        }
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', archive_name = ?, size_bytes = ?, sha256 = ?, completed_at = ?, error_message = NULL WHERE id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')").bind(archiveName, sizeBytes, digest, new Date().toISOString(), backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'FAILED', error_message = ? WHERE id = ? AND organization_id = ?").bind(errorMessage || "The backup could not be created", backupId, auth.credential.organizationId).run();
+      }
+    } else if (completedJob.operation === "RESTORE_BACKUP") {
+      if (input.success) {
+        const account = await c.env.DB.prepare("SELECT a.username FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id WHERE j.id = ? AND a.organization_id = ? LIMIT 1").bind(jobId, auth.credential.organizationId).first<{ username: string }>();
+        const stagingPath = incomingResult && typeof incomingResult.stagingPath === "string" ? incomingResult.stagingPath : "";
+        const expectedPath = account ? "/var/lib/nexora/restore-staging/" + account.username + "/" + backupId : "";
+        if (!expectedPath || stagingPath !== expectedPath) {
+          await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = 'The agent returned an invalid staging location' WHERE id = ? AND organization_id = ?").bind(backupId, auth.credential.organizationId).run();
+          return c.json({ message: "The agent returned an invalid restore staging location." }, 422);
+        }
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'RESTORE_STAGED', staged_at = ?, error_message = NULL WHERE id = ? AND organization_id = ? AND status = 'RESTORING'").bind(new Date().toISOString(), backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = ? WHERE id = ? AND organization_id = ? AND status = 'RESTORING'").bind(errorMessage || "The restore could not be staged", backupId, auth.credential.organizationId).run();
+      }
+    } else {
+      if (input.success) {
+        await c.env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND organization_id = ? AND status = 'DELETING'").bind(backupId, auth.credential.organizationId).run();
+      } else {
+        await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', error_message = ? WHERE id = ? AND organization_id = ? AND status = 'DELETING'").bind(errorMessage || "The backup could not be deleted", backupId, auth.credential.organizationId).run();
+      }
+    }
+  }
   if (completedJob?.operation === "CREATE_HOSTING_ACCOUNT") {
     const accountId = await c.env.DB.prepare(
       "SELECT hosting_account_id AS accountId FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1",
@@ -2341,7 +2452,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   }
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
     .bind(crypto.randomUUID(), auth.credential.organizationId,
-      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioned" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revoked" : completedJob?.operation === "DELETE_DATABASE" ? "database.deleted" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioning_failed" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revocation_failed" : completedJob?.operation === "DELETE_DATABASE" ? "database.deletion_failed" : "hosting_account.provisioning_failed"),
+      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioned" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revoked" : completedJob?.operation === "DELETE_DATABASE" ? "database.deleted" : completedJob?.operation === "CREATE_BACKUP" ? "backup.created" : completedJob?.operation === "RESTORE_BACKUP" ? "backup.restore_staged" : completedJob?.operation === "DELETE_BACKUP" ? "backup.deleted" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioning_failed" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revocation_failed" : completedJob?.operation === "DELETE_DATABASE" ? "database.deletion_failed" : completedJob?.operation === "CREATE_BACKUP" ? "backup.creation_failed" : completedJob?.operation === "RESTORE_BACKUP" ? "backup.restore_stage_failed" : completedJob?.operation === "DELETE_BACKUP" ? "backup.deletion_failed" : "hosting_account.provisioning_failed"),
       jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });

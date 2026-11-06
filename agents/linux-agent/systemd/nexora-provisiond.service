@@ -1,0 +1,42 @@
+[Unit]
+Description=Nexora Privileged Provisioning IPC Service
+Documentation=https://github.com/Alamin15239/nexora-control-panel
+Wants=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=nexora
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=no
+UMask=0077
+ExecStart=/usr/local/sbin/nexora-provisiond
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
+
+# The helper must update account databases, customer homes, Nginx/PHP
+# configuration and Nexora backup storage. ProtectSystem=full keeps /usr,
+# /boot and /efi read-only while preserving those explicitly required paths.
+# Tighten this further only after operation-by-operation sandbox testing.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SYS_CHROOT
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, Clock3, LockKeyhole, Mail, Network, HardDrive, Activity, Settings2, ShieldCheck, Server, AlertTriangle } from "lucide-react";
 import MonitoringDashboard from "@/components/monitoring-dashboard";
 import DnsManagement from "@/components/dns-management";
+import BackupsDashboard from "@/components/backups-dashboard";
 
 type Item = { title: string; description: string; state: "ready" | "pending" | "blocked" };
 const configs: Record<string, { title: string; subtitle: string; icon: typeof Mail; items: Item[]; note: string }> = {
@@ -286,6 +287,7 @@ export default function OperationsModule({ module }: { module: string }) {
 
   if (module === "monitoring") return <MonitoringDashboard/>;
   if (module === "dns") return <DnsManagement/>;
+  if (module === "backups") return <BackupsDashboard/>;
 
   const items = config.items.map(item =>
     module === "settings" && item.title === "Email notifications"

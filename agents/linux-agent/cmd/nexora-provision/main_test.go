@@ -101,21 +101,25 @@ func TestManagedParentPath(t *testing.T) {
 	}
 }
 
-func TestUpgradeLegacyDefaultIndexOnlyReplacesKnownPlaceholder(t *testing.T) {
+func TestUpgradeLegacyDefaultIndexPreservesExistingPages(t *testing.T) {
 	root := t.TempDir()
 	index := filepath.Join(root, "index.html")
-	if err := os.WriteFile(index, []byte(legacyDefaultIndexHTML), 0640); err != nil {
+
+	legacy := []byte(legacyDefaultIndexHTML)
+	if err := os.WriteFile(index, legacy, 0640); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := upgradeLegacyDefaultIndex(root, os.Getuid(), os.Getgid()); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := os.ReadFile(index)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != defaultIndexHTML {
-		t.Fatalf("legacy placeholder was not upgraded: %q", string(got))
+	if string(got) != string(legacy) {
+		t.Fatal("legacy index page was unexpectedly replaced")
 	}
 
 	custom := []byte("<h1>Customer website</h1>")
@@ -125,12 +129,13 @@ func TestUpgradeLegacyDefaultIndexOnlyReplacesKnownPlaceholder(t *testing.T) {
 	if err := upgradeLegacyDefaultIndex(root, os.Getuid(), os.Getgid()); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err = os.ReadFile(index)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != string(custom) {
-		t.Fatalf("customer index was modified: %q", string(got))
+		t.Fatal("customer index page was modified")
 	}
 }
 

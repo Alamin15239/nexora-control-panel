@@ -22,6 +22,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/provisionipc"
 )
 
 const version = "0.8.0"
@@ -515,13 +517,11 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 		return nil, err
 	}
 
-	command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-	command.Stdin = bytes.NewReader(requestBody)
-
-	output, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("provisioning helper could not collect database usage")
+	ipcResult, err := provisionipc.Run(ctx, "", requestBody)
+	if err != nil || ipcResult.ExitCode != 0 {
+		return nil, fmt.Errorf("provisioning service could not collect database usage")
 	}
+	output := ipcResult.Stdout
 	if len(output) == 0 || len(output) > 64*1024 {
 		return nil, fmt.Errorf("database usage response exceeded its size limit")
 	}
@@ -575,6 +575,20 @@ func collectDatabaseUsage(ctx context.Context) ([]databaseUsageMeasurement, erro
 	return measurements, nil
 }
 
+func runProvisionerCombined(ctx context.Context, request []byte) ([]byte, error) {
+	result, err := provisionipc.Run(ctx, "", request)
+	if err != nil {
+		return nil, err
+	}
+	output := make([]byte, 0, len(result.Stdout)+len(result.Stderr))
+	output = append(output, result.Stdout...)
+	output = append(output, result.Stderr...)
+	if result.ExitCode != 0 {
+		return output, fmt.Errorf("provisioner exited with status %d", result.ExitCode)
+	}
+	return output, nil
+}
+
 func processNextJob(ctx context.Context, client *http.Client, cfg Config) error {
 	resp, err := signedRequest(ctx, client, cfg, http.MethodGet, "/v1/agent/jobs/next", nil)
 	if err != nil {
@@ -612,9 +626,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database job payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]string{"operation": "CREATE_DATABASE", "username": job.Account.Username, "databaseName": payload.DatabaseName})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 				fmt.Printf("Provisioning job %s (CREATE_DATABASE) completed for account %s\\n", job.ID, job.Account.Username)
@@ -640,9 +652,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database-user job payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]any{"operation": "CREATE_DATABASE_USER", "username": job.Account.Username, "databaseName": payload.DatabaseName, "databaseUserName": payload.DatabaseUserName, "privileges": payload.Privileges})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
 				success = true
 				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
@@ -662,9 +672,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			errorMessage = "The database-user revocation payload is invalid"
 		} else {
 			encoded, _ := json.Marshal(map[string]string{"operation": "REVOKE_DATABASE_USER", "username": job.Account.Username, "databaseUserName": payload.DatabaseUserName, "databaseName": payload.DatabaseName})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			_, commandErr := command.CombinedOutput()
+			_, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 			} else {
@@ -686,9 +694,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				"operation": "DELETE_DATABASE", "username": job.Account.Username,
 				"databaseName": payload.DatabaseName, "databaseUserNames": payload.DatabaseUserNames,
 			})
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 			} else {
@@ -702,6 +708,56 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				}
 			}
 		}
+	} else if job.Operation == "CREATE_BACKUP" || job.Operation == "RESTORE_BACKUP" || job.Operation == "DELETE_BACKUP" {
+		var payload struct {
+			BackupID string `json:"backupId"`
+			DatabaseNames []string `json:"databaseNames"`
+			SHA256 string `json:"sha256"`
+		}
+		validID := func(value string) bool {
+			if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' { return false }
+			_, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+			return err == nil
+		}
+		validDigest := func(value string) bool {
+			if len(value) != 64 { return false }
+			_, err := hex.DecodeString(value)
+			return err == nil
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || !validID(payload.BackupID) || len(payload.DatabaseNames) > 20 || (job.Operation == "RESTORE_BACKUP" && !validDigest(payload.SHA256)) {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The backup job payload is invalid"
+		} else {
+			for _, name := range payload.DatabaseNames {
+				if !strings.HasPrefix(name, job.Account.Username+"_") || len(name) < len(job.Account.Username)+3 || len(name) > 64 {
+					errorCode = "INVALID_JOB_PAYLOAD"
+					errorMessage = "The backup database list is invalid"
+					break
+				}
+				for _, ch := range name {
+					if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+						errorCode = "INVALID_JOB_PAYLOAD"
+						errorMessage = "The backup database list is invalid"
+						break
+					}
+				}
+				if errorCode != "" { break }
+			}
+			if errorCode == "" {
+				encoded, _ := json.Marshal(map[string]any{
+					"operation": job.Operation, "username": job.Account.Username,
+					"backupId": payload.BackupID, "databaseNames": payload.DatabaseNames, "sha256": payload.SHA256,
+				})
+				output, commandErr := runProvisionerCombined(ctx, encoded)
+				if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
+					success = true
+					resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)... )
+				} else {
+					errorCode = "BACKUP_OPERATION_FAILED"
+					errorMessage = "The requested backup operation could not be completed"
+				}
+			}
+		}
 	} else if job.Operation == "FILE_MANAGER" {
 		var payload map[string]any
 		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
@@ -711,9 +767,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 			payload["operation"] = "FILE_MANAGER"
 			payload["username"] = job.Account.Username
 			encoded, _ := json.Marshal(payload)
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil && json.Valid(bytes.TrimSpace(output)) {
 				success = true
 				resultPayload = append(json.RawMessage(nil), bytes.TrimSpace(output)...)
@@ -747,9 +801,7 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 		}
 		if errorCode == "" {
 			encoded, _ := json.Marshal(payload)
-			command := exec.CommandContext(ctx, "sudo", "-n", "/usr/local/libexec/nexora-provision")
-			command.Stdin = bytes.NewReader(encoded)
-			output, commandErr := command.CombinedOutput()
+			output, commandErr := runProvisionerCombined(ctx, encoded)
 			if commandErr == nil {
 				success = true
 				fmt.Printf("Provisioning job %s (%s) completed for account %s\\n", job.ID, job.Operation, job.Account.Username)
