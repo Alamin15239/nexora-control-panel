@@ -3464,7 +3464,8 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
   if ((consumed.meta.changes ?? 0) !== 1) return c.json({ message: "Upload token has already been consumed." }, 409);
 
   const objectKey = "staging/" + token.organizationId + "/" + token.projectId + "/" + token.deploymentId + "/" + randomHex(16) + ".tar.gz";
-  let receivedBytes = 0;
+  try {
+    let receivedBytes = 0;
   const fixedLength = new FixedLengthStream(contentLength);
   const writer = fixedLength.writable.getWriter();
   const reader = c.req.raw.body.getReader();
@@ -3513,7 +3514,6 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
     throw new Error("R2 stored object checksum does not match the declared artifact digest");
   }
 
-  try {
     const updated = await c.env.DB.prepare(
       "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
     ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId).run();
