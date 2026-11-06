@@ -2920,6 +2920,7 @@ app.get("/v1/github/callback", async (c) => {
 app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
   const connection = await c.env.DB.prepare(
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
@@ -3006,6 +3007,19 @@ app.delete("/v1/github/connection", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (c.env.GITHUB_APP_CLIENT_ID && c.env.GITHUB_APP_CLIENT_SECRET) {
+    try {
+      const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
+      const credentials = btoa(`${c.env.GITHUB_APP_CLIENT_ID}:${c.env.GITHUB_APP_CLIENT_SECRET}`);
+      await fetch(`https://api.github.com/applications/${encodeURIComponent(c.env.GITHUB_APP_CLIENT_ID)}/grant`, {
+        method: "DELETE",
+        headers: { Authorization: `Basic ${credentials}`, Accept: "application/vnd.github+json", "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28" },
+        body: JSON.stringify({ access_token: token }),
+      });
+    } catch {
+      // Local credential deletion remains authoritative even if remote revocation is unavailable.
+    }
+  }
   await c.env.DB.prepare("DELETE FROM github_connections WHERE organization_id = ?").bind(identity.organizationId).run();
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type) VALUES (?, ?, ?, 'github.disconnected', 'github_connection')")
     .bind(crypto.randomUUID(), identity.organizationId, identity.id).run();
