@@ -3130,7 +3130,7 @@ async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Re
 
 app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   const authorization = c.req.header("authorization") ?? "";
-  const match = /^Bearer\\s+([A-Za-z0-9._-]+)$/.exec(authorization);
+  const match = /^Bearer\s+([A-Za-z0-9._-]+)$/.exec(authorization);
   if (!match) return c.json({ message: "GitHub Actions OIDC bearer token is required." }, 401);
 
   let claims: Record<string, unknown>;
@@ -3164,7 +3164,7 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     claims.workflow_ref !== expectedWorkflowRef ||
     claims.runner_environment !== "github-hosted" ||
     !/^[a-f0-9]{40}$/i.test(workflowSha) ||
-    !/^\\d{1,20}$/.test(runId) ||
+    !/^\d{1,20}$/.test(runId) ||
     !Number.isSafeInteger(runAttempt) || runAttempt < 1 || runAttempt > 100
   ) {
     return c.json({ message: "GitHub Actions identity does not match this deployment." }, 403);
