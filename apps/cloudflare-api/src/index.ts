@@ -3332,14 +3332,17 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   }
   const project = await c.env.DB.prepare(
     `SELECT id, github_repository_id AS repositoryId, repository_full_name AS repositoryFullName,
-            github_installation_id AS installationId, production_branch AS productionBranch, status
+            github_installation_id AS installationId, production_branch AS productionBranch, trusted_workflow_sha AS trustedWorkflowSha, status
      FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1`,
   ).bind(c.req.param("projectId"), identity.organizationId).first<{
     id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
-    productionBranch: string; status: string;
+    productionBranch: string; trustedWorkflowSha: string | null; status: string;
   }>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   if (!project.installationId) return c.json({ message: "Reconnect the GitHub App and relink this repository." }, 409);
+  if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
+    return c.json({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
+  }
   const active = await c.env.DB.prepare(
     "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
   ).bind(project.id).first<{ id: string }>();
