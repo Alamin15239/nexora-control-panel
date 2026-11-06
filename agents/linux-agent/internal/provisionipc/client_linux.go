@@ -38,6 +38,13 @@ func Run(ctx context.Context, socketPath string, request []byte) (Result, error)
 	if err := writeFrame(conn, request, MaxRequestBytes); err != nil {
 		return Result{}, fmt.Errorf("send provisioning request: %w", err)
 	}
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return Result{}, fmt.Errorf("provisioning connection is not a Unix socket")
+	}
+	if err := unixConn.CloseWrite(); err != nil {
+		return Result{}, fmt.Errorf("finish provisioning request: %w", err)
+	}
 	response, err := readFrame(conn, MaxResponseBytes)
 	if err != nil {
 		return Result{}, fmt.Errorf("receive provisioning response: %w", err)
