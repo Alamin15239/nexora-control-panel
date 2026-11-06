@@ -30,18 +30,21 @@ type Server struct {
 }
 
 type cappedBuffer struct {
-	data  []byte
-	limit int
+	data      []byte
+	limit     int
+	truncated bool
 }
 
 func (b *cappedBuffer) Write(p []byte) (int, error) {
 	remaining := b.limit - len(b.data)
 	if remaining <= 0 {
-		return 0, errors.New("provisioner output limit exceeded")
+		b.truncated = true
+		return len(p), nil
 	}
 	if len(p) > remaining {
 		b.data = append(b.data, p[:remaining]...)
-		return remaining, errors.New("provisioner output limit exceeded")
+		b.truncated = true
+		return len(p), nil
 	}
 	b.data = append(b.data, p...)
 	return len(p), nil
@@ -182,7 +185,7 @@ func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
 	default:
 	}
 
-	result := Result{ExitCode: exitCode, Stdout: stdout.data, Stderr: stderr.data}
+	result := Result{ExitCode: exitCode, Stdout: stdout.data, Stderr: stderr.data, OutputTruncated: stdout.truncated || stderr.truncated}
 	payload, err := json.Marshal(result)
 	if err != nil || len(payload) > MaxResponseBytes {
 		payload, _ = json.Marshal(Result{ExitCode: 1, Stderr: []byte("provisioner response exceeded the IPC size limit")})
