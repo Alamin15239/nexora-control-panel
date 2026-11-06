@@ -4,7 +4,7 @@
 
 A customer connects a GitHub account, chooses a repository and production branch, attaches it to one Nexora hosting account, and configures a framework/build profile. A deployment is created for a specific commit SHA. Push webhooks enqueue deployments only when the pushed branch matches the configured production branch. Manual deploys use the selected branch's current commit.
 
-The first supported release is **static output deployment**: plain HTML, Vite/React, Vue, and static Astro. Next.js is supported only when configured for static export. Server-rendered Node.js applications are a later runtime feature; do not silently treat SSR output as static content.
+The first supported release is **static output deployment**: plain HTML, Vite/React, Vue, and static Astro. Next.js is supported only when configured for static export. Current dashboard/API milestone supports GitHub connection, listing repositories available through installed GitHub App installations, and linking a repository to one active hosting account; it does not yet execute a build. Server-rendered Node.js applications are a later runtime feature; do not silently treat SSR output as static content.
 
 ## Control-plane data
 
@@ -14,7 +14,7 @@ Migration `0012_github_deployments.sql` stores:
 - a repository-to-hosting-account project configuration;
 - immutable commit-specific deployment records and bounded log excerpts.
 
-Tokens must be encrypted with AES-GCM using a dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
+The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption, installation repository listing, and project-to-hosting-account configuration. Tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
 
 ## Deployment pipeline
 
@@ -31,15 +31,23 @@ Tokens must be encrypted with AES-GCM using a dedicated `GITHUB_TOKEN_ENCRYPTION
 
 Register a repository push webhook using a per-project random secret. Verify `X-Hub-Signature-256` with constant-time HMAC-SHA256 comparison over the raw request body. Validate repository ID, installation/connection, event type, branch, and commit SHA. Reject replays/duplicates through an idempotency key. Do not accept arbitrary callback URLs or arbitrary repository clone URLs from customers.
 
-## Required configuration
+## GitHub App configuration
 
-- `GITHUB_OAUTH_CLIENT_ID`
-- `GITHUB_OAUTH_CLIENT_SECRET`
-- `GITHUB_OAUTH_CALLBACK_URL` (HTTPS)
+Create a GitHub App (not a broad OAuth App) and configure:
+- Repository permissions: **Contents: Read-only**, **Metadata: Read-only**. Add **Webhooks: Read & write** only when webhook automation is implemented.
+- Subscribe to the `push` event when webhook automation is implemented.
+- Set the OAuth callback URL to the API endpoint `/v1/github/callback` on the production API origin.
+- Do not request broad OAuth scopes; repository access is granted by installing the GitHub App on selected repositories.
+
+Required Worker secrets/vars:
+- `GITHUB_APP_CLIENT_ID`
+- `GITHUB_APP_CLIENT_SECRET`
+- `GITHUB_OAUTH_CALLBACK_URL` (exact HTTPS callback URL configured in the GitHub App)
 - `GITHUB_TOKEN_ENCRYPTION_KEY` (32-byte hex key)
+- `DASHBOARD_URL` (HTTPS dashboard origin used for the OAuth completion redirect)
 - A dedicated build-worker runtime and authenticated job/result protocol
 
-The callback URL and OAuth credentials must be configured before enabling the Connect GitHub button. The database migration alone does not enable deployment.
+The dashboard currently provides GitHub connection, repository selection, and project configuration. Actual builds remain disabled until the isolated build worker is implemented and deployed. The OAuth configuration must be added to the Worker before the Connect GitHub action can succeed.
 
 ## Release gates
 
