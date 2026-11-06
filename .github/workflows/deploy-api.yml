@@ -13,7 +13,6 @@ on:
       - "packages/**"
       - "pnpm-workspace.yaml"
       - "package.json"
-      - ".github/workflows/deploy-api.yml"
 
 permissions:
   contents: read
