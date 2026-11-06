@@ -3102,7 +3102,7 @@ async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Re
   if (claims.iss !== GITHUB_OIDC_ISSUER) throw new Error("Unexpected OIDC issuer");
   const expectedAudience = env.GITHUB_OIDC_AUDIENCE || GITHUB_OIDC_DEFAULT_AUDIENCE;
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-  if (!audiences.includes(expectedAudience)) throw new Error("Unexpected OIDC audience");
+  if (audiences.length !== 1 || audiences[0] !== expectedAudience) throw new Error("Unexpected OIDC audience");
 
   const now = Math.floor(Date.now() / 1000);
   const exp = Number(claims.exp);
@@ -3110,7 +3110,10 @@ async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Re
   if (!Number.isFinite(exp) || !Number.isFinite(iat) || exp <= now || exp > now + 600 || iat > now + 60 || iat < now - 600) {
     throw new Error("OIDC token is expired or outside the accepted time window");
   }
-  if (claims.nbf !== undefined && Number(claims.nbf) > now + 60) throw new Error("OIDC token is not active yet");
+  if (claims.nbf !== undefined) {
+    const notBefore = Number(claims.nbf);
+    if (!Number.isFinite(notBefore) || notBefore > now + 60) throw new Error("OIDC token is not active yet");
+  }
 
   const response = await fetch(GITHUB_OIDC_ISSUER + "/.well-known/jwks", { headers: { Accept: "application/json" } });
   if (!response.ok) throw new Error("Unable to retrieve GitHub OIDC signing keys");
