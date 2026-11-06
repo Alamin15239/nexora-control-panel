@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -100,5 +99,4 @@ func TestResultExitCodeIsPreserved(t *testing.T) {
 	if got.ExitCode != 23 || string(got.Stdout) != "out" || string(got.Stderr) != "err" {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
-	_ = strconv.Itoa(1)
 }
