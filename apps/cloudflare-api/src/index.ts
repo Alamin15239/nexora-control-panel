@@ -2812,20 +2812,46 @@ async function githubAccessToken(env: Bindings, db: D1Database, organizationId: 
 
 function base64Url(bytes: Uint8Array): string {
   return btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""))
-    .replace(/=/g, "").replace(/\\+/g, "-").replace(/\\//g, "_");
+    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+function derTlv(tag: number, value: Uint8Array): Uint8Array {
+  const length = value.length;
+  let encodedLength: number[];
+  if (length < 128) encodedLength = [length];
+  else {
+    const bytes: number[] = [];
+    let remaining = length;
+    while (remaining > 0) { bytes.unshift(remaining & 0xff); remaining >>>= 8; }
+    encodedLength = [0x80 | bytes.length, ...bytes];
+  }
+  return Uint8Array.from([tag, ...encodedLength, ...value]);
 }
 
 function githubPrivateKeyDer(pem: string): Uint8Array {
-  const normalized = pem.replace(/\\r/g, "").trim();
-  const match = /^-----BEGIN PRIVATE KEY-----([\\s\\S]+)-----END PRIVATE KEY-----$/.exec(normalized);
-  if (!match) throw new Error("GitHub App private key must be PKCS#8 PEM");
-  const binary = atob(match[1].replace(/\\s/g, ""));
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  const normalized = pem.replace(/\r/g, "").trim();
+  const match = /^-----BEGIN (PRIVATE KEY|RSA PRIVATE KEY)-----([\s\S]+)-----END \1-----$/.exec(normalized);
+  if (!match) throw new Error("GitHub App private key must be a PKCS#8 or RSA PKCS#1 PEM");
+  const binary = atob(match[2].replace(/\s/g, ""));
+  const keyBytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (match[1] === "PRIVATE KEY") return keyBytes;
+
+  // Web Crypto imports PKCS#8, while GitHub's downloaded App keys are commonly PKCS#1.
+  const version = Uint8Array.of(0x02, 0x01, 0x00);
+  const rsaAlgorithm = Uint8Array.of(
+    0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+  );
+  const octetString = derTlv(0x04, keyBytes);
+  const body = new Uint8Array(version.length + rsaAlgorithm.length + octetString.length);
+  body.set(version, 0);
+  body.set(rsaAlgorithm, version.length);
+  body.set(octetString, version.length + rsaAlgorithm.length);
+  return derTlv(0x30, body);
 }
 
 async function githubAppJwt(env: Bindings): Promise<string> {
   const appId = env.GITHUB_APP_ID ?? "";
-  if (!/^\\d+$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY) throw new Error("GitHub App signing credentials are not configured");
+  if (!/^\d+$/.test(appId) || !env.GITHUB_APP_PRIVATE_KEY) throw new Error("GitHub App signing credentials are not configured");
   const header = base64Url(new TextEncoder().encode(JSON.stringify({ alg: "RS256", typ: "JWT" })));
   const now = Math.floor(Date.now() / 1000);
   const payload = base64Url(new TextEncoder().encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId })));
@@ -2839,10 +2865,10 @@ async function githubAppJwt(env: Bindings): Promise<string> {
 
 async function githubInstallationToken(env: Bindings, installationId: string, repositoryId: string): Promise<string> {
   const jwt = await githubAppJwt(env);
-  const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`, {
+  const response = await fetch(\`https://api.github.com/app/installations/\${encodeURIComponent(installationId)}/access_tokens\`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json",
+      Authorization: \`Bearer \${jwt}\`, Accept: "application/vnd.github+json",
       "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "Nexora-Control-Panel",
     },
