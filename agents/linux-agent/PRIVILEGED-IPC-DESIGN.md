@@ -1,6 +1,6 @@
 # Privileged Provisioning IPC Design
 
-Status: IPC daemon, client, helper isolation, and agent call-site migration are implemented in the repository. A harmless authenticated socket smoke test passed on the development VM. GitHub CI passed provisioner tests, the full Go test suite, race tests, vet, build, CLI verification, systemd-unit verification, and Cloudflare Tunnel installer syntax validation on commit 6c8c14e7181de58059dcdcc10b68e4533e3be663. Full operation-by-operation validation and final systemd hardening/rollout remain pending; do not treat this document as deployment approval.
+Status: IPC daemon, client, helper isolation, and agent call-site migration are implemented in the repository. A harmless authenticated socket smoke test passed on the development VM. GitHub CI passed provisioner tests, the full Go test suite, race tests, vet, build, CLI verification, systemd-unit verification, and Cloudflare Tunnel installer syntax validation on commit 6806a410c7cf0cde3bd98c37c476631855851edb. Full operation-by-operation validation and final systemd hardening/rollout remain pending; do not treat this document as deployment approval.
 
 ## Objective
 
@@ -66,7 +66,7 @@ The daemon must not run with a writable socket path outside its root-owned runti
 
 ## Required tests before VM migration
 
-- Unit tests cover peer-credential authorization, wrong UID rejection, framing, truncated/oversized frames, capped output and truncation signaling, daemon cancellation/reaping, client-disconnect cancellation, encoded response size, and the four-worker concurrency limit. Remaining gaps: request-read deadline coverage, daemon socket ownership/mode integration test, and operation-by-operation helper integration tests.
+- Unit tests cover peer-credential authorization, wrong UID rejection, framing, truncated/oversized frames, capped output and truncation signaling, daemon cancellation/reaping, client-disconnect cancellation, encoded response size, the four-worker concurrency limit, socket ownership/mode, and refusal to replace an existing socket path. Remaining gaps: request-read deadline coverage and operation-by-operation helper integration tests.
 - Integration tests for every currently supported operation through the socket, including File Manager chroot/drop-privilege behavior and JSON stdout results.
 - Verify a File Manager request does not affect the daemon's UID/GID, root directory, or ability to serve the next request.
 - The daemon validates that the helper exists, is a regular file, is root-owned, and is not group/world writable.
