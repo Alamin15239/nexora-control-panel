@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -87,11 +88,17 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
 				workers.Wait()
 				return nil
 			}
-			continue
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Temporary() {
+				time.Sleep(50 * time.Millisecond)
+				continue
+			}
+			workers.Wait()
+			return fmt.Errorf("accept provisioning connection: %w", err)
 		}
 		select {
 		case slots <- struct{}{}:
