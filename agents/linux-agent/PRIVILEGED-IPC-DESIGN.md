@@ -86,3 +86,29 @@ Migration must be staged: install the daemon and its unit/socket; validate the s
 - No broad root API or generic filesystem proxy.
 - No change to existing account/database/backup business rules as part of the IPC refactor.
 - No automatic service start/enable/restart behavior. Preserve existing Nginx/PHP-FPM validate-before-reload and active-only reload rules.
+## GitHub deployment artifact handoff — design gate (not implemented)
+
+The existing provision IPC is deliberately limited to 1 MiB JSON requests. Do not raise that limit to carry deployment archives, base64-encode archives into JSON, or send archive bytes through helper stdout/stderr. The GitHub artifact upload limit and the IPC request limit serve different trust and resource boundaries.
+
+The deployment handoff must use a dedicated streaming receiver, separate from the general provisioning request socket:
+
+1. The unprivileged agent downloads the artifact from private R2 using a short-lived, single-use capability issued by the Worker. The Worker capability remains scoped to one organization, project, deployment, repository, branch, commit, object, and byte limit.
+2. The agent streams the response to a dedicated Unix socket. The receiver accepts only the configured agent UID using SO_PEERCRED, enforces a hard byte limit while streaming, applies read/write deadlines, and allows only a small bounded number of concurrent transfers.
+3. The receiver creates the destination itself inside a root-owned, non-agent-writable staging directory. Use an unpredictable server-generated identifier, exclusive creation, no-follow semantics, restrictive mode, and descriptor-relative operations. Never accept a destination path or filename from the agent.
+4. The receiver computes SHA-256 while writing, verifies the exact byte count and expected digest supplied in a signed, short-lived deployment envelope, fsyncs the file, and atomically finalizes the staged object. A plain JSON claim from the agent is not a trusted deployment envelope.
+5. The signed envelope must be verified by the privileged boundary against a pinned public key and bind the artifact digest/size to the deployment ID, hosting account ID, repository immutable ID, commit SHA, and expiry. Key rotation and revocation must be designed before implementation. Do not treat SO_PEERCRED as proof that an artifact is authorized for a particular customer account.
+6. The normal provisioner IPC receives only a strict opaque artifact identifier plus the hosting account identifier. It resolves the identifier under the fixed staging directory; it never accepts an arbitrary local path, URL, command, or archive destination from the caller.
+7. The provisioner re-verifies the staged file's owner, type, mode, size, digest, and signed deployment envelope immediately before validation. It then runs the archive validator and a separately implemented safe extractor. Validation and extraction must operate on the same immutable file descriptor/inode to prevent a time-of-check/time-of-use swap.
+8. Publish into a server-generated release directory under the verified account's deployment root. Extract with descriptor-relative no-follow operations; create only regular files and directories; set ownership and conservative modes from policy, not archive metadata. Never preserve executable bits, setuid/setgid bits, ownership, ACLs, or extended attributes from the archive.
+9. After complete extraction and validation, activate the release with an atomic rename or symlink swap performed relative to a verified parent directory. Keep the prior release until health checks pass; rollback must atomically restore the previous pointer. Cleanup is bounded and must never follow archive-created links.
+10. Record deployment state transitions and audit metadata (deployment ID, account ID, commit SHA, digest, sizes, timestamps, outcome). Never log the bearer capability, signed envelope secret material, or artifact contents.
+
+### Explicit implementation blockers
+
+- The Worker currently stages artifacts in R2 only when the ARTIFACTS binding exists; that binding/bucket has not been provisioned.
+- The Worker-to-agent delivery/polling protocol and signed deployment envelope issuer/verifier do not yet exist.
+- The dedicated streaming receiver and root-owned staging lifecycle do not yet exist.
+- The safe extractor, release manager, atomic activation, health check, rollback, and deployment audit transitions are not implemented.
+- The standalone deployarchive.ValidateGzipTar package validates archive structure but does not extract or publish anything.
+
+Until these components and disposable-VM integration tests exist, keep the dashboard Deploy action disabled and auto_deploy off. Do not install or enable a deployment receiver on the live VM as part of this design work.
