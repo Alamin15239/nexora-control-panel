@@ -2760,6 +2760,53 @@ async function decryptGithubToken(env: Bindings, ciphertext: string, iv: string)
   return new TextDecoder().decode(plaintext);
 }
 
+async function githubAccessToken(env: Bindings, db: D1Database, organizationId: string): Promise<string> {
+  type ConnectionTokenRow = {
+    encrypted_access_token: string; access_token_iv: string;
+    encrypted_refresh_token: string | null; refresh_token_iv: string | null;
+    token_expires_at: string | null; refresh_token_expires_at: string | null;
+  };
+  const load = () => db.prepare(
+    "SELECT encrypted_access_token, access_token_iv, encrypted_refresh_token, refresh_token_iv, token_expires_at, refresh_token_expires_at FROM github_connections WHERE organization_id = ? LIMIT 1",
+  ).bind(organizationId).first<ConnectionTokenRow>();
+  const row = await load();
+  if (!row) throw new Error("GitHub connection not found");
+  const expiresAt = row.token_expires_at ? Date.parse(row.token_expires_at) : Number.POSITIVE_INFINITY;
+  if (expiresAt > Date.now() + 5 * 60 * 1000) return decryptGithubToken(env, row.encrypted_access_token, row.access_token_iv);
+  if (!row.encrypted_refresh_token || !row.refresh_token_iv ||
+      (row.refresh_token_expires_at && Date.parse(row.refresh_token_expires_at) <= Date.now()) ||
+      !env.GITHUB_APP_CLIENT_ID || !env.GITHUB_APP_CLIENT_SECRET) {
+    throw new Error("GitHub authorization expired; reconnect the GitHub App");
+  }
+  const refreshToken = await decryptGithubToken(env, row.encrypted_refresh_token, row.refresh_token_iv);
+  try {
+    const response = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: env.GITHUB_APP_CLIENT_ID, client_secret: env.GITHUB_APP_CLIENT_SECRET, grant_type: "refresh_token", refresh_token: refreshToken }),
+    });
+    if (!response.ok) throw new Error("GitHub token refresh failed");
+    const data = await response.json() as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; token_type?: string };
+    if (!data.access_token || !data.refresh_token || data.token_type?.toLowerCase() !== "bearer" ||
+        !Number.isFinite(data.expires_in) || !Number.isFinite(data.refresh_token_expires_in)) throw new Error("GitHub returned invalid refreshed credentials");
+    const access = await encryptGithubToken(env, data.access_token);
+    const refresh = await encryptGithubToken(env, data.refresh_token);
+    const issuedAt = Date.now();
+    const accessExpiry = new Date(issuedAt + Number(data.expires_in) * 1000).toISOString();
+    const refreshExpiry = new Date(issuedAt + Number(data.refresh_token_expires_in) * 1000).toISOString();
+    const update = await db.prepare(
+      "UPDATE github_connections SET encrypted_access_token = ?, access_token_iv = ?, encrypted_refresh_token = ?, refresh_token_iv = ?, token_expires_at = ?, refresh_token_expires_at = ?, updated_at = datetime('now') WHERE organization_id = ? AND encrypted_refresh_token = ?",
+    ).bind(access.ciphertext, access.iv, refresh.ciphertext, refresh.iv, accessExpiry, refreshExpiry, organizationId, row.encrypted_refresh_token).run();
+    if ((update.meta?.changes ?? 0) === 1) return data.access_token;
+    const latest = await load();
+    if (latest?.token_expires_at && Date.parse(latest.token_expires_at) > Date.now()) return decryptGithubToken(env, latest.encrypted_access_token, latest.access_token_iv);
+    throw new Error("GitHub token refresh was superseded; retry the request");
+  } catch {
+    const latest = await load();
+    if (latest?.token_expires_at && Date.parse(latest.token_expires_at) > Date.now()) return decryptGithubToken(env, latest.encrypted_access_token, latest.access_token_iv);
+    throw new Error("GitHub authorization expired; reconnect the GitHub App");
+  }
+}
+
 function githubDashboardRedirect(env: Bindings, status: string): string {
   const base = env.DASHBOARD_URL ?? "";
   let url: URL;
@@ -2840,19 +2887,27 @@ app.get("/v1/github/callback", async (c) => {
       body: JSON.stringify({ client_id: c.env.GITHUB_APP_CLIENT_ID, client_secret: c.env.GITHUB_APP_CLIENT_SECRET, code, redirect_uri: c.env.GITHUB_OAUTH_CALLBACK_URL }),
     });
     if (!tokenResponse.ok) throw new Error("GitHub token exchange failed");
-    const tokenData = await tokenResponse.json() as { access_token?: string; token_type?: string; scope?: string; error?: string };
+    const tokenData = await tokenResponse.json() as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; token_type?: string; scope?: string; error?: string };
     if (!tokenData.access_token || tokenData.token_type?.toLowerCase() !== "bearer") throw new Error("GitHub did not issue a usable access token");
     const userResponse = await githubApi(tokenData.access_token, "/user");
     if (!userResponse.ok) throw new Error("Unable to verify GitHub account");
     const githubUser = await userResponse.json() as { id?: number; login?: string };
     if (!Number.isSafeInteger(githubUser.id) || !githubUser.login || !/^[A-Za-z0-9-]{1,39}$/.test(githubUser.login)) throw new Error("GitHub account response is invalid");
     const encrypted = await encryptGithubToken(c.env, tokenData.access_token);
+    const encryptedRefresh = tokenData.refresh_token ? await encryptGithubToken(c.env, tokenData.refresh_token) : null;
+    const tokenExpiresAt = Number.isFinite(tokenData.expires_in) ? new Date(Date.now() + Number(tokenData.expires_in) * 1000).toISOString() : null;
+    const refreshTokenExpiresAt = Number.isFinite(tokenData.refresh_token_expires_in) ? new Date(Date.now() + Number(tokenData.refresh_token_expires_in) * 1000).toISOString() : null;
     await c.env.DB.prepare(
-      `INSERT INTO github_connections (id, organization_id, github_user_id, github_login, encrypted_access_token, access_token_iv, scopes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO github_connections (id, organization_id, github_user_id, github_login, encrypted_access_token, access_token_iv, encrypted_refresh_token, refresh_token_iv, token_expires_at, refresh_token_expires_at, scopes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(organization_id) DO UPDATE SET github_user_id = excluded.github_user_id, github_login = excluded.github_login,
-         encrypted_access_token = excluded.encrypted_access_token, access_token_iv = excluded.access_token_iv, scopes = excluded.scopes, updated_at = datetime('now')`,
-    ).bind(crypto.randomUUID(), pending.organization_id, String(githubUser.id), githubUser.login, encrypted.ciphertext, encrypted.iv, tokenData.scope ?? "GitHub App permissions").run();
+         encrypted_access_token = excluded.encrypted_access_token, access_token_iv = excluded.access_token_iv,
+         encrypted_refresh_token = excluded.encrypted_refresh_token, refresh_token_iv = excluded.refresh_token_iv,
+         token_expires_at = excluded.token_expires_at, refresh_token_expires_at = excluded.refresh_token_expires_at,
+         scopes = excluded.scopes, updated_at = datetime('now')`,
+    ).bind(crypto.randomUUID(), pending.organization_id, String(githubUser.id), githubUser.login,
+      encrypted.ciphertext, encrypted.iv, encryptedRefresh?.ciphertext ?? null, encryptedRefresh?.iv ?? null,
+      tokenExpiresAt, refreshTokenExpiresAt, tokenData.scope ?? "GitHub App permissions").run();
     await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, metadata) VALUES (?, ?, ?, 'github.connected', 'github_connection', ?)")
       .bind(crypto.randomUUID(), pending.organization_id, pending.user_id, JSON.stringify({ githubLogin: githubUser.login })).run();
     return c.redirect(githubDashboardRedirect(c.env, "connected"));
@@ -2866,11 +2921,11 @@ app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const connection = await c.env.DB.prepare(
-    "SELECT encrypted_access_token, access_token_iv FROM github_connections WHERE organization_id = ? LIMIT 1",
-  ).bind(identity.organizationId).first<{ encrypted_access_token: string; access_token_iv: string }>();
+    "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
+  ).bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect a GitHub account first." }, 409);
   try {
-    const token = await decryptGithubToken(c.env, connection.encrypted_access_token, connection.access_token_iv);
+    const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
     const installationsResponse = await githubApi(token, "/user/installations?per_page=100");
     if (!installationsResponse.ok) return c.json({ message: "Unable to list GitHub App installations. Reinstall the Nexora GitHub App with repository access." }, 502);
     const installationsData = await installationsResponse.json() as { installations?: Array<{ id: number; account?: { login?: string } }> };
@@ -2912,10 +2967,10 @@ app.post("/v1/github/projects", async (c) => {
   }
   const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>();
   if (!account) return c.json({ message: "Choose an active hosting account in this workspace." }, 404);
-  const connection = await c.env.DB.prepare("SELECT encrypted_access_token, access_token_iv FROM github_connections WHERE organization_id = ? LIMIT 1").bind(identity.organizationId).first<{ encrypted_access_token: string; access_token_iv: string }>();
+  const connection = await c.env.DB.prepare("SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1").bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect GitHub first." }, 409);
   try {
-    const token = await decryptGithubToken(c.env, connection.encrypted_access_token, connection.access_token_iv);
+    const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
     const installationResponse = await githubApi(token, `/user/installations/${installationId}/repositories?per_page=100`);
     if (!installationResponse.ok) return c.json({ message: "GitHub App installation is not accessible to this workspace." }, 403);
     const installationData = await installationResponse.json() as { repositories?: Array<{ id: number; full_name: string; default_branch: string }> };
