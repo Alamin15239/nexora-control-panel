@@ -4,6 +4,8 @@ package provisionipc
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -81,8 +83,8 @@ func TestServerRejectsTrailingRequestData(t *testing.T) {
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	var response [1]byte
-	if n, err := conn.Read(response[:]); n != 0 || err == nil {
-		t.Fatalf("expected connection close for trailing bytes, read=%d err=%v", n, err)
+	if n, err := conn.Read(response[:]); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF for trailing bytes, read=%d err=%v", n, err)
 	}
 }
 
