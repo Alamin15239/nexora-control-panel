@@ -13,6 +13,11 @@ type Bindings = {
   RESEND_API_KEY?: string;
   EMAIL_FROM?: string;
   DATABASE_SECRET_ENCRYPTION_KEY?: string;
+  GITHUB_APP_CLIENT_ID?: string;
+  GITHUB_APP_CLIENT_SECRET?: string;
+  GITHUB_OAUTH_CALLBACK_URL?: string;
+  GITHUB_TOKEN_ENCRYPTION_KEY?: string;
+  DASHBOARD_URL?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -2732,6 +2737,224 @@ async function checkMissedHeartbeats(env: Bindings): Promise<void> {
     ]);
   }
 }
+
+// GitHub App OAuth: the app's configured repository permissions, not broad OAuth scopes,
+// determine what the customer grants. Build execution is intentionally not part of these routes.
+function githubEncryptionKey(env: Bindings): Uint8Array {
+  const value = env.GITHUB_TOKEN_ENCRYPTION_KEY ?? "";
+  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("GitHub token encryption is not configured");
+  return new Uint8Array(value.match(/.{2}/g)!.map((part) => Number.parseInt(part, 16)));
+}
+
+async function encryptGithubToken(env: Bindings, token: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", githubEncryptionKey(env), "AES-GCM", false, ["encrypt"]);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(token));
+  return { iv: base64(iv), ciphertext: base64(new Uint8Array(encrypted)) };
+}
+
+async function decryptGithubToken(env: Bindings, ciphertext: string, iv: string): Promise<string> {
+  const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", githubEncryptionKey(env), "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(iv) }, key, decode(ciphertext));
+  return new TextDecoder().decode(plaintext);
+}
+
+function githubDashboardRedirect(env: Bindings, status: string): string {
+  const base = env.DASHBOARD_URL ?? "";
+  let url: URL;
+  try { url = new URL(base); } catch { throw new Error("Dashboard URL is not configured"); }
+  if (url.protocol !== "https:" || url.username || url.password) throw new Error("Dashboard URL must be an HTTPS origin");
+  url.pathname = "/settings/deployments";
+  url.search = new URLSearchParams({ github: status }).toString();
+  url.hash = "";
+  return url.toString();
+}
+
+async function githubApi(token: string, path: string): Promise<Response> {
+  return fetch(`https://api.github.com${path}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "Nexora-Control-Panel",
+    },
+  });
+}
+
+app.get("/v1/github/connection", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const connection = await c.env.DB.prepare(
+    "SELECT github_login, scopes, created_at FROM github_connections WHERE organization_id = ? LIMIT 1",
+  ).bind(identity.organizationId).first<{ github_login: string; scopes: string; created_at: string }>();
+  return c.json({ connected: Boolean(connection), connection: connection ? { login: connection.github_login, scopes: connection.scopes, connectedAt: connection.created_at } : null });
+});
+
+app.post("/v1/github/connect", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) {
+    return c.json({ message: "GitHub App credentials, callback URL, and token encryption key must be configured first." }, 503);
+  }
+  try { githubEncryptionKey(c.env); new URL(c.env.GITHUB_OAUTH_CALLBACK_URL); }
+  catch { return c.json({ message: "GitHub OAuth configuration is invalid." }, 503); }
+  const state = randomHex(32);
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM github_oauth_states WHERE expires_at <= ? OR consumed_at IS NOT NULL").bind(new Date().toISOString()),
+    c.env.DB.prepare("INSERT INTO github_oauth_states (state_hash, organization_id, user_id, expires_at) VALUES (?, ?, ?, ?)")
+      .bind(await sha256(state), identity.organizationId, identity.id, expiresAt),
+  ]);
+  const authorize = new URL("https://github.com/login/oauth/authorize");
+  authorize.searchParams.set("client_id", c.env.GITHUB_APP_CLIENT_ID);
+  authorize.searchParams.set("redirect_uri", c.env.GITHUB_OAUTH_CALLBACK_URL);
+  authorize.searchParams.set("state", state);
+  return c.json({ authorizationUrl: authorize.toString() });
+});
+
+app.get("/v1/github/callback", async (c) => {
+  const providerError = c.req.query("error");
+  if (providerError) {
+    try { return c.redirect(githubDashboardRedirect(c.env, "denied")); }
+    catch { return c.text("GitHub connection was not completed.", 503); }
+  }
+  const code = c.req.query("code") ?? "";
+  const state = c.req.query("state") ?? "";
+  if (!/^[a-f0-9]{64}$/i.test(state) || !/^[A-Za-z0-9.\-_]{1,200}$/.test(code)) return c.text("Invalid GitHub OAuth callback.", 400);
+  if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_APP_CLIENT_SECRET || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) return c.text("GitHub OAuth is not configured.", 503);
+  const stateHash = await sha256(state);
+  const pending = await c.env.DB.prepare(
+    "SELECT organization_id, user_id FROM github_oauth_states WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ? LIMIT 1",
+  ).bind(stateHash, new Date().toISOString()).first<{ organization_id: string; user_id: string }>();
+  if (!pending) return c.text("GitHub authorization state is invalid or expired.", 400);
+  const consumed = await c.env.DB.prepare(
+    "UPDATE github_oauth_states SET consumed_at = ? WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+  ).bind(new Date().toISOString(), stateHash, new Date().toISOString()).run();
+  if ((consumed.meta?.changes ?? 0) !== 1) return c.text("GitHub authorization state has already been used.", 400);
+  try {
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: c.env.GITHUB_APP_CLIENT_ID, client_secret: c.env.GITHUB_APP_CLIENT_SECRET, code, redirect_uri: c.env.GITHUB_OAUTH_CALLBACK_URL }),
+    });
+    if (!tokenResponse.ok) throw new Error("GitHub token exchange failed");
+    const tokenData = await tokenResponse.json() as { access_token?: string; token_type?: string; scope?: string; error?: string };
+    if (!tokenData.access_token || tokenData.token_type?.toLowerCase() !== "bearer") throw new Error("GitHub did not issue a usable access token");
+    const userResponse = await githubApi(tokenData.access_token, "/user");
+    if (!userResponse.ok) throw new Error("Unable to verify GitHub account");
+    const githubUser = await userResponse.json() as { id?: number; login?: string };
+    if (!Number.isSafeInteger(githubUser.id) || !githubUser.login || !/^[A-Za-z0-9-]{1,39}$/.test(githubUser.login)) throw new Error("GitHub account response is invalid");
+    const encrypted = await encryptGithubToken(c.env, tokenData.access_token);
+    await c.env.DB.prepare(
+      `INSERT INTO github_connections (id, organization_id, github_user_id, github_login, encrypted_access_token, access_token_iv, scopes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET github_user_id = excluded.github_user_id, github_login = excluded.github_login,
+         encrypted_access_token = excluded.encrypted_access_token, access_token_iv = excluded.access_token_iv, scopes = excluded.scopes, updated_at = datetime('now')`,
+    ).bind(crypto.randomUUID(), pending.organization_id, String(githubUser.id), githubUser.login, encrypted.ciphertext, encrypted.iv, tokenData.scope ?? "GitHub App permissions").run();
+    await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, metadata) VALUES (?, ?, ?, 'github.connected', 'github_connection', ?)")
+      .bind(crypto.randomUUID(), pending.organization_id, pending.user_id, JSON.stringify({ githubLogin: githubUser.login })).run();
+    return c.redirect(githubDashboardRedirect(c.env, "connected"));
+  } catch {
+    try { return c.redirect(githubDashboardRedirect(c.env, "error")); }
+    catch { return c.text("GitHub connection failed. Check server configuration and try again.", 502); }
+  }
+});
+
+app.get("/v1/github/repositories", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const connection = await c.env.DB.prepare(
+    "SELECT encrypted_access_token, access_token_iv FROM github_connections WHERE organization_id = ? LIMIT 1",
+  ).bind(identity.organizationId).first<{ encrypted_access_token: string; access_token_iv: string }>();
+  if (!connection) return c.json({ message: "Connect a GitHub account first." }, 409);
+  try {
+    const token = await decryptGithubToken(c.env, connection.encrypted_access_token, connection.access_token_iv);
+    const installationsResponse = await githubApi(token, "/user/installations?per_page=100");
+    if (!installationsResponse.ok) return c.json({ message: "Unable to list GitHub App installations. Reinstall the Nexora GitHub App with repository access." }, 502);
+    const installationsData = await installationsResponse.json() as { installations?: Array<{ id: number; account?: { login?: string } }> };
+    const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
+    for (const installation of (installationsData.installations ?? []).slice(0, 25)) {
+      if (!Number.isSafeInteger(installation.id)) continue;
+      const response = await githubApi(token, `/user/installations/${installation.id}/repositories?per_page=100`);
+      if (!response.ok) continue;
+      const data = await response.json() as { repositories?: Array<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }> };
+      for (const repo of data.repositories ?? []) {
+        if (Number.isSafeInteger(repo.id) && repo.full_name && repo.name && repo.default_branch) repositories.push({
+          id: repo.id, name: repo.name, fullName: repo.full_name, private: Boolean(repo.private),
+          defaultBranch: repo.default_branch, htmlUrl: repo.html_url, installationId: installation.id, owner: repo.owner?.login ?? installation.account?.login ?? "",
+        });
+      }
+    }
+    return c.json({ repositories });
+  } catch {
+    return c.json({ message: "Unable to read GitHub repositories. Reconnect the GitHub App and try again." }, 502);
+  }
+});
+
+app.post("/v1/github/projects", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const hostingAccountId = typeof input.hostingAccountId === "string" ? input.hostingAccountId : "";
+  const repositoryId = Number(input.repositoryId);
+  const installationId = Number(input.installationId);
+  const repositoryFullName = typeof input.repositoryFullName === "string" ? input.repositoryFullName.trim() : "";
+  const branch = typeof input.productionBranch === "string" ? input.productionBranch.trim() : "";
+  const rootDirectory = typeof input.rootDirectory === "string" ? input.rootDirectory.trim() : ".";
+  const outputDirectory = typeof input.outputDirectory === "string" ? input.outputDirectory.trim() : "dist";
+  const framework = typeof input.framework === "string" ? input.framework : "auto";
+  if (!hostingAccountId || !Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(rootDirectory) || rootDirectory.startsWith("/") || rootDirectory.split("/").includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(outputDirectory) || outputDirectory.startsWith("/") || outputDirectory.split("/").includes("..") || !["auto", "static", "vite", "react", "vue", "astro", "next-static"].includes(framework)) {
+    return c.json({ message: "Invalid repository, branch, directory, framework, or hosting account configuration." }, 400);
+  }
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Choose an active hosting account in this workspace." }, 404);
+  const connection = await c.env.DB.prepare("SELECT encrypted_access_token, access_token_iv FROM github_connections WHERE organization_id = ? LIMIT 1").bind(identity.organizationId).first<{ encrypted_access_token: string; access_token_iv: string }>();
+  if (!connection) return c.json({ message: "Connect GitHub first." }, 409);
+  try {
+    const token = await decryptGithubToken(c.env, connection.encrypted_access_token, connection.access_token_iv);
+    const response = await githubApi(token, `/repositories/${repositoryId}`);
+    if (!response.ok) return c.json({ message: "Repository is not accessible through the connected GitHub App." }, 403);
+    const repo = await response.json() as { id?: number; full_name?: string; default_branch?: string };
+    if (repo.id !== repositoryId || repo.full_name?.toLowerCase() !== repositoryFullName.toLowerCase()) return c.json({ message: "Repository identity does not match the selected repository." }, 400);
+    const id = crypto.randomUUID();
+    await c.env.DB.prepare(
+      `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, status)
+       VALUES (?, ?, ?, (SELECT id FROM github_connections WHERE organization_id = ?), ?, ?, ?, ?, ?, ?, ?, 'configured')
+    ).bind(id, identity.organizationId, hostingAccountId, identity.organizationId, String(repositoryId), repo.full_name, String(installationId), branch || repo.default_branch || "main", rootDirectory || ".", outputDirectory || "dist", framework).run();
+    await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.project_configured', 'github_project', ?, ?)")
+      .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ repository: repo.full_name, hostingAccountId })).run();
+    return c.json({ project: { id, repositoryFullName: repo.full_name, productionBranch: branch || repo.default_branch || "main", framework, outputDirectory, status: "configured" }, message: "Repository linked. Build execution will be enabled after the isolated build worker is deployed." }, 201);
+  } catch (error) {
+    const message = error instanceof Error && /UNIQUE constraint failed/.test(error.message) ? "This hosting account already has a GitHub project linked." : "Unable to configure the GitHub project.";
+    return c.json({ message }, 409);
+  }
+});
+
+app.get("/v1/github/projects", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName,
+            production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory,
+            framework, auto_deploy AS autoDeploy, status, created_at AS createdAt
+     FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
+  ).bind(identity.organizationId).all();
+  return c.json({ projects: result.results ?? [] });
+});
+
+app.delete("/v1/github/connection", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  await c.env.DB.prepare("DELETE FROM github_connections WHERE organization_id = ?").bind(identity.organizationId).run();
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type) VALUES (?, ?, ?, 'github.disconnected', 'github_connection')")
+    .bind(crypto.randomUUID(), identity.organizationId, identity.id).run();
+  return c.json({ disconnected: true });
+});
 
 export default {
   fetch: app.fetch,
