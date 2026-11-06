@@ -124,3 +124,10 @@ OIDC exchange additionally requires `github_projects.trusted_workflow_sha` to be
 
 
 Deployment dispatch now also refuses to start a GitHub Actions run unless the project has a full, administrator-approved workflow SHA. The approval endpoint is organization-scoped, OWNER/ADMIN-only, validates the 40-character SHA format, and writes an audit event. The OIDC exchange compares the signed `workflow_sha` claim to that pin. This binds upload credential issuance to the exact workflow revision an administrator reviewed, rather than trusting only a mutable workflow path. A changed workflow file requires a new review and pin before dispatch resumes.
+
+
+## Static archive validator foundation
+
+The Linux agent now contains a standalone `internal/deployarchive` validator for gzip-compressed tar archives. It parses without extracting and enforces entry-count, per-file, and total expanded-size limits; rejects absolute paths, traversal components, backslashes, volume-qualified paths, duplicate normalized paths, file/directory collisions, symlinks, hard links, and non-regular special file types; and drains the gzip stream to verify the trailer/checksum and zero-only tar padding. Unit tests cover valid static-site archives, unsafe entry types, traversal, duplicates/collisions, and size/count limits.
+
+This package is not yet wired into the privileged publisher or the Worker upload lifecycle. No archive is extracted or published by this milestone. The publisher must call this validator (and retain independent safe extraction/path checks) before any filesystem changes.
