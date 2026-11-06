@@ -115,6 +115,16 @@ The verifier exposes two APIs: `Verify` additionally binds claims to caller-supp
 
 The Worker signing endpoint/key distribution and receiver integration are not implemented. No private signing key or public key has been provisioned. This package is a tested cryptographic boundary primitive, not an enabled deployment path.
 
+### Worker-to-agent artifact delivery endpoint (implemented, receiver pending)
+
+The API now exposes `GET /v1/agent/deployments/:deploymentId/artifact`. It authenticates the enrolled node using the existing `X-Nexora-Node`, timestamp, nonce, and HMAC request-signature scheme; rejects stale timestamps and replayed nonces; and scopes the deployment lookup through the credential's organization and server ID joined to the project's hosting account. A node cannot fetch an artifact belonging to another organization or server.
+
+Before streaming, the Worker checks the D1 artifact key, exact byte count and SHA-256, and verifies the R2 object's size and server-written custom metadata against the deployment record. It signs a five-minute RS256 envelope containing the organization/project/deployment/account IDs, immutable repository ID, commit SHA, artifact digest/size, JTI, issuer, audience, and time bounds. The gzip stream is returned directly from private R2 with the envelope in `X-Nexora-Deployment-Envelope`, the digest in `X-Nexora-Artifact-SHA256`, and `Cache-Control: no-store`. The endpoint is unavailable unless the private R2 binding and signing secrets are configured.
+
+Signing secrets (not provisioned): `GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY` (unencrypted PKCS#8 PEM), `GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID`, `GITHUB_DEPLOYMENT_ENVELOPE_ISSUER`, and `GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE`. The corresponding public key must be pinned independently at the privileged receiver. Never place the private key on the agent, VM, browser, or GitHub runner.
+
+This endpoint only authenticates and streams a staged artifact. The Linux agent does not yet call it, and no privileged receiver, durable JTI replay store, root-owned staging lifecycle, safe extractor, or publisher is wired. Repeated authenticated GETs can issue distinct short-lived JTIs; the receiver must additionally enforce deployment-level state/atomic consumption so a completed deployment cannot be replay-published.
+
 ### Explicit implementation blockers
 
 - The Worker currently stages artifacts in R2 only when the ARTIFACTS binding exists; that binding/bucket has not been provisioned.
