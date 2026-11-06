@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS github_projects (
   build_command TEXT,
   output_directory TEXT NOT NULL DEFAULT 'dist',
   framework TEXT NOT NULL DEFAULT 'auto',
-  auto_deploy INTEGER NOT NULL DEFAULT 1 CHECK (auto_deploy IN (0, 1)),
+  auto_deploy INTEGER NOT NULL DEFAULT 0 CHECK (auto_deploy IN (0, 1)),
   webhook_id TEXT,
   webhook_secret_hash TEXT,
   status TEXT NOT NULL DEFAULT 'configured' CHECK (status IN ('configured', 'building', 'ready', 'failed', 'paused')),
