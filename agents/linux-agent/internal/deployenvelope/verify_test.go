@@ -132,3 +132,23 @@ func TestVerifyRejectsUnknownClaimsAndMalformedToken(t *testing.T) {
 		t.Fatal("Verify() accepted malformed token")
 	}
 }
+
+func TestVerifySignedReturnsTrustedIdentityForLocalAuthorization(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil { t.Fatal(err) }
+	now := time.Unix(1_800_000_000, 0)
+	expected := testExpected()
+	token := signTestToken(t, key, validClaims(expected, now))
+	claims, err := VerifySigned(token, map[string]*rsa.PublicKey{"test-key-1": &key.PublicKey}, expected.Issuer, expected.Audience, now)
+	if err != nil { t.Fatalf("VerifySigned() error = %v", err) }
+	if claims.HostingAccountID != expected.HostingAccountID || claims.DeploymentID != expected.DeploymentID {
+		t.Fatalf("unexpected verified identity: %+v", claims)
+	}
+	if _, err := VerifySigned(token, map[string]*rsa.PublicKey{"test-key-1": &key.PublicKey}, expected.Issuer, "wrong-audience", now); err == nil {
+		t.Fatal("VerifySigned() accepted a different audience")
+	}
+	if _, err := VerifySigned(token, map[string]*rsa.PublicKey{"test-key-1": &key.PublicKey}, "wrong-issuer", expected.Audience, now); err == nil {
+		t.Fatal("VerifySigned() accepted a different issuer")
+	}
+}
+
