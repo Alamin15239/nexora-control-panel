@@ -190,3 +190,91 @@ func TestServerCancellationKillsHelperProcessGroup(t *testing.T) {
 		t.Fatalf("helper child process %d survived server cancellation", childPID)
 	}
 }
+
+
+func TestClientDisconnectCancelsHelperProcessGroup(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	pidFile := filepath.Join(dir, "child.pid")
+	quotedPIDFile := "'" + strings.ReplaceAll(pidFile, "'", "'\\''") + "'"
+	script := "#!/bin/sh\\n/bin/sleep 30 &\\necho $! > " + quotedPIDFile + "\\nwait\\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath, _ := startTestServer(t, uid, helper)
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(conn, []byte("request"), MaxRequestBytes); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var childPID int
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile(pidFile)
+		if readErr == nil {
+			childPID, readErr = strconv.Atoi(strings.TrimSpace(string(data)))
+			if readErr == nil && childPID > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPID <= 0 {
+		_ = conn.Close()
+		t.Fatal("helper did not start its child process")
+	}
+	defer func() { _ = syscall.Kill(childPID, syscall.SIGKILL) }()
+
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, readErr := os.ReadFile("/proc/" + strconv.Itoa(childPID) + "/stat")
+		if errors.Is(readErr, os.ErrNotExist) {
+			return
+		}
+		if readErr == nil {
+			closeParen := strings.LastIndex(string(data), ")")
+			if closeParen >= 0 {
+				fields := strings.Fields(string(data)[closeParen+1:])
+				if len(fields) > 0 && fields[0] == "Z" {
+					return
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("helper child process %d survived client disconnect", childPID)
+}
+
+func TestServerKeepsEncodedResponseWithinFrameLimit(t *testing.T) {
+	uid := uint32(os.Getuid())
+	dir := t.TempDir()
+	helper := filepath.Join(dir, "helper.sh")
+	script := "#!/bin/sh\\n/usr/bin/head -c 6291456 /dev/zero\\n"
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath, _ := startTestServer(t, uid, helper)
+	result, err := Run(context.Background(), socketPath, []byte("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Stdout) > maxCapturedStreamBytes || len(result.Stderr) > maxCapturedStreamBytes {
+		t.Fatalf("captured output exceeded per-stream cap: stdout=%d stderr=%d", len(result.Stdout), len(result.Stderr))
+	}
+	payload, err := marshalResult(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > MaxResponseBytes {
+		t.Fatalf("encoded response is %d bytes, limit is %d", len(payload), MaxResponseBytes)
+	}
+}
