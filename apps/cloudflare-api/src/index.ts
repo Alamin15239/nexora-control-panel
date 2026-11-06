@@ -2865,10 +2865,10 @@ async function githubAppJwt(env: Bindings): Promise<string> {
 
 async function githubInstallationToken(env: Bindings, installationId: string, repositoryId: string): Promise<string> {
   const jwt = await githubAppJwt(env);
-  const response = await fetch(\`https://api.github.com/app/installations/\${encodeURIComponent(installationId)}/access_tokens\`, {
+  const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`, {
     method: "POST",
     headers: {
-      Authorization: \`Bearer \${jwt}\`, Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${jwt}`, Accept: "application/vnd.github+json",
       "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "Nexora-Control-Panel",
     },
