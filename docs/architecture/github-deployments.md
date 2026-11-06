@@ -100,3 +100,12 @@ The API now exposes `POST /v1/github/projects/:projectId/deployments` for an adm
 Migration `0015_github_deployment_concurrency.sql` adds a partial unique index so a project cannot have two queued or active deployment records concurrently. The deployment record is inserted before dispatch; a rejected dispatch is recorded as failed rather than leaving an invisible attempt. A successful GitHub dispatch is recorded as `queued`, not `succeeded`.
 
 **This is dispatch plumbing, not a completed deploy pipeline.** No OIDC callback, artifact upload, archive validation, or publishing endpoint exists yet. The dashboard deliberately keeps the Deploy action disabled until those controls and a reviewed workflow template are implemented. A queued record means only that GitHub accepted the workflow-dispatch request; it does not mean the build started, passed, or changed the live website.
+
+
+## GitHub Actions OIDC verification milestone
+
+The API now exposes `POST /v1/github/deployments/:deploymentId/oidc/exchange`. It accepts a GitHub Actions OIDC JWT as a bearer token, verifies the RS256 signature against GitHub's published JWKS, and checks the issuer, configured audience, expiry/issued-at window, repository name and immutable repository ID, exact branch ref, exact dispatched commit SHA, `workflow_dispatch` event, exact `.github/workflows/nexora-deploy.yml` workflow ref, and `runner_environment=github-hosted`. It rejects self-hosted runners and any run that does not match the queued deployment.
+
+The exchange creates a random 256-bit upload capability, stores only its SHA-256 hash, binds it to one organization/project/deployment/repository/branch/commit and GitHub run ID/attempt, and expires it after five minutes. A unique deployment constraint and conditional state transition allow only one runner claim. The capability is withheld unless a private R2 bucket is bound as `ARTIFACTS`; no bucket binding is currently configured, so the exchange returns HTTP 503 rather than issuing a credential that cannot be used. Migration `0016_github_oidc_artifact_capabilities.sql` adds the capability table and verified run identity columns.
+
+The artifact PUT endpoint, streaming size enforcement, archive validation, and publisher are not implemented yet. Do not add an `ARTIFACTS` binding or apply the migration in production until the storage bucket and upload/publish lifecycle are ready and tested.
