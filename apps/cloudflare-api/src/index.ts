@@ -3128,6 +3128,32 @@ async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Re
   return claims;
 }
 
+
+app.put("/v1/github/projects/:projectId/workflow-trust", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const workflowSha = typeof input.workflowSha === "string" ? input.workflowSha.trim().toLowerCase() : "";
+  if (!/^[a-f0-9]{40}$/.test(workflowSha)) {
+    return c.json({ message: "workflowSha must be a full 40-character Git commit SHA reviewed by an administrator." }, 400);
+  }
+
+  const projectId = c.req.param("projectId");
+  const updated = await c.env.DB.prepare(
+    "UPDATE github_projects SET trusted_workflow_sha = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?",
+  ).bind(workflowSha, projectId, identity.organizationId).run();
+  if ((updated.meta.changes ?? 0) !== 1) return c.json({ message: "GitHub project not found." }, 404);
+
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.workflow_trust_updated', 'github_project', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, projectId, JSON.stringify({ workflowSha })).run();
+  return c.json({ projectId, trustedWorkflowSha: workflowSha });
+});
+
 app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   const authorization = c.req.header("authorization") ?? "";
   const match = /^Bearer\s+([A-Za-z0-9._-]+)$/.exec(authorization);
@@ -3142,15 +3168,18 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   }
 
   const deployment = await c.env.DB.prepare(
-    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName, p.trusted_workflow_sha AS trustedWorkflowSha FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
   ).bind(c.req.param("deploymentId")).first<{
     id: string; organizationId: string; projectId: string; commitSha: string; branch: string;
-    status: string; repositoryId: string; repositoryFullName: string;
+    status: string; repositoryId: string; repositoryFullName: string; trustedWorkflowSha: string | null;
   }>();
   if (!deployment || deployment.status !== "queued") {
     return c.json({ message: "Deployment not found or no longer accepting a runner." }, 409);
   }
 
+  if (!deployment.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(deployment.trustedWorkflowSha)) {
+    return c.json({ message: "An administrator must approve and pin the deployment workflow revision before builds can run." }, 409);
+  }
   const expectedWorkflowRef = deployment.repositoryFullName + "/.github/workflows/nexora-deploy.yml@refs/heads/" + deployment.branch;
   const runId = String(claims.run_id ?? "");
   const runAttempt = Number(claims.run_attempt);
@@ -3164,6 +3193,7 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     claims.workflow_ref !== expectedWorkflowRef ||
     claims.runner_environment !== "github-hosted" ||
     !/^[a-f0-9]{40}$/i.test(workflowSha) ||
+    workflowSha.toLowerCase() !== deployment.trustedWorkflowSha.toLowerCase() ||
     !/^\d{1,20}$/.test(runId) ||
     !Number.isSafeInteger(runAttempt) || runAttempt < 1 || runAttempt > 100
   ) {
