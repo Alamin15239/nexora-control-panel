@@ -3466,54 +3466,54 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
   const objectKey = "staging/" + token.organizationId + "/" + token.projectId + "/" + token.deploymentId + "/" + randomHex(16) + ".tar.gz";
   try {
     let receivedBytes = 0;
-  const fixedLength = new FixedLengthStream(contentLength);
-  const writer = fixedLength.writable.getWriter();
-  const reader = c.req.raw.body.getReader();
-  const putPromise = c.env.ARTIFACTS.put(objectKey, fixedLength.readable, {
-    sha256: artifactSHA256,
-    httpMetadata: { contentType: "application/gzip" },
-    customMetadata: {
-      organizationId: token.organizationId,
-      projectId: token.projectId,
-      deploymentId: token.deploymentId,
-      commitSha: token.commitSha,
-      artifactSha256: artifactSHA256,
-    },
-  });
-  const pumpPromise = (async () => {
-    try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        receivedBytes += chunk.value.byteLength;
-        if (receivedBytes > maxBytes || receivedBytes > contentLength) {
-          throw new Error("Artifact exceeds its declared or maximum size");
+    const fixedLength = new FixedLengthStream(contentLength);
+    const writer = fixedLength.writable.getWriter();
+    const reader = c.req.raw.body.getReader();
+    const putPromise = c.env.ARTIFACTS.put(objectKey, fixedLength.readable, {
+      sha256: artifactSHA256,
+      httpMetadata: { contentType: "application/gzip" },
+      customMetadata: {
+        organizationId: token.organizationId,
+        projectId: token.projectId,
+        deploymentId: token.deploymentId,
+        commitSha: token.commitSha,
+        artifactSha256: artifactSHA256,
+      },
+    });
+    const pumpPromise = (async () => {
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          receivedBytes += chunk.value.byteLength;
+          if (receivedBytes > maxBytes || receivedBytes > contentLength) {
+            throw new Error("Artifact exceeds its declared or maximum size");
+          }
+          await writer.write(chunk.value);
         }
-        await writer.write(chunk.value);
+        if (receivedBytes !== contentLength) throw new Error("Content-Length mismatch");
+        await writer.close();
+      } catch (error) {
+        await writer.abort(error).catch(() => undefined);
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
+      } finally {
+        reader.releaseLock();
+        writer.releaseLock();
       }
-      if (receivedBytes !== contentLength) throw new Error("Content-Length mismatch");
-      await writer.close();
-    } catch (error) {
-      await writer.abort(error).catch(() => undefined);
-      await reader.cancel(error).catch(() => undefined);
-      throw error;
-    } finally {
-      reader.releaseLock();
-      writer.releaseLock();
+    })();
+    const [pumpResult, putResult] = await Promise.allSettled([pumpPromise, putPromise]);
+    if (pumpResult.status === "rejected") throw pumpResult.reason;
+    if (putResult.status === "rejected") throw putResult.reason;
+    const storedObject = putResult.value;
+    if (!storedObject || storedObject.size !== receivedBytes) {
+      throw new Error("R2 stored object size does not match the received artifact");
     }
-  })();
-  const [pumpResult, putResult] = await Promise.allSettled([pumpPromise, putPromise]);
-  if (pumpResult.status === "rejected") throw pumpResult.reason;
-  if (putResult.status === "rejected") throw putResult.reason;
-  const storedObject = putResult.value;
-  if (!storedObject || storedObject.size !== receivedBytes) {
-    throw new Error("R2 stored object size does not match the received artifact");
-  }
-  const storedChecksum = storedObject.checksums.sha256;
-  if (!storedChecksum || hex(new Uint8Array(storedChecksum)) !== artifactSHA256) {
-    throw new Error("R2 stored object checksum does not match the declared artifact digest");
-  }
-
+    const storedChecksum = storedObject.checksums.sha256;
+    if (!storedChecksum || hex(new Uint8Array(storedChecksum)) !== artifactSHA256) {
+      throw new Error("R2 stored object checksum does not match the declared artifact digest");
+    }
+  
     const updated = await c.env.DB.prepare(
       "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
     ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId).run();
