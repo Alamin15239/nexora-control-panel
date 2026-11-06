@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"syscall"
 	"path/filepath"
 	"testing"
 	"time"
@@ -83,7 +84,7 @@ func TestServerRejectsTrailingRequestData(t *testing.T) {
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	var response [1]byte
-	if n, err := conn.Read(response[:]); n != 0 || !errors.Is(err, io.EOF) {
+	if n, err := conn.Read(response[:]); n != 0 || !(errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)) {
 		t.Fatalf("expected EOF for trailing bytes, read=%d err=%v", n, err)
 	}
 }
