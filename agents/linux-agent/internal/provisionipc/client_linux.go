@@ -27,8 +27,10 @@ func Run(ctx context.Context, socketPath string, request []byte) (Result, error)
 		return Result{}, fmt.Errorf("connect to provisioning service: %w", err)
 	}
 	defer conn.Close()
+	stopOnCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopOnCancel()
 
-	deadline := time.Now().Add(2 * time.Minute)
+	deadline := time.Now().Add(2*time.Minute + 10*time.Second)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
