@@ -86,7 +86,7 @@ func Verify(token string, keys map[string]*rsa.PublicKey, expected Expected, now
 		return zero, errors.New("unsupported JWS header")
 	}
 	key := keys[h.KeyID]
-	if key == nil || key.N.BitLen() < 2048 || key.E < 3 {
+	if key == nil || key.N == nil || key.N.BitLen() < 2048 || key.E < 3 {
 		return zero, errors.New("deployment signing key is not trusted")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
