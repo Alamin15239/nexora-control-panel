@@ -20,3 +20,7 @@ migrations_dir = "migrations"
 
 [triggers]
 crons = ["* * * * *"]
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "nexora-deployment-artifacts"
