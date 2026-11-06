@@ -3102,7 +3102,8 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   ).bind(project.id).first<{ id: string }>();
   if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
-  let deploymentId = crypto.randomUUID();
+  const deploymentId = crypto.randomUUID();
+  let deploymentCreated = false;
   try {
     const token = await githubInstallationToken(c.env, project.installationId, project.repositoryId);
     const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(project.productionBranch)}`, {
@@ -3114,6 +3115,13 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     if (!refResponse.ok) return c.json({ message: "Unable to resolve the configured production branch in GitHub." }, 502);
     const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
     if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
+
+    await c.env.DB.prepare(
+      `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
+       VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
+    ).bind(deploymentId, identity.organizationId, project.id, commitData.sha, project.productionBranch,
+      (commitData.commit?.message ?? "").slice(0, 500)).run();
+    deploymentCreated = true;
 
     const workflowPath = ".github/workflows/nexora-deploy.yml";
     const dispatch = await fetch(
@@ -3132,19 +3140,18 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       },
     );
     if (dispatch.status !== 204) {
+      await c.env.DB.prepare(
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
+      ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, identity.organizationId).run();
       return c.json({
         message: dispatch.status === 404
           ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
           : "GitHub did not accept the deployment workflow dispatch.",
+        deploymentId,
       }, dispatch.status === 404 ? 409 : 502);
     }
 
     await c.env.DB.batch([
-      c.env.DB.prepare(
-        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
-         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
-      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha, project.productionBranch,
-        (commitData.commit?.message ?? "").slice(0, 500)),
       c.env.DB.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
         .bind(project.id, identity.organizationId),
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
@@ -3156,8 +3163,13 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       message: "GitHub Actions accepted the workflow dispatch. Build execution is not complete until the isolated runner reports a verified artifact.",
     }, 202);
   } catch (error) {
+    if (deploymentCreated) {
+      await c.env.DB.prepare(
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Dispatch failed before GitHub accepted the workflow.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
+      ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
+    }
     console.error("GitHub deployment dispatch failed:", error instanceof Error ? error.message : "unknown error");
-    return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions." }, 502);
+    return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
   }
 });
 
