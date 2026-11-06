@@ -96,7 +96,7 @@ export default function GithubDeployments() {
   }
 
   async function disconnectGithub() {
-    if (!window.confirm("Disconnect this GitHub account? Existing project configuration will remain, but repository access will stop.")) return;
+    if (!window.confirm("Disconnect this GitHub account? Linked GitHub project configurations will be removed. Already-published website files will not be deleted.")) return;
     setBusy(true); setError("");
     try {
       const response = await fetch("/api/control/github/connection", { method: "DELETE" });
