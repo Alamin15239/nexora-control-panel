@@ -17,6 +17,7 @@ import (
 
 const (
 	maxConcurrentRequests = 4
+	requestReadTimeout    = 10 * time.Second
 	helperTimeout         = 2 * time.Minute
 	// JSON encodes []byte as base64. Keeping the combined raw streams below
 	// half the frame budget leaves ample room for base64 expansion and JSON.
@@ -105,13 +106,16 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 }
 
 func (s *Server) handle(parent context.Context, conn *net.UnixConn) {
-	_ = conn.SetDeadline(time.Now().Add(helperTimeout + 5*time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
 	uid, err := peerUID(conn)
 	if err != nil || uid != s.AllowedUID {
 		return
 	}
 	request, err := readFrame(conn, MaxRequestBytes)
 	if err != nil {
+		return
+	}
+	if err := conn.SetDeadline(time.Now().Add(helperTimeout + 5*time.Second)); err != nil {
 		return
 	}
 
