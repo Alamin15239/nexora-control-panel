@@ -81,10 +81,15 @@ func (s *Server) Serve(ctx context.Context, listener *net.UnixListener) error {
 	}
 	slots := make(chan struct{}, maxConcurrentRequests)
 	var workers sync.WaitGroup
+	shutdownWatcherDone := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		_ = listener.Close()
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-shutdownWatcherDone:
+		}
 	}()
+	defer close(shutdownWatcherDone)
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
