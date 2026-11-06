@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -49,14 +49,42 @@ var (
 	databaseNamePattern = regexp.MustCompile("^[a-z][a-z0-9_]{1,63}$")
 )
 
+func decodeRequest(reader io.Reader) (request, error) {
+	const maxRequestBytes = 1 << 20
+
+	rawRequest, err := io.ReadAll(io.LimitReader(reader, maxRequestBytes+1))
+	if err != nil {
+		return request{}, err
+	}
+	if len(rawRequest) > maxRequestBytes {
+		return request{}, fmt.Errorf("request exceeds %d bytes", maxRequestBytes)
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(string(rawRequest)))
+	decoder.DisallowUnknownFields()
+
+	var input request
+	if err := decoder.Decode(&input); err != nil {
+		return request{}, err
+	}
+
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return request{}, fmt.Errorf("multiple JSON documents")
+		}
+		return request{}, err
+	}
+
+	return input, nil
+}
+
 func main() {
 	if os.Geteuid() != 0 {
 		fail("ROOT_REQUIRED", "The Nexora provisioning helper must run as root.")
 	}
-	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
-	decoder.DisallowUnknownFields()
-	var input request
-	if err := decoder.Decode(&input); err != nil {
+	input, requestErr := decodeRequest(os.Stdin)
+	if requestErr != nil {
 		fail("INVALID_REQUEST", "The provisioning request is invalid.")
 	}
 	if input.Operation == "DATABASE_USAGE" {
@@ -94,15 +122,21 @@ func main() {
 		err = deleteDatabase(input.Username, input.DatabaseName, input.DatabaseUserNames)
 	case "CREATE_BACKUP":
 		err = createAccountBackup(input.Username, input.BackupID, input.DatabaseNames)
-		if err != nil { fail("BACKUP_CREATE_FAILED", "The hosting account backup could not be created.") }
+		if err != nil {
+			fail("BACKUP_CREATE_FAILED", "The hosting account backup could not be created.")
+		}
 		return
 	case "RESTORE_BACKUP":
 		err = stageAccountBackupRestore(input.Username, input.BackupID, input.ExpectedSHA256)
-		if err != nil { fail("BACKUP_RESTORE_STAGE_FAILED", "The backup could not be staged for restore.") }
+		if err != nil {
+			fail("BACKUP_RESTORE_STAGE_FAILED", "The backup could not be staged for restore.")
+		}
 		return
 	case "DELETE_BACKUP":
 		err = deleteAccountBackup(input.Username, input.BackupID)
-		if err != nil { fail("BACKUP_DELETE_FAILED", "The backup archive could not be deleted.") }
+		if err != nil {
+			fail("BACKUP_DELETE_FAILED", "The backup archive could not be deleted.")
+		}
 		return
 	default:
 		fail("UNSUPPORTED_OPERATION", "This provisioning operation is not supported.")
@@ -122,41 +156,67 @@ type databaseUsageEntry struct {
 }
 
 func databaseUsage() error {
-	statement := "SELECT s.schema_name, COALESCE(SUM(t.data_length + t.index_length), 0) " +
-		"FROM information_schema.schemata s " +
-		"LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name " +
-		"WHERE s.schema_name NOT IN ('information_schema','mysql','performance_schema','sys') " +
-		"GROUP BY s.schema_name ORDER BY s.schema_name"
-
-	output, err := exec.Command(
-		"/usr/bin/mariadb",
-		"--batch",
-		"--skip-column-names",
-		"-e",
-		statement,
-	).Output()
+	accounts, err := verifiedNexoraAccounts()
 	if err != nil {
-		return fmt.Errorf("MariaDB usage query failed: %s", safeOutput(string(output)))
+		return fmt.Errorf("managed account registry verification failed")
 	}
 
 	entries := make([]databaseUsageEntry, 0)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if line == "" {
-			continue
+	if len(accounts) > 0 {
+		prefixConditions := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			prefix := account.Username + "_"
+			prefixConditions = append(prefixConditions,
+				fmt.Sprintf("LEFT(s.schema_name, %d) = %s", len(prefix), sqlString(prefix)))
 		}
-		fields := strings.Split(line, "\t")
-		if len(fields) != 2 || !databaseNamePattern.MatchString(fields[0]) {
-			return fmt.Errorf("MariaDB returned an invalid database usage row")
-		}
-		usedBytes, err := strconv.ParseUint(fields[1], 10, 64)
+
+		statement := "SELECT s.schema_name, COALESCE(SUM(t.data_length + t.index_length), 0) " +
+			"FROM information_schema.schemata s " +
+			"LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name " +
+			"WHERE (" + strings.Join(prefixConditions, " OR ") + ") " +
+			"GROUP BY s.schema_name ORDER BY s.schema_name"
+
+		output, err := exec.Command(
+			"/usr/bin/mariadb",
+			"--batch",
+			"--skip-column-names",
+			"-e",
+			statement,
+		).Output()
 		if err != nil {
-			return fmt.Errorf("MariaDB returned an invalid database size")
+			return fmt.Errorf("MariaDB usage query failed: %s", safeOutput(string(output)))
 		}
-		entries = append(entries, databaseUsageEntry{
-			Name: fields[0], UsedBytes: usedBytes,
-		})
-		if len(entries) > 100 {
-			return fmt.Errorf("database usage result exceeds the allowed limit")
+
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			if line == "" {
+				continue
+			}
+			fields := strings.Split(line, "\t")
+			if len(fields) != 2 || !databaseNamePattern.MatchString(fields[0]) {
+				return fmt.Errorf("MariaDB returned an invalid database usage row")
+			}
+
+			managed := false
+			for _, account := range accounts {
+				if validateManagedDatabaseName(fields[0], account.Username) == nil {
+					managed = true
+					break
+				}
+			}
+			if !managed {
+				return fmt.Errorf("MariaDB returned a database outside the managed account registry")
+			}
+
+			usedBytes, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("MariaDB returned an invalid database size")
+			}
+			entries = append(entries, databaseUsageEntry{
+				Name: fields[0], UsedBytes: usedBytes,
+			})
+			if len(entries) > 100 {
+				return fmt.Errorf("database usage result exceeds the allowed limit")
+			}
 		}
 	}
 
@@ -376,129 +436,24 @@ func provisionAccount(username string) error {
 	if len(fields) != 7 || fields[6] != "/usr/sbin/nologin" {
 		return fmt.Errorf("ACCOUNT_CONFLICT: hosting users must use /usr/sbin/nologin")
 	}
-	for _, path := range []string{"/home", home, filepath.Join(home, "public_html")} {
-		if info, e := os.Lstat(path); e == nil && info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("PATH_CONFLICT: refusing symbolic link in hosting home path")
-		} else if e != nil && !errors.Is(e, os.ErrNotExist) {
-			return fmt.Errorf("PATH_CHECK_FAILED: unable to verify hosting directory")
-		}
-	}
-	if err := os.MkdirAll(home, 0750); err != nil {
-		return fmt.Errorf("HOME_CREATE_FAILED: unable to create account home")
-	}
-	if err := os.Chown(home, uid, mustGID(group.Gid)); err != nil {
-		return fmt.Errorf("HOME_PERMISSION_FAILED: unable to set account ownership")
-	}
-	if err := os.Chmod(home, 0750); err != nil {
-		return fmt.Errorf("HOME_PERMISSION_FAILED: unable to set account permissions")
-	}
 	publicHTML := filepath.Join(home, "public_html")
-	if err := os.MkdirAll(publicHTML, 0750); err != nil {
-		return fmt.Errorf("DOCUMENT_ROOT_CREATE_FAILED: unable to create public_html")
-	}
-	if err := os.Chown(publicHTML, uid, mustGID(group.Gid)); err != nil {
-		return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root ownership")
-	}
-	if err := os.Chmod(publicHTML, 0750); err != nil {
-		return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set document root permissions")
+	if err := ensureSafeDirectory(home, publicHTML, uid, mustGID(group.Gid)); err != nil {
+		return fmt.Errorf("ACCOUNT_DIRECTORY_FAILED: unable to securely prepare hosting directories")
 	}
 	if err := configurePHPFPM(username); err != nil {
 		return err
 	}
-	index := filepath.Join(publicHTML, "index.html")
-	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
-	if err == nil {
-		_, writeErr := file.WriteString(defaultIndexHTML)
-		closeErr := file.Close()
-		if writeErr != nil || closeErr != nil {
-			return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write initial index page")
-		}
-		if err := os.Chown(index, uid, mustGID(group.Gid)); err != nil {
-			return fmt.Errorf("DEFAULT_PAGE_PERMISSION_FAILED: unable to set initial page ownership")
-		}
-	} else if !errors.Is(err, os.ErrExist) {
+	dirFD, err := openDocumentDirectory(publicHTML)
+	if err != nil {
+		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to securely open the hosting document root")
+	}
+	pageErr := createDefaultIndexAt(dirFD, uid, mustGID(group.Gid))
+	_ = syscall.Close(dirFD)
+	if pageErr != nil {
 		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to create initial index page")
 	}
-	return nil
-}
-
-func upgradeLegacyDefaultIndex(documentRoot string, uid, gid int) error {
-	index := filepath.Join(documentRoot, "index.html")
-	info, err := os.Lstat(index)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to inspect the default index page")
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("DEFAULT_PAGE_CONFLICT: refusing to replace a non-regular index.html")
-	}
-	if info.Size() > 4096 {
-		return nil
-	}
-	data, err := os.ReadFile(index)
-	if err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to read the default index page")
-	}
-	if string(data) != legacyDefaultIndexHTML {
-		return nil
-	}
-
-	tmp, err := os.CreateTemp(documentRoot, ".nexora-index-*")
-	if err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to create a replacement index page")
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.WriteString(defaultIndexHTML); err != nil {
-		tmp.Close()
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to write replacement index page")
-	}
-	if err := tmp.Chmod(0640); err != nil {
-		tmp.Close()
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to set index page permissions")
-	}
-	if err := tmp.Chown(uid, gid); err != nil {
-		tmp.Close()
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to set index page ownership")
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to close replacement index page")
-	}
-	if err := os.Rename(tmpName, index); err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_UPDATE_FAILED: unable to activate replacement index page")
-	}
-	return nil
-}
-
-// createDefaultIndexForEmptyDomain creates a starter homepage only when the
-// newly provisioned document root is completely empty. Existing customer files
-// and index pages are never overwritten.
-func createDefaultIndexForEmptyDomain(documentRoot string, uid, gid int) error {
-	entries, err := os.ReadDir(documentRoot)
-	if err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_CHECK_FAILED: unable to inspect the document root")
-	}
-	if len(entries) != 0 {
-		return nil
-	}
-
-	index := filepath.Join(documentRoot, "index.html")
-	file, err := os.OpenFile(index, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
-	if errors.Is(err, os.ErrExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to create the initial domain homepage")
-	}
-	_, writeErr := file.WriteString(defaultIndexHTML)
-	chmodErr := file.Chmod(0640)
-	chownErr := file.Chown(uid, gid)
-	closeErr := file.Close()
-	if writeErr != nil || chmodErr != nil || chownErr != nil || closeErr != nil {
-		_ = os.Remove(index)
-		return fmt.Errorf("DEFAULT_PAGE_FAILED: unable to write or secure the initial domain homepage")
+	if err := registerManagedAccount(username, uid); err != nil {
+		return fmt.Errorf("ACCOUNT_REGISTRY_FAILED: hosting account could not be registered securely")
 	}
 	return nil
 }
@@ -536,7 +491,7 @@ func addDomain(username, domain, documentRoot string) error {
 	if err := runFixed("/usr/bin/setfacl", "-m", "u:www-data:--x", home); err != nil {
 		return fmt.Errorf("ACL_FAILED: unable to grant web server home traversal")
 	}
-	if err := runFixed("/usr/bin/setfacl", "-R", "-m", "u:www-data:rX", documentRoot); err != nil {
+	if err := runFixed("/usr/bin/setfacl", "-R", "-P", "-m", "u:www-data:rX", documentRoot); err != nil {
 		return fmt.Errorf("ACL_FAILED: unable to grant web server document access")
 	}
 	if err := runFixed("/usr/bin/setfacl", "-m", "d:u:www-data:rX", documentRoot); err != nil {
@@ -810,217 +765,104 @@ func validDocumentRoot(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && documentRootPattern.MatchString(path)
 }
 
-func ensureSafeDirectory(home, target string, uid, gid int) error {
-	for _, p := range []string{"/home", home} {
-		info, err := os.Lstat(p)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("PATH_CONFLICT: hosting home path is missing, unsafe, or not a directory")
-		}
-	}
-	rel, _ := filepath.Rel(home, target)
-	current := home
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(current, 0750); err != nil {
-				return fmt.Errorf("DOCUMENT_ROOT_CREATE_FAILED: unable to create document root")
-			}
-			if err := os.Chown(current, uid, gid); err != nil {
-				return fmt.Errorf("DOCUMENT_ROOT_PERMISSION_FAILED: unable to set ownership")
-			}
-			info, err = os.Lstat(current)
-		}
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("PATH_CONFLICT: refusing symlink or non-directory in document root path")
-		}
-	}
-	return nil
-}
-
 func configureNginx(username, domain, root string) error {
+	if !usernamePattern.MatchString(username) ||
+		!domainPattern.MatchString(domain) ||
+		len(domain) > 253 ||
+		!validDocumentRoot(root) {
+		return fmt.Errorf("NGINX_CONFIG_FAILED: invalid site configuration input")
+	}
+
 	if _, err := os.Stat("/usr/sbin/nginx"); err != nil {
-		return fmt.Errorf("NGINX_NOT_INSTALLED: install and start Nginx before adding a domain")
+		return fmt.Errorf("NGINX_NOT_INSTALLED: install Nginx before adding a domain")
 	}
 	if _, err := os.Stat("/usr/bin/setfacl"); err != nil {
 		return fmt.Errorf("ACL_TOOL_MISSING: install the acl package before adding a domain")
 	}
-	// One deterministic vhost per domain; the domain has already passed strict DNS-label validation.
+
 	fileKey := strings.ReplaceAll(domain, ".", "_")
-	available := filepath.Join("/etc/nginx/sites-available", "nexora-"+fileKey)
-	enabled := filepath.Join("/etc/nginx/sites-enabled", "nexora-"+fileKey)
-	content := fmt.Sprintf("server {\n    listen 80;\n    server_name %s;\n\n    root %s;\n    index index.php index.html index.htm;\n\n    access_log /var/log/nginx/nexora-%s.access.log;\n    error_log /var/log/nginx/nexora-%s.error.log;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n\n    location ~ [.]php$ {\n        try_files $uri =404;\n        include fastcgi_params;\n        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n        fastcgi_pass unix:/run/php/nexora-%s.sock;\n    }\n\n    location ~ /[.] {\n        deny all;\n    }\n}\n", domain, root, fileKey, fileKey, username)
-	if err := os.MkdirAll("/etc/nginx/sites-available", 0755); err != nil {
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx configuration directory")
+	configName := "nexora-" + fileKey
+	if len(configName) > 255 {
+		return fmt.Errorf("NGINX_CONFIG_FAILED: domain is too long for a configuration filename")
 	}
-	if err := os.MkdirAll("/etc/nginx/sites-enabled", 0755); err != nil {
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to access Nginx enabled directory")
-	}
-	duplicates, err := findDuplicateNexoraVhosts("/etc/nginx/sites-enabled", "/etc/nginx/sites-available", enabled, domain, root)
+
+	availableFD, err := openRootOwnedDirectory("/etc/nginx/sites-available")
 	if err != nil {
-		return fmt.Errorf("NGINX_CONFIG_CONFLICT: %s", safeOutput(err.Error()))
+		return fmt.Errorf("NGINX_CONFIG_FAILED: sites-available directory is missing or unsafe")
 	}
-	tmp, err := os.CreateTemp("/etc/nginx/sites-available", ".nexora-domain-*")
+	defer syscall.Close(availableFD)
+
+	enabledFD, err := openRootOwnedDirectory("/etc/nginx/sites-enabled")
 	if err != nil {
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to create temporary configuration")
+		return fmt.Errorf("NGINX_CONFIG_FAILED: sites-enabled directory is missing or unsafe")
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to write configuration")
+	defer syscall.Close(enabledFD)
+
+	content := fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+
+    root %s;
+    index index.php index.html index.htm;
+
+    access_log /var/log/nginx/nexora-%s.access.log;
+    error_log /var/log/nginx/nexora-%s.error.log;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    location ~ [.]php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/nexora-%s.sock;
+    }
+
+    location ~ /[.] {
+        deny all;
+    }
+}
+`, domain, root, fileKey, fileKey, username)
+
+	target := "/etc/nginx/sites-available/" + configName
+	installState, err := installNginxConfigAt(
+		availableFD,
+		enabledFD,
+		configName,
+		target,
+		content,
+		0,
+		0,
+	)
+	if err != nil {
+		return err
 	}
-	if err := tmp.Chmod(0644); err != nil {
-		tmp.Close()
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to set configuration permissions")
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to close configuration")
-	}
-	backup := available + ".nexora-backup"
-	_, oldErr := os.Lstat(available)
-	if oldErr == nil {
-		_ = os.Remove(backup)
-		if err := os.Rename(available, backup); err != nil {
-			return fmt.Errorf("NGINX_CONFIG_FAILED: unable to preserve previous configuration")
-		}
-	} else if !errors.Is(oldErr, os.ErrNotExist) {
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to inspect previous configuration")
-	}
-	rollback := func() {
-		_ = os.Remove(available)
-		if oldErr == nil {
-			_ = os.Rename(backup, available)
-		}
-	}
-	if err := os.Rename(tmpName, available); err != nil {
-		rollback()
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to install configuration")
-	}
-	linkInfo, linkErr := os.Lstat(enabled)
-	if linkErr == nil && (linkInfo.Mode()&os.ModeSymlink == 0 || filepath.Clean(mustReadlink(enabled)) != available) {
-		rollback()
-		return fmt.Errorf("NGINX_CONFIG_CONFLICT: enabled site path already belongs to another configuration")
-	}
-	if errors.Is(linkErr, os.ErrNotExist) {
-		if err := os.Symlink(available, enabled); err != nil {
-			rollback()
-			return fmt.Errorf("NGINX_CONFIG_FAILED: unable to enable site")
-		}
-	} else if linkErr != nil {
-		rollback()
-		return fmt.Errorf("NGINX_CONFIG_FAILED: unable to inspect enabled site")
-	}
-	removedDuplicates := make([]duplicateVhost, 0, len(duplicates))
-	for _, duplicate := range duplicates {
-		if err := os.Remove(duplicate.link); err != nil {
-			for _, removed := range removedDuplicates {
-				_ = os.Symlink(removed.target, removed.link)
-			}
-			if errors.Is(linkErr, os.ErrNotExist) {
-				_ = os.Remove(enabled)
-			}
-			rollback()
-			return fmt.Errorf("NGINX_CONFIG_FAILED: unable to disable duplicate Nexora site")
-		}
-		removedDuplicates = append(removedDuplicates, duplicate)
-	}
-	restoreDuplicates := func() {
-		for _, removed := range removedDuplicates {
-			_ = os.Symlink(removed.target, removed.link)
-		}
-	}
+
+	// Validate the complete on-disk configuration before considering a reload.
 	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
-		restoreDuplicates()
-		if errors.Is(linkErr, os.ErrNotExist) {
-			_ = os.Remove(enabled)
+		testErr := fmt.Errorf("NGINX_TEST_FAILED: %s", safeOutput(err.Error()))
+		rollbackErr := rollbackNginxInstallAt(
+			availableFD, enabledFD, configName, target, installState,
+		)
+		if rollbackErr != nil {
+			return fmt.Errorf("%v; NGINX_ROLLBACK_FAILED: %w", testErr, rollbackErr)
 		}
-		rollback()
-		return fmt.Errorf("NGINX_TEST_FAILED: %s", safeOutput(err.Error()))
+		return testErr
 	}
+
+	// Never start or enable Nginx as a side effect of adding a domain.
+	if err := runFixed("/usr/bin/systemctl", "is-active", "--quiet", "nginx"); err != nil {
+		return fmt.Errorf("NGINX_INACTIVE: configuration is installed and validated; Nginx was not started")
+	}
+
 	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
-		restoreDuplicates()
-		if errors.Is(linkErr, os.ErrNotExist) {
-			_ = os.Remove(enabled)
-		}
-		rollback()
-		// The running Nginx master keeps its last valid configuration when a
-		// reload fails. Verify that the restored on-disk configuration is valid
-		// and retain both diagnostics for the agent's provisioning-job record.
-		if testErr := runFixed("/usr/sbin/nginx", "-t"); testErr != nil {
-			return fmt.Errorf("NGINX_RELOAD_FAILED: %s; restored configuration test also failed: %s", safeOutput(err.Error()), safeOutput(testErr.Error()))
-		}
-		return fmt.Errorf("NGINX_RELOAD_FAILED: %s; previous configuration restored", safeOutput(err.Error()))
+		return fmt.Errorf("NGINX_RELOAD_FAILED: %s; validated configuration remains installed", safeOutput(err.Error()))
 	}
-	_ = os.Remove(backup)
-	_ = username
+
 	return nil
 }
 
-type duplicateVhost struct {
-	link   string
-	target string
-}
-
-func findDuplicateNexoraVhosts(enabledDir, availableDir, keepLink, domain, root string) ([]duplicateVhost, error) {
-	entries, err := os.ReadDir(enabledDir)
-	if err != nil {
-		return nil, err
-	}
-	var duplicates []duplicateVhost
-	for _, entry := range entries {
-		link := filepath.Join(enabledDir, entry.Name())
-		if link == keepLink {
-			continue
-		}
-		info, err := os.Lstat(link)
-		if err != nil {
-			return nil, err
-		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			continue
-		}
-		target, err := filepath.EvalSymlinks(link)
-		if err != nil {
-			continue
-		}
-		rel, err := filepath.Rel(availableDir, target)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || !strings.HasPrefix(filepath.Base(target), "nexora-") {
-			continue
-		}
-		data, err := os.ReadFile(target)
-		if err != nil {
-			continue
-		}
-		if nginxConfigMatchesDomainRoot(string(data), domain, root) {
-			duplicates = append(duplicates, duplicateVhost{link: link, target: target})
-		}
-	}
-	return duplicates, nil
-}
-
-func nginxConfigMatchesDomainRoot(content, domain, root string) bool {
-	foundDomain, foundRoot := false, false
-	for _, line := range strings.Split(content, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 2 {
-			continue
-		}
-		if fields[0] == "server_name" {
-			for _, name := range fields[1:] {
-				if strings.TrimSuffix(name, ";") == domain {
-					foundDomain = true
-				}
-			}
-		}
-		if fields[0] == "root" && strings.TrimSuffix(fields[1], ";") == root {
-			foundRoot = true
-		}
-	}
-	return foundDomain && foundRoot
-}
-
-func mustReadlink(path string) string { target, _ := os.Readlink(path); return target }
 func runFixed(path string, args ...string) error {
 	cmd := exec.Command(path, args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -1045,6 +887,9 @@ const phpFPMDisabledFunctions = "exec,shell_exec,system,passthru,proc_open,popen
 // phpFPMPoolConfig keeps account-specific PHP restrictions in the dedicated
 // FPM pool rather than changing the server-wide PHP configuration.
 func phpFPMPoolConfig(username string) string {
+	if !usernamePattern.MatchString(username) {
+		return ""
+	}
 	return fmt.Sprintf(`[nexora-%s]
 user = %s
 group = %s
@@ -1066,66 +911,59 @@ php_admin_value[open_basedir] = /home/%s:/tmp:/usr/share/php
 }
 
 func configurePHPFPM(username string) error {
-	if _, err := os.Stat("/usr/bin/php"); err != nil {
-		if err := runFixed("/usr/bin/apt-get", "update"); err != nil {
-			return fmt.Errorf("PHP_PACKAGE_INDEX_FAILED: %s", safeOutput(err.Error()))
-		}
-		if err := runFixed("/usr/bin/apt-get", "install", "-y", "php-fpm", "php-cli"); err != nil {
-			return fmt.Errorf("PHP_INSTALL_FAILED: %s", safeOutput(err.Error()))
-		}
+	if !usernamePattern.MatchString(username) {
+		return fmt.Errorf("PHP_POOL_CONFIG_FAILED: invalid hosting username")
 	}
-	versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
+
+	phpCLI := "/usr/bin/php"
+	if info, err := os.Stat(phpCLI); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("PHP_NOT_INSTALLED: PHP CLI must be installed before provisioning")
+	}
+
+	versionOutput, err := exec.Command(phpCLI, "-r",
+		"echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
 	if err != nil {
 		return fmt.Errorf("PHP_VERSION_FAILED: unable to detect installed PHP version")
 	}
+
 	version := strings.TrimSpace(string(versionOutput))
 	if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
 		return fmt.Errorf("PHP_VERSION_FAILED: detected PHP version is invalid")
 	}
+
 	poolDir := filepath.Join("/etc/php", version, "fpm", "pool.d")
-	if info, err := os.Stat(poolDir); err != nil || !info.IsDir() {
-		return fmt.Errorf("PHP_POOL_DIRECTORY_MISSING: PHP-FPM pool directory is unavailable")
-	}
 	poolPath := filepath.Join(poolDir, "nexora-"+username+".conf")
 	pool := phpFPMPoolConfig(username)
-	if err := writeAtomicRootFile(poolPath, pool, 0640); err != nil {
+	if pool == "" {
+		return fmt.Errorf("PHP_POOL_CONFIG_FAILED: unable to generate pool configuration")
+	}
+
+	if err := writeRootConfigFile(poolPath, pool, 0640); err != nil {
 		return fmt.Errorf("PHP_POOL_CONFIG_FAILED: %s", safeOutput(err.Error()))
 	}
+
+	// Validate the complete configuration before touching the running service.
+	fpmBinary := filepath.Join("/usr/sbin", "php-fpm"+version)
+	if info, err := os.Stat(fpmBinary); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("PHP_FPM_BINARY_MISSING: PHP-FPM validation binary is unavailable")
+	}
+	if err := runFixed(fpmBinary, "-tt"); err != nil {
+		return fmt.Errorf("PHP_FPM_CONFIG_INVALID: %s", safeOutput(err.Error()))
+	}
+
 	service := "php" + version + "-fpm"
-	if err := runFixed("/usr/bin/systemctl", "enable", "--now", service); err != nil {
-		return fmt.Errorf("PHP_FPM_SERVICE_FAILED: %s", safeOutput(err.Error()))
+
+	// Never enable, start, or restart PHP-FPM as part of account provisioning.
+	// Reload only when the service is already active.
+	if err := runFixed("/usr/bin/systemctl", "is-active", "--quiet", service); err != nil {
+		return fmt.Errorf("PHP_FPM_INACTIVE: configuration is valid, but PHP-FPM is not active; no service state was changed")
 	}
-	if err := runFixed("/usr/bin/systemctl", "restart", service); err != nil {
-		return fmt.Errorf("PHP_FPM_RESTART_FAILED: %s", safeOutput(err.Error()))
+	if err := runFixed("/usr/bin/systemctl", "reload", service); err != nil {
+		return fmt.Errorf("PHP_FPM_RELOAD_FAILED: %s", safeOutput(err.Error()))
 	}
+
 	if _, err := os.Stat("/run/php/nexora-" + username + ".sock"); err != nil {
-		return fmt.Errorf("PHP_POOL_SOCKET_MISSING: dedicated PHP-FPM socket did not appear")
+		return fmt.Errorf("PHP_POOL_SOCKET_MISSING: dedicated PHP-FPM socket did not appear after reload")
 	}
 	return nil
-}
-
-func writeAtomicRootFile(path, content string, mode os.FileMode) error {
-	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
-		return fmt.Errorf("refusing to replace non-regular configuration file")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".nexora-php-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.WriteString(content); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
 }
