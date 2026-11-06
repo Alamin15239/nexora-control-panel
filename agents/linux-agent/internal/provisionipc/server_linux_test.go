@@ -368,3 +368,42 @@ func TestServerReportsUnexpectedListenerClose(t *testing.T) {
 		t.Fatal("server did not return after listener close")
 	}
 }
+
+
+func TestServerRequestReadDeadline(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "provision.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server := &Server{
+		AllowedUID:         uint32(os.Getuid()),
+		HelperPath:         "/usr/bin/cat",
+		requestReadTimeout: 100 * time.Millisecond,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx, listener) }()
+
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	var response [1]byte
+	if n, readErr := conn.Read(response[:]); n != 0 || !(errors.Is(readErr, io.EOF) || errors.Is(readErr, syscall.ECONNRESET)) {
+		t.Fatalf("idle request connection was not closed at read deadline: read=%d err=%v", n, readErr)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("server shutdown: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not stop after cancellation")
+	}
+}
