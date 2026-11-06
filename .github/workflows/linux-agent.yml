@@ -31,6 +31,10 @@ jobs:
           cache-dependency-path: agents/linux-agent/go.mod
       - name: Test
         run: go test ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
       - name: Build
         run: |
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
