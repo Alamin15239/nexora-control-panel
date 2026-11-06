@@ -91,3 +91,12 @@ The OAuth configuration must be added to the Worker before the Connect GitHub ac
 - Publisher cannot execute customer commands and cannot write outside the target account's release directory.
 - Atomic publish/rollback; failed builds never replace the live release.
 - End-to-end tests on a disposable hosting account, including malicious archive fixtures and cross-tenant authorization tests, before customer rollout.
+
+
+## Current dispatch API milestone
+
+The API now exposes `POST /v1/github/projects/:projectId/deployments` for an administrator-triggered workflow dispatch and `GET /v1/github/projects/:projectId/deployments` for organization-scoped deployment history. Dispatch resolves the configured production branch to an immutable 40-character commit SHA, mints a short-lived installation token scoped to that repository with Actions write and Contents read, and dispatches `.github/workflows/nexora-deploy.yml` with a generated deployment ID and commit SHA. The GitHub App private key supports both PKCS#8 and GitHub's downloaded RSA PKCS#1 PEM format and is used only inside the Worker to sign a short-lived App JWT.
+
+Migration `0015_github_deployment_concurrency.sql` adds a partial unique index so a project cannot have two queued or active deployment records concurrently. The deployment record is inserted before dispatch; a rejected dispatch is recorded as failed rather than leaving an invisible attempt. A successful GitHub dispatch is recorded as `queued`, not `succeeded`.
+
+**This is dispatch plumbing, not a completed deploy pipeline.** No OIDC callback, artifact upload, archive validation, or publishing endpoint exists yet. The dashboard deliberately keeps the Deploy action disabled until those controls and a reviewed workflow template are implemented. A queued record means only that GitHub accepted the workflow-dispatch request; it does not mean the build started, passed, or changed the live website.
