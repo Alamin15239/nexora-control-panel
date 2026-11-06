@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { ensureSaasDnsRecord } from "./cloudflare-dns";
 import { createDnsRecord, deleteDnsRecord, listDnsRecords, updateDnsRecord } from "./dns-records";
+import { pruneFailedDeploymentArtifacts } from "./artifact-retention";
 
 type Bindings = {
   DB: D1Database;
@@ -3683,6 +3684,13 @@ export default {
       }),
       dispatchIncidentNotifications(env).catch((error) => {
         console.error("Incident email dispatcher failed:", error);
+      }),
+      pruneFailedDeploymentArtifacts(env).then((result) => {
+        if (result.deleted || result.failed) {
+          console.info("R2 artifact retention completed:", result);
+        }
+      }).catch((error) => {
+        console.error("R2 artifact retention task failed:", error);
       }),
     ]));
   },
