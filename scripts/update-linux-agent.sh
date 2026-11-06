@@ -50,6 +50,7 @@ echo "Installing root-owned helper and IPC daemon..."
 sudo install -D -o root -g root -m 0755 "$BUILD_DIR/nexora-provision" /usr/local/libexec/nexora-provision
 sudo install -D -o root -g root -m 0755 "$BUILD_DIR/nexora-provisiond" /usr/local/sbin/nexora-provisiond
 sudo install -D -o root -g root -m 0644 "$ROOT_DIR/agents/linux-agent/systemd/nexora-provisiond.service" /etc/systemd/system/nexora-provisiond.service
+sudo systemd-analyze verify /etc/systemd/system/nexora-provisiond.service
 
 echo "Starting the privileged IPC service before changing the agent..."
 sudo systemctl daemon-reload
