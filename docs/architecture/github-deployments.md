@@ -14,7 +14,7 @@ Migration `0012_github_deployments.sql` stores:
 - a repository-to-hosting-account project configuration;
 - immutable commit-specific deployment records and bounded log excerpts.
 
-The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption, installation repository listing, and project-to-hosting-account configuration. Tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
+The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption, installation repository listing, and project-to-hosting-account configuration. Access and refresh tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. When GitHub token expiration is enabled, the API refreshes tokens shortly before expiry and atomically stores the rotated access/refresh token pair. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
 
 ## Deployment pipeline
 
