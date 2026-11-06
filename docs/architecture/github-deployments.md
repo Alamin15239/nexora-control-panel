@@ -2,41 +2,71 @@
 
 ## Product behavior
 
-A customer connects a GitHub account, chooses a repository and production branch, attaches it to one Nexora hosting account, and configures a framework/build profile. A deployment is created for a specific commit SHA. Push webhooks enqueue deployments only when the pushed branch matches the configured production branch. Manual deploys use the selected branch's current commit.
+A customer connects a GitHub account, chooses a repository and production branch, attaches it to one Nexora hosting account, and configures a framework/build profile. Each deployment targets an immutable commit SHA. The first supported release is **static output deployment**: plain HTML, Vite/React, Vue, and static Astro. Next.js is supported only when configured for static export. Server-rendered Node.js applications are a later runtime feature; never silently treat SSR output as static content.
 
-The first supported release is **static output deployment**: plain HTML, Vite/React, Vue, and static Astro. Next.js is supported only when configured for static export. Current dashboard/API milestone supports GitHub connection, listing repositories available through installed GitHub App installations, and linking a repository to one active hosting account; it does not yet execute a build. Server-rendered Node.js applications are a later runtime feature; do not silently treat SSR output as static content.
+The dashboard/API milestone supports GitHub App connection, repository listing, and linking a repository to an active hosting account. It does not yet execute or publish builds. Automatic deployment remains disabled until the build workflow and publish protocol are implemented and tested.
 
 ## Control-plane data
 
 Migration `0012_github_deployments.sql` stores:
-- one encrypted GitHub OAuth connection per organization;
+- one encrypted GitHub connection per organization;
 - single-use, expiring OAuth state hashes scoped to an organization and user;
-- a repository-to-hosting-account project configuration;
+- repository-to-hosting-account project configuration;
 - immutable commit-specific deployment records and bounded log excerpts.
 
-The API now implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption and refresh-token rotation, installation repository listing, and project-to-hosting-account configuration. The API verifies a selected repository against the chosen installation before saving it. Disconnect attempts to revoke the GitHub grant and always removes local credentials; linked project configuration is removed by the foreign-key cascade, while published website files are untouched. Access and refresh tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. When GitHub token expiration is enabled, the API refreshes tokens shortly before expiry and atomically stores the rotated access/refresh token pair. OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Never return tokens to the dashboard, logs, webhook responses, or deployment records. OAuth state must be random, hashed at rest, short-lived, single-use, and validated against the authenticated organization/user on callback.
+The API implements GitHub App OAuth connect/callback/disconnect, organization-scoped token encryption and refresh-token rotation, installation repository listing, and project-to-hosting-account configuration. It verifies a selected repository against the chosen installation before saving it. Disconnect attempts to revoke the GitHub grant and always removes local credentials; linked project configuration is removed by the foreign-key cascade, while published website files are untouched. Access and refresh tokens are encrypted with AES-GCM using the dedicated `GITHUB_TOKEN_ENCRYPTION_KEY` secret (32-byte hex key), separate from database credential encryption. Never return tokens to the dashboard, logs, webhook responses, or deployment records.
 
-## Deployment pipeline
+OAuth state is random, SHA-256 hashed at rest, expires after 10 minutes, and is consumed once. Validate it against the authenticated organization and user on callback. Refresh-token rotation uses compare-and-swap so concurrent requests cannot overwrite a newer token pair.
 
-1. API validates organization membership, hosting-account ownership, quota, project configuration, and branch.
-2. API records a queued deployment and delivers a job to the assigned server/build worker using the existing authenticated agent job channel.
-3. A dedicated unprivileged build worker checks out the exact commit SHA into a per-job temporary workspace.
-4. Build runs in an ephemeral rootless container with CPU, memory, process, disk, and wall-clock limits; no host socket, host PID namespace, privileged mode, or root credentials.
-5. The worker detects/uses an allowlisted package manager, runs the configured install/build commands, and validates the output directory. Build commands are untrusted customer code.
-6. The output is scanned for unsafe paths/symlinks and published to a versioned release directory owned by the hosting account. A safe atomic activation switches the live release only after a successful build.
-7. Failed builds leave the currently active release untouched. Old releases are retained according to plan policy and can be rolled back.
-8. Worker reports bounded status/log excerpts. Full logs must have a retention limit and must redact known secret values.
+## Build-execution architecture
+
+**Security boundary:** customer source code, package lifecycle scripts, compiler plugins, and configured build commands are untrusted. They must never execute inside the Cloudflare API Worker, the hosting VM, the Nexora Agent, or the privileged provisioning daemon. Do not send arbitrary build commands over the existing authenticated agent job channel.
+
+The initial build executor will be a **GitHub-hosted Actions runner** in the customer's repository. This avoids running hostile build code on the hosting server and provides an ephemeral hosted runner for each job. Nexora's API remains the control plane; the hosting server is only a constrained publisher of already-built static artifacts.
+
+Required workflow contract:
+1. A customer adds the Nexora deployment workflow to the repository's default branch. It accepts a deployment ID and runs only for a Nexora-dispatched `workflow_dispatch` event. It must use a GitHub-hosted runner, never a self-hosted runner.
+2. Nexora dispatches the workflow at the exact configured branch/ref and commit. The workflow checks out that ref and verifies `git rev-parse HEAD` equals the requested commit SHA before running any build command.
+3. The job grants only `contents: read` and `id-token: write`. Do not expose GitHub App private keys, installation tokens, repository secrets, hosting credentials, SSH keys, or long-lived Nexora secrets to build steps. Set the workflow's default `GITHUB_TOKEN` permissions to read-only.
+4. The runner requests a GitHub OIDC token with a Nexora-specific audience. Nexora validates the JWT signature against GitHub's published keys and validates issuer, exact audience, repository ID, ref, commit SHA, workflow identity, event name, and run identity. Reject tokens from self-hosted workflows and unexpected workflow paths/refs.
+5. After validation, the API issues a one-time, short-lived artifact-upload capability bound to the organization, project, deployment ID, repository ID, branch, and commit SHA. The capability permits only one upload, has a strict byte limit, and cannot read artifacts or modify any other deployment. The API must atomically consume it.
+6. The workflow packages only the configured output directory. The API streams the archive into a private R2 staging object (or equivalent private object storage), enforces size and content limits, and records a digest. Do not accept customer-supplied object keys or callback URLs.
+7. A separate publish operation validates the archive and manifest, rejects absolute paths, traversal, hard links, symlinks, special files, duplicate paths, and excessive file counts/sizes, then stages files under the target hosting account. The privileged publisher receives only a validated artifact reference and a server-generated target account ID—not a shell command or customer build command.
+8. Publication uses immutable versioned release directories and an atomic activation switch. A failed upload, validation, extraction, or publish leaves the active release untouched. Keep the prior release for rollback according to plan retention policy.
+9. The workflow reports only bounded status and log excerpts. Store full logs only with explicit retention limits and redact known secrets. Never log OIDC JWTs, upload capabilities, GitHub tokens, or private keys.
+
+### GitHub App permissions for this model
+
+- Repository permissions: **Contents: Read-only**, **Metadata: Read-only**, and **Actions: Read & write** (required to dispatch the workflow).
+- Add **Webhooks: Read & write** only when push-webhook automation is implemented.
+- Subscribe to the `push` event only when webhook automation is implemented.
+- Do not request Contents write merely to install a workflow file; the customer adds and reviews the workflow.
+- The GitHub App private key stays in a server-side secret store and is used only by the control plane to mint short-lived installation tokens for repository reads and workflow dispatch. It is never sent to the runner.
+
+### Runner and workflow constraints
+
+- Require GitHub-hosted runners for the first release; reject self-hosted runner labels and user-selected runner groups.
+- Use a fixed, reviewed workflow template and pinned action versions (full commit SHAs), with minimal permissions and no deployment secrets.
+- Enforce an overall job timeout, build output size limit, log limit, and allowed framework/package-manager matrix.
+- Treat package installation and build scripts as arbitrary code. They may access the job's OIDC request endpoint; therefore the upload capability must be short-lived, single-use, and scoped to that exact project/commit. A build job must never receive a cross-project credential.
+- Do not allow arbitrary install/build shell commands from API input in the first release. Use a fixed command profile per supported framework, with customer settings limited to validated root/output directories and documented build options.
+- Do not enable automatic push deployments until signed webhook verification, replay protection, queue idempotency, and end-to-end tests are complete.
+
+## Deployment state machine
+
+`queued -> dispatched -> building -> artifact_received -> validating -> publishing -> succeeded`
+
+Any nonterminal state may transition to `failed` or `cancelled` under explicit, audited rules. State transitions must be conditional database updates so duplicate webhook deliveries, repeated OIDC exchanges, and concurrent worker callbacks cannot publish twice. Record the exact commit SHA and GitHub Actions run ID/attempt for every deployment.
 
 ## Webhooks
 
-Register a repository push webhook using a per-project random secret. Verify `X-Hub-Signature-256` with constant-time HMAC-SHA256 comparison over the raw request body. Validate repository ID, installation/connection, event type, branch, and commit SHA. Reject replays/duplicates through an idempotency key. Do not accept arbitrary callback URLs or arbitrary repository clone URLs from customers.
+When automatic deployment is implemented, register a repository push webhook using a per-project random secret. Verify `X-Hub-Signature-256` with constant-time HMAC-SHA256 comparison over the raw request body. Validate repository ID, installation/connection, event type, branch, and commit SHA. Reject replays/duplicates through an idempotency key. Never accept arbitrary callback URLs or arbitrary repository clone URLs from customers.
 
 ## GitHub App configuration
 
 Create a GitHub App (not a broad OAuth App) and configure:
-- Repository permissions: **Contents: Read-only**, **Metadata: Read-only**. Add **Webhooks: Read & write** only when webhook automation is implemented.
-- Subscribe to the `push` event when webhook automation is implemented.
-- Set the OAuth callback URL to the API endpoint `/v1/github/callback` on the production API origin.
+- Repository permissions listed above; do not grant more permissions than the current milestone requires.
+- OAuth callback URL: the API endpoint `/v1/github/callback` on the production API origin.
 - Do not request broad OAuth scopes; repository access is granted by installing the GitHub App on selected repositories.
 
 Required Worker secrets/vars:
@@ -44,18 +74,20 @@ Required Worker secrets/vars:
 - `GITHUB_APP_CLIENT_SECRET`
 - `GITHUB_OAUTH_CALLBACK_URL` (exact HTTPS callback URL configured in the GitHub App)
 - `GITHUB_TOKEN_ENCRYPTION_KEY` (32-byte hex key)
-- `DASHBOARD_URL` (HTTPS dashboard origin used for the OAuth completion redirect)
-- For the future build worker only: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`, used to mint short-lived installation access tokens. Keep the private key off the dashboard and out of browser/API responses.
-- A dedicated build-worker runtime and authenticated job/result protocol
+- `DASHBOARD_URL` (HTTPS dashboard origin used for OAuth completion redirect)
+- Future server-side dispatch only: `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`; keep the private key out of the dashboard, browser, build runner, logs, and API responses.
+- A private artifact staging bucket (for example, an R2 bucket) and a narrowly scoped publish protocol.
+- A server-side GitHub OIDC verifier using GitHub's published signing keys and strict claim validation.
 
-The dashboard currently provides GitHub connection, repository selection, and project configuration. Actual builds remain disabled until the isolated build worker is implemented and deployed. The OAuth configuration must be added to the Worker before the Connect GitHub action can succeed.
+The OAuth configuration must be added to the Worker before the Connect GitHub action can succeed. The current dashboard only provides GitHub connection, repository selection, and project configuration. Actual builds remain disabled until workflow dispatch, OIDC exchange, private artifact staging, and safe publication are implemented.
 
 ## Release gates
 
-- OAuth state/CSRF, token encryption, organization isolation, disconnect/revocation.
-- Private repository access only through the customer's granted GitHub permissions.
-- Webhook signature, replay, and branch validation.
-- Rootless isolated build execution and strict resource limits.
-- No symlink/path traversal escape from checkout or artifact output.
-- Atomic publish/rollback; failed build never replaces the live release.
-- End-to-end tests on a disposable hosting account before customer rollout.
+- OAuth state/CSRF, token encryption, organization isolation, refresh-token rotation, disconnect/revocation.
+- Workflow dispatch restricted to the selected installation, repository, branch, and exact commit SHA.
+- GitHub OIDC signature and claim validation; one-time, scoped upload capability and replay protection.
+- GitHub-hosted ephemeral runner only; no self-hosted runner, privileged host access, or deployment secrets.
+- Strict artifact size, file-count, path, symlink, hard-link, and special-file validation.
+- Publisher cannot execute customer commands and cannot write outside the target account's release directory.
+- Atomic publish/rollback; failed builds never replace the live release.
+- End-to-end tests on a disposable hosting account, including malicious archive fixtures and cross-tenant authorization tests, before customer rollout.
