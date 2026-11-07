@@ -342,25 +342,40 @@ type HealthCheckReport struct {
 // ReportHealthCheck sends a signed node assertion after the runtime supervisor
 // actually probes the configured local application endpoint. A healthy report
 // can mark the release succeeded; an unhealthy report returns rollback guidance.
-func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, report HealthCheckReport) error {
+type HealthCheckAcknowledgement struct {
+	Accepted bool `json:"accepted"`
+	Duplicate bool `json:"duplicate"`
+	DeploymentID string `json:"deploymentId"`
+	ReleaseState string `json:"releaseState"`
+	WorkloadHealth string `json:"workloadHealth"`
+	RollbackRequired bool `json:"rollbackRequired"`
+	RollbackTargetDeploymentID *string `json:"rollbackTargetDeploymentId"`
+}
+
+// ReportHealthCheck sends a signed node assertion after the runtime supervisor
+// actually probes the configured local application endpoint. The response
+// contains rollback guidance; reporting a result does not perform rollback.
+func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, report HealthCheckReport) (HealthCheckAcknowledgement, error) {
+	var acknowledgement HealthCheckAcknowledgement
 	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
-		return errors.New("application-node Ed25519 private key is invalid")
+		return acknowledgement, errors.New("application-node Ed25519 private key is invalid")
 	}
 	if cfg.NodeIdentity == "" || !regexpID(report.DeploymentID) ||
 		len(report.ArtifactSHA256) != 64 || strings.ToLower(report.ArtifactSHA256) != report.ArtifactSHA256 ||
 		!strings.HasPrefix(report.ProbePath, "/") || len(report.ProbePath) > 512 ||
-		strings.ContainsAny(report.ProbePath, "?#\r\n") ||
+		strings.ContainsAny(report.ProbePath, "?#
+") || strings.Contains(report.ProbePath, string(rune(92))) ||
 		(report.HealthStatus != "healthy" && report.HealthStatus != "unhealthy") ||
 		report.HTTPStatus < 0 || report.HTTPStatus > 599 ||
 		report.DurationMs < 0 || report.DurationMs > 30000 {
-		return errors.New("health-check report is outside permitted bounds")
+		return acknowledgement, errors.New("health-check report is outside permitted bounds")
 	}
 	if _, err := hex.DecodeString(report.ArtifactSHA256); err != nil {
-		return errors.New("health-check artifact digest is malformed")
+		return acknowledgement, errors.New("health-check artifact digest is malformed")
 	}
 	if report.HealthStatus == "healthy" &&
 		(report.HTTPStatus < 200 || report.HTTPStatus > 299 || report.FailureCode != "") {
-		return errors.New("healthy report requires a successful HTTP status and no failure code")
+		return acknowledgement, errors.New("healthy report requires a successful HTTP status and no failure code")
 	}
 	if report.HealthStatus == "unhealthy" {
 		allowedFailures := map[string]bool{
@@ -368,13 +383,13 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 			"http_5xx": true, "invalid_response": true, "process_exit": true, "probe_error": true,
 		}
 		if !allowedFailures[report.FailureCode] || (report.HTTPStatus >= 200 && report.HTTPStatus <= 299) {
-			return errors.New("unhealthy report requires a permitted failure code and a non-success HTTP status")
+			return acknowledgement, errors.New("unhealthy report requires a permitted failure code and a non-success HTTP status")
 		}
 	}
 	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
 		base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
-		return errors.New("control plane URL must be an HTTPS origin without a path")
+		return acknowledgement, errors.New("control plane URL must be an HTTPS origin without a path")
 	}
 	body, err := json.Marshal(struct {
 		DeploymentID string `json:"deploymentId"`
@@ -394,21 +409,21 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 		FailureCode: report.FailureCode,
 	})
 	if err != nil {
-		return fmt.Errorf("encode health-check report: %w", err)
+		return acknowledgement, fmt.Errorf("encode health-check report: %w", err)
 	}
 	proof, err := appnodeauth.Sign(cfg.PrivateKey, cfg.NodeIdentity, http.MethodPost,
 		ArtifactHealthCheckReportPath, body, time.Now().UTC())
 	if err != nil {
-		return fmt.Errorf("sign health-check report: %w", err)
+		return acknowledgement, fmt.Errorf("sign health-check report: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		base.String()+ArtifactHealthCheckReportPath, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create health-check report request: %w", err)
+		return acknowledgement, fmt.Errorf("create health-check report request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	if err := proof.Apply(request, cfg.NodeIdentity); err != nil {
-		return fmt.Errorf("apply node request proof: %w", err)
+		return acknowledgement, fmt.Errorf("apply node request proof: %w", err)
 	}
 	activeClient := client
 	if activeClient == nil {
@@ -418,13 +433,42 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := safeClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("submit health-check report: %w", err)
+		return acknowledgement, fmt.Errorf("submit health-check report: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("health-check endpoint returned %s: %s", response.Status,
+		return acknowledgement, fmt.Errorf("health-check endpoint returned %s: %s", response.Status,
 			strings.TrimSpace(string(message)))
 	}
-	return nil
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+	if err != nil {
+		return acknowledgement, fmt.Errorf("read health-check acknowledgement: %w", err)
+	}
+	if len(responseBody) == 0 || len(responseBody) > 4096 {
+		return acknowledgement, errors.New("health-check acknowledgement is empty or too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&acknowledgement); err != nil {
+		return HealthCheckAcknowledgement{}, fmt.Errorf("decode health-check acknowledgement: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement contains trailing data")
+	}
+	expectedState, expectedHealth := "succeeded", "healthy"
+	if report.HealthStatus == "unhealthy" {
+		expectedState, expectedHealth = "failed", "unhealthy"
+	}
+	if !acknowledgement.Accepted || acknowledgement.DeploymentID != report.DeploymentID ||
+		acknowledgement.ReleaseState != expectedState || acknowledgement.WorkloadHealth != expectedHealth ||
+		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil) ||
+		(acknowledgement.RollbackTargetDeploymentID != nil &&
+			(!regexpID(*acknowledgement.RollbackTargetDeploymentID) ||
+				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID)) ||
+		(report.HealthStatus == "healthy" && acknowledgement.RollbackRequired) {
+		return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement does not match the submitted result")
+	}
+	return acknowledgement, nil
 }
