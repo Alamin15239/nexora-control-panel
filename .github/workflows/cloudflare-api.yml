@@ -31,3 +31,5 @@ jobs:
         run: python3 apps/cloudflare-api/scripts/test_migrations.py
       - name: Test application settings security contract
         run: python3 apps/cloudflare-api/scripts/test_application_settings_contract.py
+      - name: Test application settings HTTP routes
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/application-settings.integration.test.ts
