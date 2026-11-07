@@ -2,8 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, AlertTriangle, ArrowUpRight, Box, Database, Globe2, HardDrive, Plus, Server, ShieldCheck, Users, Zap } from "lucide-react";
+import { Activity, AlertTriangle, ArrowUpRight, Box, Database, Globe2, HardDrive, Plus, Server, ShieldCheck, Users, Zap, FolderOpen, Mail, Network, Github } from "lucide-react";
 
+const quickTools = [
+  { label: "Websites & domains", description: "Add domains and manage website routing", href: "/websites-domains", icon: Globe2 },
+  { label: "File Manager", description: "Browse website files and document roots", href: "/file-manager", icon: FolderOpen },
+  { label: "Databases", description: "Create MariaDB databases and users", href: "/databases", icon: Database },
+  { label: "Email accounts", description: "Manage mailboxes and delivery settings", href: "/email", icon: Mail },
+  { label: "DNS zones", description: "Manage DNS records and hostnames", href: "/dns", icon: Network },
+  { label: "Git deployments", description: "Connect repositories and releases", href: "/github-deployments", icon: Github },
+];
 function Metric({ label, value, note, icon: Icon }: { label: string; value: string; note: string; icon: typeof Server }) {
   return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><p className="text-sm text-slate-500">{label}</p><span className="rounded-xl bg-slate-50 p-2 text-slate-600"><Icon size={18}/></span></div><p className="mt-4 text-3xl font-semibold tracking-tight text-slate-900">{value}</p><p className="mt-1 text-xs text-slate-500">{note}</p></div>;
 }
@@ -152,10 +160,20 @@ export default function Home() {
 
   return <main className="min-h-screen">
     <section className="min-w-0 flex-1">
-      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4 lg:px-9"><div><p className="text-xs text-slate-500">Control plane / Workspace</p><h1 className="mt-1 text-lg font-semibold">Overview</h1></div><div className="flex items-center gap-3"><span className="hidden rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 sm:inline-flex">Development environment</span><span className="max-w-40 truncate text-xs text-slate-600">{identity.displayName || identity.email}</span><button onClick={signOut} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Sign out</button></div></header>
+      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4 lg:px-9"><div><p className="text-xs text-slate-500">WHM / Platform administration</p><h1 className="mt-1 text-lg font-semibold">Hosting overview</h1></div><div className="flex items-center gap-3"><span className="hidden rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 sm:inline-flex">Development environment</span><span className="max-w-40 truncate text-xs text-slate-600">{identity.displayName || identity.email}</span><button onClick={signOut} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50">Sign out</button></div></header>
       <div className="mx-auto max-w-7xl space-y-7 px-5 py-8 lg:px-9">
-        <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">Welcome to Nexora Control</p><h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">Your hosting infrastructure, in one place.</h2><p className="mt-2 max-w-2xl text-sm text-slate-500">Your infrastructure is connected. Review server health, hosting inventory and operational alerts from one workspace.</p></div><button onClick={() => router.push("/servers")} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-blue-800"><Plus size={16}/> Register server</button></div>
+        <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm font-medium text-blue-700">WHM · Administrator home</p><h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-950">Manage your hosting platform.</h2><p className="mt-2 max-w-2xl text-sm text-slate-500">Manage customer accounts, hosting packages and server health, then jump directly into the tools customers use to operate their websites.</p></div><button onClick={() => router.push("/servers")} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-blue-800"><Plus size={16}/> Register server</button></div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="Managed servers" value={overviewLoading && !overview ? "…" : String(overview?.counts.servers ?? "—")} note={overview ? `${overview.counts.onlineServers} online · live agent heartbeats` : "Live server inventory"} icon={Server}/><Metric label="Hosting accounts" value={overviewLoading && !overview ? "…" : String(overview?.counts.hostingAccounts ?? "—")} note="Provisioned customer accounts" icon={Users}/><Metric label="Websites" value={overviewLoading && !overview ? "…" : String(overview?.counts.websites ?? "—")} note="Domains registered in this workspace" icon={Globe2}/><Metric label="System status" value={overview ? (overview.checks.api && overview.checks.database && overview.checks.schema ? (overview.checks.agent ? "Online" : "Setup") : "Attention") : overviewLoading ? "Checking" : "Unavailable"} note={overview ? (overview.checks.agent ? "API, database and agent responding" : "Control plane ready · waiting for agent") : overviewError || "Checking control-plane services"} icon={Activity}/></div>
+        <section aria-labelledby="hosting-tools-heading" className="space-y-3">
+          <div className="flex flex-wrap items-end justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-slate-400">cPanel-style shortcuts</p><h3 id="hosting-tools-heading" className="mt-1 text-base font-semibold text-slate-900">Hosting tools</h3></div><a href="/hosting-accounts" className="text-xs font-semibold text-blue-700 hover:text-blue-800">Manage customer accounts <ArrowUpRight size={13} className="ml-1 inline"/></a></div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {quickTools.map(({ label, description, href, icon: Icon }) => <a key={href} href={href} className="group flex items-start gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-700 transition group-hover:bg-blue-700 group-hover:text-white"><Icon size={19}/></span>
+              <span className="min-w-0"><span className="block text-sm font-semibold text-slate-900">{label}</span><span className="mt-1 block text-xs leading-5 text-slate-500">{description}</span></span>
+              <ArrowUpRight size={15} className="ml-auto shrink-0 text-slate-300 transition group-hover:text-blue-700"/>
+            </a>)}
+          </div>
+        </section>
         <section className="grid gap-4 xl:grid-cols-[1.35fr_1fr]">
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
