@@ -18,7 +18,7 @@ required = {
     "application_runtime_profiles", "application_node_pools", "application_nodes",
     "application_project_settings", "application_releases",
     "application_release_events", "application_workloads",
-    "application_usage_periods", "application_usage_events",
+    "application_usage_periods", "application_usage_events", "application_node_request_nonces",
 }
 actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 missing = required - actual
