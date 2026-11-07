@@ -4510,10 +4510,10 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
-  ).bind(body.deploymentId, node.nodePoolId, purpose, purpose).first<{
+  ).bind(body.deploymentId, node.nodePoolId, node.id, purpose, purpose).first<{
     releaseId: string; organizationId: string; projectId: string; deploymentId: string;
     nodePoolId: string; state: string; releaseArtifactDigest: string | null;
     releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
@@ -4643,8 +4643,8 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "d.artifact_bytes AS deploymentArtifactBytes " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
-  ).bind(body.deploymentId, node.nodePoolId).first<{
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     releaseArtifactBytes: number | null; deploymentArtifactDigest: string | null;
     deploymentArtifactBytes: number | null;
@@ -4816,8 +4816,8 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
-  ).bind(body.deploymentId, node.nodePoolId).first<{
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; nodePoolId: string;
   }>();
@@ -4991,8 +4991,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
-  ).bind(body.deploymentId, node.nodePoolId).first<{
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
