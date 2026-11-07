@@ -54,8 +54,9 @@ export default function CustomerCpanelPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
-
-  const selected = useMemo(() => accounts.find(account => account.id === selectedId) ?? null, [accounts, selectedId]);
+  const [domains, setDomains] = useState<CustomerDomain[]>([]);
+  const [databases, setDatabases] = useState<CustomerDatabase[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
 
   const loadAccounts = useCallback(async () => {
     setRefreshing(true);
