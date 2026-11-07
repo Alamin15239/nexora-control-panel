@@ -4985,7 +4985,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "SELECT r.id AS releaseRowId, r.state, r.artifact_digest AS artifactDigest, " +
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
-    "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId " +
+    "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
+    "w.node_id AS previousActiveNodeId " +
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
@@ -5031,8 +5032,11 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
       releaseState: targetState,
       workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
-      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId),
-      rollbackTargetDeploymentId: healthStatus === "unhealthy" ? release.previousDeploymentId : null,
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeId),
+      rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+        ? release.previousDeploymentId : null,
+      rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+        ? release.previousActiveNodeId : null,
     });
   }
   if (release.state !== "health_checking") {
@@ -5116,8 +5120,11 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     deploymentId: body.deploymentId,
     releaseState: targetState,
     workloadHealth: healthStatus,
-    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId),
-    rollbackTargetDeploymentId: healthStatus === "unhealthy" ? release.previousDeploymentId : null,
+    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeId),
+    rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      ? release.previousDeploymentId : null,
+    rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      ? release.previousActiveNodeId : null,
   });
 });
 
