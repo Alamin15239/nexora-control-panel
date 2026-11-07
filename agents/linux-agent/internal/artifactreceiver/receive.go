@@ -155,7 +155,9 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	}
 	stageID := "artifact-" + hex.EncodeToString(stageIDBytes)
 	stagePath := filepath.Join(stagingRoot, stageID)
-	if err := os.Mkdir(stagePath, 0700); err != nil {
+	// The parent staging directory must be setgid and group-owned by the web-server read group.
+	// This keeps the release readable by the static origin without granting it write access.
+	if err := os.Mkdir(stagePath, 0750); err != nil {
 		return result, fmt.Errorf("create private staging directory: %w", err)
 	}
 	published := false
