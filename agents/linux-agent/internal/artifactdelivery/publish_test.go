@@ -93,6 +93,12 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	token := envelopeFor(t, signingKey, expected, artifact, now)
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost ||
+			(r.URL.Path != artifactclient.ArtifactRequestPath && r.URL.Path != artifactclient.ArtifactValidationReportPath) {
+			t.Errorf("unexpected request target: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, readErr := io.ReadAll(r.Body)
 		if readErr != nil { t.Errorf("read request body: %v", readErr); w.WriteHeader(http.StatusBadRequest); return }
 		proof := appnodeauth.Proof{
@@ -106,6 +112,20 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 			r.Method, r.URL.Path, body, proof, time.Unix(issuedAt, 0)); verifyErr != nil {
 			t.Errorf("verify node proof: %v", verifyErr)
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == artifactclient.ArtifactValidationReportPath {
+			var report artifactclient.ValidationReport
+			if err := json.Unmarshal(body, &report); err != nil { t.Errorf("decode validation report: %v", err); w.WriteHeader(http.StatusBadRequest); return }
+			digest := sha256.Sum256(artifact)
+			if report.DeploymentID != expected.DeploymentID || report.ArtifactSHA256 != hex.EncodeToString(digest[:]) ||
+				report.ArchiveEntries != 1 || report.ArchiveFiles != 1 || report.ArchiveBytes != int64(len("<h1>Published by Nexora</h1>")) {
+				t.Errorf("unexpected archive validation report: %+v", report)
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{\"accepted\":true}"))
 			return
 		}
 		w.Header().Set("Content-Type", "application/gzip")
