@@ -94,3 +94,11 @@ func TestLoadPrivateKeyRejectsSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil { t.Fatal(err) }
 	if _, err := loadPrivateKey(link); err == nil { t.Fatal("symlink key file accepted") }
 }
+
+func TestLoadConfigRejectsTrailingJSON(t *testing.T) {
+	cfg := validRuntimeConfig(t)
+	raw, _ := json.Marshal(cfg)
+	path := filepath.Join(t.TempDir(), "node.json")
+	if err := os.WriteFile(path, append(raw, []byte(" {}")...), 0600); err != nil { t.Fatal(err) }
+	if _, err := loadConfig(path); err == nil { t.Fatal("trailing JSON value accepted") }
+}
