@@ -32,7 +32,10 @@ class TestD1 {
   usagePeriod: { organizationId: string; projectId: string; periodStart: string; buildSecondsUsed: number; buildMinutesLimit: number } | null = null;
   usageEvents = new Map<string, { id: string; organizationId: string; projectId: string; deploymentId: string; periodStart: string; buildSeconds: number; buildResult: string; aggregatedAt: string | null; nodeId: string }>();
   node = { id: "node-a", nodeIdentity: "builder-a", enrollmentKeyHash: "", signingPublicKey: null as string | null,
-    status: "pending", poolReady: true, agentVersion: null as string | null };
+    status: "pending", poolReady: true, agentVersion: null as string | null,
+    challengeHash: null as string | null, challengeExpiresAt: null as string | null,
+    revokedAt: null as string | null, revokedReason: null as string | null };
+  keyHistory: string[] = [];
   nodeNonces = new Set<string>();
 
   constructor(identity: TestIdentity | null) { this.identity = identity; }
@@ -56,8 +59,13 @@ class TestD1 {
             ? ({ id: db.node.id, signingPublicKey: db.node.signingPublicKey } as T) : null;
         }
         if (query.includes("FROM application_nodes WHERE node_identity")) {
-          return values[0] === db.node.nodeIdentity
-            ? ({ id: db.node.id, nodeIdentity: db.node.nodeIdentity, status: db.node.status, agentVersion: db.node.agentVersion } as T) : null;
+          if (values[0] !== db.node.nodeIdentity) return null;
+          if (query.includes("challengeHash")) {
+            return ["online", "draining"].includes(db.node.status) && db.node.signingPublicKey && db.node.challengeHash
+              ? ({ id: db.node.id, signingPublicKey: db.node.signingPublicKey,
+                  challengeHash: db.node.challengeHash, challengeExpiresAt: db.node.challengeExpiresAt } as T) : null;
+          }
+          return ({ id: db.node.id, nodeIdentity: db.node.nodeIdentity, status: db.node.status, agentVersion: db.node.agentVersion } as T);
         }
         if (query.includes("FROM github_deployments d")) {
           const [deploymentId] = values;
@@ -140,6 +148,26 @@ class TestD1 {
       },
       async all<T>() { return { results: [] as T[] }; },
       async run() {
+        if (query.includes("UPDATE application_nodes SET status = 'revoked'")) {
+          const [reason, enrollmentHash, nodeId] = values;
+          if (nodeId !== db.node.id || db.node.status === "revoked") return { success: true, meta: { changes: 0 } };
+          db.node.status = "revoked";
+          db.node.revokedAt = "2026-11-07 00:00:00";
+          db.node.revokedReason = String(reason);
+          db.node.enrollmentKeyHash = String(enrollmentHash);
+          db.node.challengeHash = null;
+          db.node.challengeExpiresAt = null;
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE application_nodes SET key_rotation_challenge_hash")) {
+          const [hash, nodeId] = values;
+          if (nodeId !== db.node.id || !["online", "draining"].includes(db.node.status) || !db.node.signingPublicKey) {
+            return { success: true, meta: { changes: 0 } };
+          }
+          db.node.challengeHash = String(hash);
+          db.node.challengeExpiresAt = new Date(Date.now() + 600000).toISOString().replace("T", " ").replace("Z", "");
+          return { success: true, meta: { changes: 1 } };
+        }
         if (query.includes("UPDATE application_nodes SET agent_version")) {
           const [agentVersion] = values;
           if (["online", "draining"].includes(db.node.status) && db.node.signingPublicKey) {
@@ -195,7 +223,19 @@ class TestD1 {
       const query = statement.query;
       const values = statement.getValues();
       let changes = 0;
-      if (query.includes("INSERT OR IGNORE INTO application_usage_periods")) {
+      if (query.includes("UPDATE application_nodes SET signing_public_key = ?, key_rotation_challenge_hash")) {
+        const [newKey, nodeId, nodeIdentity, oldKey, challengeHash] = values as string[];
+        if (nodeId === this.node.id && nodeIdentity === this.node.nodeIdentity &&
+            oldKey === this.node.signingPublicKey && challengeHash === this.node.challengeHash &&
+            ["online", "draining"].includes(this.node.status) && this.node.challengeExpiresAt &&
+            Date.parse(this.node.challengeExpiresAt + "Z") > Date.now()) {
+          this.keyHistory.push(oldKey, newKey);
+          this.node.signingPublicKey = newKey;
+          this.node.challengeHash = null;
+          this.node.challengeExpiresAt = null;
+          changes = 1;
+        }
+      } else if (query.includes("INSERT OR IGNORE INTO application_usage_periods")) {
         const [id, periodStart, projectId, organizationId] = values as [string, string, string, string];
         if (projectId === this.deploymentRow.projectId && organizationId === this.deploymentRow.organizationId &&
             organizationId === this.projectOrganizationId && !this.usagePeriod) {
@@ -242,8 +282,8 @@ const identity = (role: TestIdentity["role"], organizationId = "org-a"): TestIde
   role,
 });
 
-function environment(db: TestD1) {
-  return { DB: db as unknown as D1Database };
+function environment(db: TestD1, operatorToken?: string) {
+  return { DB: db as unknown as D1Database, APPLICATION_NODE_OPERATOR_TOKEN: operatorToken };
 }
 
 async function createNodeKeyPair() {
@@ -569,4 +609,80 @@ test("signed node heartbeat rejects unexpected fields", async () => {
     environment(db), {} as ExecutionContext,
   );
   assert.equal(response.status, 400);
+});
+
+
+const operatorToken = "operator-token-" + "x".repeat(40);
+
+function operatorRequest(path: string, token = operatorToken, body?: unknown) {
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: { authorization: "Bearer " + token, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+test("node operator controls fail closed when the operator secret is not configured", async () => {
+  const db = new TestD1(null);
+  const response = await worker.fetch(operatorRequest("/internal/v1/operator/application-nodes/node-a/revoke"),
+    environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 503);
+  assert.equal(db.node.status, "pending");
+});
+
+test("node revocation requires operator authorization and is terminal", async () => {
+  const db = new TestD1(null);
+  db.node.status = "online";
+  db.node.signingPublicKey = "a".repeat(64);
+  const denied = await worker.fetch(operatorRequest("/internal/v1/operator/application-nodes/node-a/revoke", "wrong-token"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(denied.status, 401);
+  const revoked = await worker.fetch(operatorRequest("/internal/v1/operator/application-nodes/node-a/revoke", operatorToken,
+    { reason: "operator security test" }), environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(revoked.status, 200);
+  assert.equal(db.node.status, "revoked");
+  const heartbeat = await worker.fetch(await signedNodeRequest({ agentVersion: "0.3.0" }, await createNodeKeyPair().then(x => x.privateKey),
+    "1".repeat(32), String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(heartbeat.status, 401);
+  const repeat = await worker.fetch(operatorRequest("/internal/v1/operator/application-nodes/node-a/revoke"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(repeat.status, 404);
+});
+
+test("operator challenge and old-key proof rotate a node signing key exactly once", async () => {
+  const db = new TestD1(null);
+  const oldPair = await createNodeKeyPair();
+  const newPair = await createNodeKeyPair();
+  db.node.status = "online";
+  db.node.signingPublicKey = oldPair.publicKeyHex;
+  const challengeResponse = await worker.fetch(
+    operatorRequest("/internal/v1/operator/application-nodes/node-a/key-rotation-challenge"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(challengeResponse.status, 200);
+  const challengeResult = await challengeResponse.json() as { challenge: string };
+  const rotate = await worker.fetch(
+    await signedNodeRequest({ newPublicKey: newPair.publicKeyHex, challenge: challengeResult.challenge },
+      oldPair.privateKey, "2".repeat(32), String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/rotate-key"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(rotate.status, 200);
+  assert.equal(db.node.signingPublicKey, newPair.publicKeyHex);
+  assert.deepEqual(db.keyHistory, [oldPair.publicKeyHex, newPair.publicKeyHex]);
+  const replay = await worker.fetch(
+    await signedNodeRequest({ newPublicKey: oldPair.publicKeyHex, challenge: challengeResult.challenge },
+      oldPair.privateKey, "3".repeat(32), String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/rotate-key"),
+    environment(db, operatorToken), {} as ExecutionContext);
+  assert.equal(replay.status, 401);
+});
+
+test("revoked nodes cannot submit signed builder usage reports", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.status = "revoked";
+  db.node.signingPublicKey = pair.publicKeyHex;
+  const response = await worker.fetch(await signedNodeRequest(
+    { deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" }, pair.privateKey, "4".repeat(32)),
+    environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 401);
+  assert.equal(db.usageEvents.size, 0);
 });
