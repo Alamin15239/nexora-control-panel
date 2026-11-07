@@ -48,6 +48,7 @@ jobs:
       - name: Verify provisioning systemd unit
         run: |
           sudo install -D -o root -g root -m 0755 /tmp/nexora-provisiond /usr/local/sbin/nexora-provisiond
+          sudo install -D -o root -g root -m 0755 /tmp/nexora-runtime-node /usr/local/bin/nexora-runtime-node
           systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
