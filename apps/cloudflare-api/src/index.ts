@@ -3652,9 +3652,24 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
     }, 202);
   } catch (error) {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
-    await c.env.DB.prepare(
-      "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
-    ).bind(token.deploymentId, token.organizationId).run().catch(() => undefined);
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
+      ).bind(token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'artifact_upload_failed', " +
+        "failure_message_redacted = 'Build artifact upload failed.', updated_at = datetime('now') " +
+        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'building', 'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
+        "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'failed' " +
+        "AND failure_code = 'artifact_upload_failed' " +
+        "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'artifact_upload_failed')",
+      ).bind(crypto.randomUUID(), token.deploymentId, token.organizationId),
+    ]).catch(() => undefined);
     console.error("GitHub artifact upload failed:", error instanceof Error ? error.message : "unknown error");
     return c.json({ message: "Artifact upload failed; the one-time capability has been consumed." }, 502);
   }
