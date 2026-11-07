@@ -94,6 +94,9 @@ func ValidateGzipTar(input io.Reader, limits Limits) (Result, error) {
 		name, rootDirectory, pathErr := normalizeArchivePath(header.Name, header.Typeflag)
 		if pathErr != nil { return Result{}, pathErr }
 		if rootDirectory { continue }
+		if name == ".nexora-release.json" {
+			return Result{}, errors.New("archive path is reserved for publisher release metadata")
+		}
 		if header.Size < 0 || header.Size > limits.MaxFileBytes {
 			return Result{}, fmt.Errorf("archive entry %q exceeds the per-file size limit", header.Name)
 		}
