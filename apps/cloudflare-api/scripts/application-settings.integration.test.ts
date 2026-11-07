@@ -469,6 +469,10 @@ test("per-node Ed25519 usage reports are accepted once and duplicate delivery is
   assert.equal(replayResult.duplicate, true);
   assert.equal(replayResult.buildSecondsUsed, 90);
   assert.equal(db.usageEvents.size, 1);
+  const conflict = await worker.fetch(await signedNodeRequest(
+    { deploymentId: "deployment-a", buildSeconds: 91, buildResult: "succeeded" }, pair.privateKey, "b".repeat(32)),
+    environment(db), {} as ExecutionContext);
+  assert.equal(conflict.status, 409);
 });
 
 test("per-node usage authentication rejects invalid signatures and stale timestamps", async () => {
