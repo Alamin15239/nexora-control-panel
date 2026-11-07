@@ -3,6 +3,8 @@ package artifactclient
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"context"
+	"io"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,8 +32,8 @@ func TestFetchAuthenticatesAndVerifiesArtifactTransport(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != ArtifactRequestPath {
 			t.Fatalf("unexpected request target: %s %s", r.Method, r.URL.Path)
 		}
-		body := make([]byte, r.ContentLength)
-		if _, err := r.Body.Read(body); err != nil { t.Fatal(err) }
+		body, err := io.ReadAll(r.Body)
+		if err != nil { t.Fatal(err) }
 		proof := appnodeauth.Proof{
 			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
 			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
@@ -54,7 +56,7 @@ func TestFetchAuthenticatesAndVerifiesArtifactTransport(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := Fetch(t.Context(), server.Client(), Config{
+	result, err := Fetch(context.Background(), server.Client(), Config{
 		ControlPlaneURL: server.URL,
 		NodeIdentity: "runtime-a",
 		PrivateKey: privateKey,
