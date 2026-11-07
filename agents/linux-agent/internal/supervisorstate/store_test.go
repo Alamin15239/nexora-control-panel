@@ -123,3 +123,50 @@ func TestConcurrentUpsertsRemainConsistent(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(items) != count { t.Fatalf("persisted %d workloads, want %d", len(items), count) }
 }
+
+func TestGetReturnsOnlyRequestedWorkload(t *testing.T) {
+	store, _ := newStore(t)
+	if err := store.Upsert(sample()); err != nil { t.Fatal(err) }
+	got, ok, err := store.Get("workload-001")
+	if err != nil { t.Fatal(err) }
+	if !ok || got.ReleaseID != "release-001" { t.Fatalf("unexpected lookup: %+v, found=%v", got, ok) }
+	_, ok, err = store.Get("workload-002")
+	if err != nil { t.Fatal(err) }
+	if ok { t.Fatal("unexpected workload found") }
+	if _, _, err := store.Get("../invalid"); err == nil { t.Fatal("invalid workload ID accepted") }
+}
+
+func TestUpsertManyIsAtomicAndRejectsDuplicateIDs(t *testing.T) {
+	store, _ := newStore(t)
+	first := sample()
+	second := sample()
+	second.WorkloadID = "workload-002"
+	second.ReleaseID = "release-002"
+	second.ContainerID = "abcdef0123456789abcdef0123456789"
+	if err := store.UpsertMany([]WorkloadState{first, second}); err != nil { t.Fatal(err) }
+	items, err := store.Load()
+	if err != nil { t.Fatal(err) }
+	if len(items) != 2 { t.Fatalf("persisted %d workloads, want 2", len(items)) }
+
+	invalid := second
+	invalid.WorkloadID = "workload-003"
+	invalid.ContainerID = "bad"
+	if err := store.UpsertMany([]WorkloadState{first, invalid}); err == nil {
+		t.Fatal("invalid batch was accepted")
+	}
+	duplicate := second
+	if err := store.UpsertMany([]WorkloadState{first, duplicate}); err == nil {
+		t.Fatal("duplicate workload ID was accepted")
+	}
+	items, err = store.Load()
+	if err != nil { t.Fatal(err) }
+	if len(items) != 2 { t.Fatalf("failed batch partially changed state: %+v", items) }
+}
+
+func TestUpsertManyEmptyBatchDoesNotCreateStateFile(t *testing.T) {
+	store, dir := newStore(t)
+	if err := store.UpsertMany(nil); err != nil { t.Fatal(err) }
+	if _, err := os.Lstat(filepath.Join(dir, "runtime.json")); !os.IsNotExist(err) {
+		t.Fatalf("empty batch unexpectedly created state file: %v", err)
+	}
+}
