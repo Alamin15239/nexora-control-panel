@@ -338,7 +338,7 @@ app.post("/v1/auth/register", async (c) => {
   try { input = await c.req.json<Record<string, unknown>>(); }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
 
-  const email = normalizeEmail(input.email);
+  const email = typeof input.email === "string" ? input.email.trim().toLowerCase() : "";
   const name = typeof input.name === "string" ? input.name.trim() : "";
   const organizationName = typeof input.organizationName === "string" ? input.organizationName.trim() : "";
   const password = typeof input.password === "string" ? input.password : "";
@@ -1632,7 +1632,7 @@ app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
   const email = normalizeEmail(input.email);
   const role = typeof input.role === "string" ? input.role : "ACCOUNT_READONLY";
   const allowedRoles = ["ACCOUNT_OWNER", "ACCOUNT_ADMIN", "ACCOUNT_DEVELOPER", "ACCOUNT_READONLY"];
-  if (!validEmail(email)) return c.json({ message: "Enter a valid customer email address." }, 400);
+  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || email.length > 254) return c.json({ message: "Enter a valid customer email address." }, 400);
   if (!allowedRoles.includes(role)) return c.json({ message: "Select a valid hosting account role." }, 400);
 
   const account = await c.env.DB.prepare(
