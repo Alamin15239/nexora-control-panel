@@ -129,3 +129,7 @@ These are admission-control limits for configuration metadata. They do not reser
 ## Definition of ready
 
 A workload class is ready only when its build profile, runtime image, isolation policy, resource limits, ingress, secret injection, logs, health checks, rollback, backups (where stateful), metering and automated security tests are implemented and documented. A runtime appearing in the dashboard is not evidence that it is production-ready.
+
+## Builder node isolation classification
+
+Node pools default to `isolation_level=untrusted`. A pool must be explicitly classified as `rootless` or `microvm` before a builder node from that pool can submit build-usage reports. Nodes carry a control-plane-assigned `node_role` (`builder` or `runtime`); runtime nodes cannot report builder usage. The API checks both attributes before accepting a report, and a D1 insert trigger independently enforces the same rule. This classification is an admission gate, not proof that the host is actually hardened: pool operators must separately validate rootless isolation or microVM boundaries before changing the classification. Existing pools remain untrusted by default, and customer execution stays disabled.
