@@ -118,6 +118,16 @@ After a verified runner receives its one-time capability, it can upload a gzip-c
 The endpoint requires an R2 bucket binding named `ARTIFACTS`, which is declared in `wrangler.toml` for the `nexora-deployment-artifacts` private bucket. The OIDC exchange still fails closed with HTTP 503 if the deployed Worker does not receive that binding. Migration `0017_github_deployment_artifact_storage.sql` adds the private staging object reference and byte count. This endpoint only stages bytes: it does not extract, inspect, or publish the archive. Archive validation and the isolated publisher remain mandatory release gates.
 
 
+## Experimental GitHub Actions workflow template
+
+A static-only artifact-staging example is provided at `docs/templates/nexora-deploy.yml`. It checks out the immutable commit supplied by the control plane, builds on a GitHub-hosted runner, rejects symlinks and special files in `dist/`, obtains a short-lived OIDC-bound upload capability only after the build, and uploads a checksum-bound archive to private R2.
+
+This is an integration test scaffold, not a customer-ready deployment workflow:
+- It assumes an npm project with `package-lock.json` and static `dist/` output.
+- It runs repository-controlled npm lifecycle/build scripts on an ephemeral GitHub-hosted runner.
+- It stages an archive only. It does not validate/extract it, publish a release, route traffic, run health checks, or roll back.
+- Before use, review the exact workflow source and pin its immutable workflow commit SHA through the administrator trust endpoint. Do not expose deployment credentials or repository secrets to build steps.
+
 ## Administrator-pinned workflow trust
 
 OIDC exchange additionally requires `github_projects.trusted_workflow_sha` to be set to a full 40-character commit SHA. It compares the signed `workflow_sha` claim to this exact approved value; a workflow edit therefore blocks runner credential issuance until an organization OWNER/ADMIN reviews the changed workflow revision and explicitly updates the pin through `PUT /v1/github/projects/:projectId/workflow-trust` with `{"workflowSha":"<reviewed-40-character-commit-sha>"}`. The API records an audit event for each pin change. The field is intentionally NULL by default, so existing projects cannot obtain build credentials until an administrator approves a workflow revision. This approval is a security-critical manual review step; the API does not claim to inspect or certify workflow source code automatically.
