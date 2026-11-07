@@ -43,6 +43,7 @@ class ArtifactD1 {
   activationEventDetails: string | null = null;
   healthEventDetails: string | null = null;
   workloadStatus: string | null = null;
+  githubDeploymentStatus = "building";
 
   async batch(statements: Array<{ run: () => Promise<{ success: boolean; meta: { changes: number } }> }>) {
     const results = [];
@@ -178,6 +179,16 @@ class ArtifactD1 {
         }
         if (query.includes("INSERT INTO application_release_events") && query.includes("release_files_activated")) {
           db.activationEventDetails = String(values[2]);
+        }
+        if (query.includes("UPDATE github_deployments SET status = 'succeeded'")) {
+          if (db.githubDeploymentStatus !== "building") return { success: true, meta: { changes: 0 } };
+          db.githubDeploymentStatus = "succeeded";
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE github_deployments SET status = 'failed'")) {
+          if (db.githubDeploymentStatus !== "building") return { success: true, meta: { changes: 0 } };
+          db.githubDeploymentStatus = "failed";
+          return { success: true, meta: { changes: 1 } };
         }
         if (query.includes("UPDATE application_nodes SET last_signature_at")) {
           db.lastSignatureUpdated = true;
@@ -648,6 +659,7 @@ test("signed successful health check marks the release succeeded and workload he
   assert.equal(body.workloadHealth, "healthy");
   assert.equal(db.release.state, "succeeded");
   assert.equal(db.workloadStatus, "healthy");
+  assert.equal(db.githubDeploymentStatus, "succeeded");
   assert.ok(db.healthEventDetails);
 });
 
@@ -674,6 +686,7 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(body.rollbackTargetDeploymentId, "previous-deployment");
   assert.equal(db.release.state, "failed");
   assert.equal(db.workloadStatus, "unhealthy");
+  assert.equal(db.githubDeploymentStatus, "failed");
 });
 
 test("health-check report rejects mismatched configured path and digest", async () => {
