@@ -41,6 +41,7 @@ jobs:
         run: |
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-agent ./cmd/nexora-agent
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-runtime-node ./cmd/nexora-runtime-node
+          go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-publisher ./cmd/nexora-static-publisher
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provisiond ./cmd/nexora-provisiond
       - name: Verify CLI
@@ -49,7 +50,8 @@ jobs:
         run: |
           sudo install -D -o root -g root -m 0755 /tmp/nexora-provisiond /usr/local/sbin/nexora-provisiond
           sudo install -D -o root -g root -m 0755 /tmp/nexora-runtime-node /usr/local/bin/nexora-runtime-node
-          systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service
+          sudo install -D -o root -g root -m 0755 /tmp/nexora-static-publisher /usr/local/bin/nexora-static-publisher
+          systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service systemd/nexora-static-publisher.service
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
