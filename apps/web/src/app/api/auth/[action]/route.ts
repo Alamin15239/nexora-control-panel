@@ -178,12 +178,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
           .bind(userId, email, passwordHash, name),
         db.prepare("INSERT INTO organizations (id, name, slug, status) VALUES (?, ?, ?, 'ACTIVE')")
           .bind(organizationId, organizationName, slug),
-        db.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'OWNER')")
+        db.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'MEMBER')")
           .bind(crypto.randomUUID(), userId, organizationId),
         db.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.register', 'organization', ?)")
           .bind(crypto.randomUUID(), organizationId, userId, organizationId),
       ]);
-      const session = await issueSession(db, userId, organizationId, "OWNER");
+      const session = await issueSession(db, userId, organizationId, "MEMBER");
       const { accessToken, ...safeSession } = session;
       const response = NextResponse.json({
         user: { id: userId, email, displayName: name },
@@ -253,6 +253,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
 
     await db.prepare("DELETE FROM login_attempts WHERE bucket_key = ?").bind(bucketKey).run();
     const role = membership.role;
+    const customerAccess = await db.prepare(
+      "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+    ).bind(user.id).first<{ active: number }>();
     const session = await issueSession(db, user.id, membership.organizationId, role);
     await db.prepare(
       "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, source_ip) VALUES (?, ?, ?, 'auth.login', 'user', ?, ?)",
@@ -260,6 +263,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     const { accessToken, ...safeSession } = session;
     const response = NextResponse.json({
       user: { id: user.id, email: user.email, displayName: user.displayName },
+      customerAccess: Boolean(customerAccess),
       ...safeSession,
     });
     sessionCookie(response, accessToken);
