@@ -188,3 +188,95 @@ BEFORE UPDATE OF state ON application_releases
 WHEN OLD.state IN ('succeeded','failed','cancelled','rolled_back')
  AND NEW.state <> OLD.state
 BEGIN SELECT RAISE(ABORT, 'terminal release state is immutable'); END;
+
+
+-- Validate every cross-table tenant relationship, not only the project FK.
+CREATE TRIGGER IF NOT EXISTS application_releases_deployment_guard_insert
+BEFORE INSERT ON application_releases
+WHEN NOT EXISTS (
+  SELECT 1 FROM github_deployments d
+  WHERE d.id = NEW.deployment_id
+    AND d.project_id = NEW.project_id
+    AND d.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'deployment project organization mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_releases_deployment_guard_update
+BEFORE UPDATE OF organization_id, project_id, deployment_id ON application_releases
+WHEN NOT EXISTS (
+  SELECT 1 FROM github_deployments d
+  WHERE d.id = NEW.deployment_id
+    AND d.project_id = NEW.project_id
+    AND d.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'deployment project organization mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_releases_project_guard_update
+BEFORE UPDATE OF organization_id, project_id ON application_releases
+WHEN NOT EXISTS (
+  SELECT 1 FROM github_projects p
+  WHERE p.id = NEW.project_id AND p.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'project organization mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_workloads_org_guard_update
+BEFORE UPDATE OF organization_id, project_id ON application_workloads
+WHEN NOT EXISTS (
+  SELECT 1 FROM github_projects p
+  WHERE p.id = NEW.project_id AND p.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'project organization mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_workloads_release_guard_insert
+BEFORE INSERT ON application_workloads
+WHEN NEW.active_release_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM application_releases r
+  WHERE r.id = NEW.active_release_id
+    AND r.project_id = NEW.project_id
+    AND r.organization_id = NEW.organization_id
+    AND r.state = 'succeeded'
+)
+BEGIN SELECT RAISE(ABORT, 'active release must be a successful release for this project'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_workloads_release_guard_update
+BEFORE UPDATE OF active_release_id, organization_id, project_id ON application_workloads
+WHEN NEW.active_release_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM application_releases r
+  WHERE r.id = NEW.active_release_id
+    AND r.project_id = NEW.project_id
+    AND r.organization_id = NEW.organization_id
+    AND r.state = 'succeeded'
+)
+BEGIN SELECT RAISE(ABORT, 'active release must be a successful release for this project'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_release_events_org_guard_insert
+BEFORE INSERT ON application_release_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM application_releases r
+  WHERE r.id = NEW.release_id AND r.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'release organization mismatch'); END;
+
+CREATE TRIGGER IF NOT EXISTS application_release_events_org_guard_update
+BEFORE UPDATE OF organization_id, release_id ON application_release_events
+WHEN NOT EXISTS (
+  SELECT 1 FROM application_releases r
+  WHERE r.id = NEW.release_id AND r.organization_id = NEW.organization_id
+)
+BEGIN SELECT RAISE(ABORT, 'release organization mismatch'); END;
+
+-- Permit only explicit forward transitions; terminal outcomes cannot be rewritten.
+CREATE TRIGGER IF NOT EXISTS application_releases_state_transition_guard
+BEFORE UPDATE OF state ON application_releases
+WHEN NEW.state <> OLD.state AND NOT (
+  (OLD.state = 'queued' AND NEW.state IN ('authorized','failed','cancelled')) OR
+  (OLD.state = 'authorized' AND NEW.state IN ('building','failed','cancelled')) OR
+  (OLD.state = 'building' AND NEW.state IN ('artifact_uploaded','failed','cancelled')) OR
+  (OLD.state = 'artifact_uploaded' AND NEW.state IN ('validating','failed','cancelled')) OR
+  (OLD.state = 'validating' AND NEW.state IN ('ready_to_publish','failed','cancelled')) OR
+  (OLD.state = 'ready_to_publish' AND NEW.state IN ('publishing','failed','cancelled')) OR
+  (OLD.state = 'publishing' AND NEW.state IN ('health_checking','failed','cancelled')) OR
+  (OLD.state = 'health_checking' AND NEW.state IN ('succeeded','failed','cancelled')) OR
+  (OLD.state = 'succeeded' AND NEW.state = 'rolled_back')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid release state transition'); END;
