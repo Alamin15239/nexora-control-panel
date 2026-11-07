@@ -363,8 +363,7 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	if cfg.NodeIdentity == "" || !regexpID(report.DeploymentID) ||
 		len(report.ArtifactSHA256) != 64 || strings.ToLower(report.ArtifactSHA256) != report.ArtifactSHA256 ||
 		!strings.HasPrefix(report.ProbePath, "/") || len(report.ProbePath) > 512 ||
-		strings.ContainsAny(report.ProbePath, "?#
-") || strings.Contains(report.ProbePath, string(rune(92))) ||
+		strings.ContainsAny(report.ProbePath, "?#\r\n") || strings.Contains(report.ProbePath, string(rune(92))) ||
 		(report.HealthStatus != "healthy" && report.HealthStatus != "unhealthy") ||
 		report.HTTPStatus < 0 || report.HTTPStatus > 599 ||
 		report.DurationMs < 0 || report.DurationMs > 30000 {
