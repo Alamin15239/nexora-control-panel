@@ -316,7 +316,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -1578,6 +1578,96 @@ function validDomain(value: string): boolean {
     /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
   ) && value.includes(".");
 }
+
+// Customer-facing account discovery is membership-scoped. Never accept an account ID
+// from the browser as proof of access; the authenticated user is the scope.
+app.get("/v1/customer/hosting-accounts", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.primary_domain, a.status, a.created_at,
+            p.name AS plan_name, p.disk_limit_bytes, p.bandwidth_limit_bytes,
+            p.website_limit, p.database_limit, p.mailbox_limit,
+            m.role AS account_role
+     FROM hosting_account_memberships m
+     JOIN hosting_accounts a
+       ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     JOIN hosting_plans p
+       ON p.id = a.plan_id AND p.organization_id = a.organization_id
+     WHERE m.user_id = ? AND m.organization_id = ?
+       AND m.status = 'ACTIVE' AND a.status = 'ACTIVE'
+     ORDER BY a.created_at DESC`,
+  ).bind(identity.id, identity.organizationId).all();
+  return c.json({ accounts: result.results ?? [] });
+});
+
+app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare(
+    "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT m.id, m.user_id AS userId, u.email, u.display_name AS displayName,
+            m.role, m.status, m.created_at AS createdAt
+     FROM hosting_account_memberships m
+     JOIN users u ON u.id = m.user_id
+     WHERE m.hosting_account_id = ? AND m.organization_id = ?
+     ORDER BY m.created_at ASC`,
+  ).bind(account.id, identity.organizationId).all();
+  return c.json({ memberships: result.results ?? [] });
+});
+
+app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+
+  const email = normalizeEmail(input.email);
+  const role = typeof input.role === "string" ? input.role : "ACCOUNT_READONLY";
+  const allowedRoles = ["ACCOUNT_OWNER", "ACCOUNT_ADMIN", "ACCOUNT_DEVELOPER", "ACCOUNT_READONLY"];
+  if (!validEmail(email)) return c.json({ message: "Enter a valid customer email address." }, 400);
+  if (!allowedRoles.includes(role)) return c.json({ message: "Select a valid hosting account role." }, 400);
+
+  const account = await c.env.DB.prepare(
+    "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+
+  const user = await c.env.DB.prepare(
+    `SELECT u.id FROM users u
+     JOIN memberships om ON om.user_id = u.id AND om.organization_id = ?
+     WHERE u.email = ? COLLATE NOCASE AND u.status = 'ACTIVE'
+     LIMIT 1`,
+  ).bind(identity.organizationId, email).first<{ id: string }>();
+  if (!user) return c.json({ message: "That user must first be invited to this workspace and activate their Nexora login." }, 404);
+
+  const now = new Date().toISOString();
+  const membershipId = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO hosting_account_memberships
+         (id, hosting_account_id, organization_id, user_id, role, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+         ON CONFLICT(hosting_account_id, user_id) DO UPDATE SET
+           role = excluded.role, status = 'ACTIVE', updated_at = excluded.updated_at`,
+      ).bind(membershipId, account.id, identity.organizationId, user.id, role, now, now),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.member_assigned', 'hosting_account', ?, ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, account.id, JSON.stringify({ userId: user.id, role })),
+    ]);
+    return c.json({ success: true, userId: user.id, role, message: "Hosting account access assigned." }, 201);
+  } catch {
+    return c.json({ message: "Unable to assign hosting account access." }, 409);
+  }
+});
 
 app.get("/v1/hosting-accounts", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
