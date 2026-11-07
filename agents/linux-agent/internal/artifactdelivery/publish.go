@@ -41,7 +41,9 @@ func FetchAndPublish(ctx context.Context, config Config, deploymentID string) (a
 	if config.ReplayGuard == nil {
 		return empty, errors.New("durable envelope replay protection is required")
 	}
-	download, err := artifactclient.Fetch(ctx, config.HTTPClient, config.ArtifactClient, deploymentID)
+	artifactConfig := config.ArtifactClient
+	artifactConfig.Purpose = "validate"
+	download, err := artifactclient.Fetch(ctx, config.HTTPClient, artifactConfig, deploymentID)
 	if err != nil {
 		return empty, fmt.Errorf("download authorized deployment artifact: %w", err)
 	}
@@ -54,5 +56,15 @@ func FetchAndPublish(ctx context.Context, config Config, deploymentID string) (a
 		Now: time.Now().UTC(),
 		Limits: config.ArchiveLimits,
 		Replay: config.ReplayGuard,
+		OnValidated: func(callbackContext context.Context, claims deployenvelope.Claims, archive deployarchive.Result) error {
+			return artifactclient.ReportValidated(callbackContext, config.HTTPClient, config.ArtifactClient,
+				artifactclient.ValidationReport{
+					DeploymentID: claims.DeploymentID,
+					ArtifactSHA256: claims.ArtifactSHA256,
+					ArchiveEntries: archive.Entries,
+					ArchiveFiles: archive.Files,
+					ArchiveBytes: archive.Bytes,
+				})
+		},
 	})
 }
