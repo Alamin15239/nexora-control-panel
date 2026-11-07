@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-var replayIDPattern = regexp.MustCompile(\`^[a-f0-9]{32}$\`)
+var replayIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 // FileReplayGuard persists consumed envelope identifiers using exclusive file
 // creation. Its directory must be pre-created, private, and operator-owned.
