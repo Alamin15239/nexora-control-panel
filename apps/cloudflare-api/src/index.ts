@@ -4017,6 +4017,10 @@ app.post("/internal/v1/application-nodes/rotate-key", async (c) => {
     return c.json({ message: "Key rotation challenge is invalid or expired." }, 409);
   }
   if (body.newPublicKey.toLowerCase() === node.signingPublicKey) return c.json({ message: "New key must differ from the current key." }, 400);
+  const previouslyUsedKey = await c.env.DB.prepare(
+    "SELECT id FROM application_node_signing_key_history WHERE node_id = ? AND public_key = ? LIMIT 1",
+  ).bind(node.id, body.newPublicKey.toLowerCase()).first<{ id: string }>();
+  if (previouslyUsedKey) return c.json({ message: "A previously used signing key cannot be reactivated." }, 409);
   const nonceResult = await c.env.DB.prepare(
     "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) VALUES (?, ?, datetime('now', '+10 minutes'))",
   ).bind(node.id, nonce).run();
