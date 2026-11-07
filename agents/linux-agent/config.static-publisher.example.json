@@ -1,0 +1,12 @@
+{
+  "control_plane_url": "https://api.nexoraedge.digital",
+  "node_identity": "REPLACE_WITH_ENROLLED_RUNTIME_NODE_IDENTITY",
+  "private_key_file": "/etc/nexora-static-publisher/node-ed25519.key",
+  "deployment_signing_public_key_file": "/etc/nexora-static-publisher/deployment-envelope-public.pem",
+  "deployment_signing_key_id": "REPLACE_WITH_GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID",
+  "deployment_envelope_issuer": "REPLACE_WITH_GITHUB_DEPLOYMENT_ENVELOPE_ISSUER",
+  "deployment_envelope_audience": "REPLACE_WITH_GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE",
+  "publisher_root": "/var/lib/nexora-static",
+  "replay_directory": "/var/lib/nexora-static/replay",
+  "poll_interval_seconds": 30
+}
