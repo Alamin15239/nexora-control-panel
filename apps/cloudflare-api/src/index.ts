@@ -25,6 +25,7 @@ type Bindings = {
   GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_ISSUER?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE?: string;
+  APPLICATION_BUILDER_METERING_SECRET?: string;
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
 };
@@ -224,6 +225,20 @@ async function issueSession(db: D1Database, userId: string, organizationId: stri
   };
 }
 
+async function verifyBuilderMeteringSignature(secret: string, timestamp: string, rawBody: string, signature: string) {
+  if (secret.length < 32 || !/^\\d{10}$/.test(timestamp)) return false;
+  const issuedAt = Number(timestamp);
+  if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
+  const match = /^sha256=([a-f0-9]{64})$/i.exec(signature);
+  if (!match) return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(timestamp + "." + rawBody)));
+  const expected = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const supplied = match[1].toLowerCase();
+  let difference = 0;
+  for (let index = 0; index < expected.length; index++) difference |= expected.charCodeAt(index) ^ supplied.charCodeAt(index);
+  return difference === 0;
+}
 async function bearerIdentity(request: Request, db: D1Database) {
   const authorization = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
