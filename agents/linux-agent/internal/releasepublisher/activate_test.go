@@ -82,7 +82,8 @@ func TestActivateRejectsWritableReleaseDirectory(t *testing.T) {
 		t.Run(mode.String(), func(t *testing.T) {
 			base := testLayout(t)
 			release := filepath.Join(base, "releases", "release-unsafe")
-			if err := os.Mkdir(release, mode); err != nil { t.Fatal(err) }
+			if err := os.Mkdir(release, 0700); err != nil { t.Fatal(err) }
+			if err := os.Chmod(release, mode); err != nil { t.Fatal(err) }
 			if err := Activate(base, "release-unsafe"); err == nil {
 				t.Fatal("group/world-writable release directory was activated")
 			}
