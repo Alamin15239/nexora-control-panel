@@ -4066,6 +4066,10 @@ app.post("/internal/v1/application-nodes/enroll", async (c) => {
   if (Number(result.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Enrollment token is invalid, already consumed, or the node pool is not ready." }, 409);
   }
+  await c.env.DB.prepare(
+    "INSERT INTO application_node_signing_key_history (id,node_id,public_key) " +
+    "SELECT ?, id, signing_public_key FROM application_nodes WHERE node_identity = ? AND signing_public_key = ?",
+  ).bind(crypto.randomUUID(), body.nodeIdentity, body.publicKey.toLowerCase()).run();
   const node = await c.env.DB.prepare(
     "SELECT id, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
     "FROM application_nodes WHERE node_identity = ? LIMIT 1",
