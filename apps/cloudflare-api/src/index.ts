@@ -4061,20 +4061,32 @@ app.post("/internal/v1/application-nodes/enroll", async (c) => {
     return c.json({ message: "Invalid node enrollment payload." }, 400);
   }
   const tokenHash = await sha256(body.enrollmentToken);
-  const result = await c.env.DB.prepare(
-    "UPDATE application_nodes SET signing_public_key = ?, enrollment_consumed_at = datetime('now'), " +
-    "status = 'online', agent_version = ?, last_heartbeat_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE node_identity = ? AND enrollment_key_hash = ? AND enrollment_consumed_at IS NULL " +
-    "AND signing_public_key IS NULL AND status = 'pending' " +
-    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready')",
-  ).bind(body.publicKey.toLowerCase(), body.agentVersion, body.nodeIdentity, tokenHash).run();
-  if (Number(result.meta?.changes ?? 0) !== 1) {
+  let enrollmentResults: D1Result[];
+  try {
+    // D1 batch is transactional: the active key and immutable key-history record
+    // must commit together, or neither enrollment change is persisted.
+    enrollmentResults = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE application_nodes SET signing_public_key = ?, enrollment_consumed_at = datetime('now'), " +
+        "status = 'online', agent_version = ?, last_heartbeat_at = datetime('now'), updated_at = datetime('now') " +
+        "WHERE node_identity = ? AND enrollment_key_hash = ? AND enrollment_consumed_at IS NULL " +
+        "AND signing_public_key IS NULL AND status = 'pending' " +
+        "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready')",
+      ).bind(body.publicKey.toLowerCase(), body.agentVersion, body.nodeIdentity, tokenHash),
+      c.env.DB.prepare(
+        "INSERT INTO application_node_signing_key_history (id,node_id,public_key) " +
+        "SELECT ?, id, signing_public_key FROM application_nodes " +
+        "WHERE node_identity = ? AND signing_public_key = ? AND enrollment_consumed_at IS NOT NULL",
+      ).bind(crypto.randomUUID(), body.nodeIdentity, body.publicKey.toLowerCase()),
+    ]);
+  } catch (error) {
+    console.error("Node enrollment transaction failed:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Node enrollment could not be committed safely." }, 500);
+  }
+  if (Number(enrollmentResults[0]?.meta?.changes ?? 0) !== 1 ||
+      Number(enrollmentResults[1]?.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Enrollment token is invalid, already consumed, or the node pool is not ready." }, 409);
   }
-  await c.env.DB.prepare(
-    "INSERT INTO application_node_signing_key_history (id,node_id,public_key) " +
-    "SELECT ?, id, signing_public_key FROM application_nodes WHERE node_identity = ? AND signing_public_key = ?",
-  ).bind(crypto.randomUUID(), body.nodeIdentity, body.publicKey.toLowerCase()).run();
   const node = await c.env.DB.prepare(
     "SELECT id, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
     "FROM application_nodes WHERE node_identity = ? LIMIT 1",
