@@ -22,7 +22,7 @@ func Open(root string) (*Manager, error) {
 	parent := filepath.Dir(root)
 	parentInfo, err := os.Lstat(parent)
 	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 ||
-		parentInfo.Mode().Perm()&0022 != 0 || !ownedByCurrentUser(parentInfo) {
+		parentInfo.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(parentInfo) {
 		return nil, errors.New("volume root parent must be a private real directory owned by the runtime service")
 	}
 	if err := os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
