@@ -132,6 +132,12 @@ func TestReceiveVerifiesAndPublishesImmutableRelease(t *testing.T) {
 	got, err := os.ReadFile(releaseFile)
 	if err != nil { t.Fatal(err) }
 	if string(got) != "<h1>Nexora test release</h1>" { t.Fatalf("unexpected release content: %q", got) }
+	fileInfo, err := os.Stat(releaseFile)
+	if err != nil { t.Fatal(err) }
+	if fileInfo.Mode().Perm() != 0644 { t.Fatalf("published static file mode = %o, want 0644", fileInfo.Mode().Perm()) }
+	releaseInfo, err := os.Stat(filepath.Join(f.request.BaseDir, "releases", result.ReleaseID))
+	if err != nil { t.Fatal(err) }
+	if releaseInfo.Mode().Perm() != 0750 { t.Fatalf("published release root mode = %o, want 0750", releaseInfo.Mode().Perm()) }
 	target, err := os.Readlink(filepath.Join(f.request.BaseDir,"current"))
 	if err != nil { t.Fatal(err) }
 	if target != filepath.Join("releases",result.ReleaseID) { t.Fatalf("unexpected current target: %q", target) }

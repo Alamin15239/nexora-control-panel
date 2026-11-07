@@ -1,0 +1,31 @@
+[Unit]
+Description=Nexora isolated static artifact publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexora-runtime
+Group=nexora-static
+SupplementaryGroups=www-data
+ExecStart=/usr/local/bin/nexora-static-publisher --config /etc/nexora-static-publisher/node.json
+Restart=on-failure
+RestartSec=5
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/nexora-static
+ReadOnlyPaths=/etc/nexora-static-publisher
+
+[Install]
+WantedBy=multi-user.target

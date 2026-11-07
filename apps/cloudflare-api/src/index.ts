@@ -4490,6 +4490,66 @@ app.get("/internal/v1/application-nodes/desired-state", async (c) => {
   }, 200, { "cache-control": "no-store" });
 });
 
+
+const STATIC_PENDING_RELEASES_PATH = "/internal/v1/application-nodes/pending-static-releases";
+
+app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature) || c.req.raw.body !== null) {
+    return c.json({ message: "Invalid static-publisher request proof." }, 401);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "GET", STATIC_PENDING_RELEASES_PATH, "", signature,
+  )) {
+    return c.json({ message: "Runtime node is not authorized to poll static releases." }, 401);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+  const rows = await c.env.DB.prepare(
+    "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
+    "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
+    "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha " +
+    "FROM application_releases r " +
+    "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_nodes n ON n.id = r.assigned_node_id AND n.node_pool_id = r.node_pool_id " +
+    "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? AND r.state = 'artifact_uploaded' " +
+    "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+    "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL ORDER BY r.requested_at LIMIT 10",
+  ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
+    deploymentId: string; organizationId: string; projectId: string;
+    hostingAccountId: string; repositoryId: string; commitSha: string;
+  }>();
+  await c.env.DB.prepare(
+    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND status = 'online' AND revoked_at IS NULL",
+  ).bind(node.id, nodeIdentity).run();
+  return c.json({
+    nodeIdentity,
+    polledAt: new Date().toISOString(),
+    releases: rows.results ?? [],
+  }, 200, { "cache-control": "no-store" });
+});
+
 app.post("/internal/v1/application-nodes/artifact", async (c) => {
   if (!c.env.ARTIFACTS) return c.json({ message: "Private application artifact storage is unavailable." }, 503);
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";

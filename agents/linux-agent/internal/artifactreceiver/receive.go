@@ -155,7 +155,9 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	}
 	stageID := "artifact-" + hex.EncodeToString(stageIDBytes)
 	stagePath := filepath.Join(stagingRoot, stageID)
-	if err := os.Mkdir(stagePath, 0700); err != nil {
+	// The parent staging directory must be setgid and group-owned by the web-server read group.
+	// This keeps the release readable by the static origin without granting it write access.
+	if err := os.Mkdir(stagePath, 0750); err != nil {
 		return result, fmt.Errorf("create private staging directory: %w", err)
 	}
 	published := false
@@ -171,6 +173,9 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	}
 	if extracted != archiveResult {
 		return result, errors.New("archive extraction result differs from pre-publication validation")
+	}
+	if err := prepareStaticTree(stagePath); err != nil {
+		return result, fmt.Errorf("prepare static files for read-only web serving: %w", err)
 	}
 	if err := writeReleaseManifest(stagePath, claims.DeploymentID, digestHex, claims.ArtifactBytes); err != nil {
 		return result, fmt.Errorf("write publisher release manifest: %w", err)
@@ -193,6 +198,29 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	}, nil
 }
 
+
+
+ // prepareStaticTree exposes only validated regular website files to the
+ // configured read-only web-server group. It never follows links or preserves
+ // permissions supplied by the archive.
+func prepareStaticTree(root string) error {
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil { return walkErr }
+		info, err := os.Lstat(path)
+		if err != nil { return err }
+		if info.Mode()&os.ModeSymlink != 0 { return errors.New("symbolic link appeared in validated staging tree") }
+		if entry.IsDir() {
+			if path == root { return nil }
+			return os.Chmod(path, 0755)
+		}
+		if !info.Mode().IsRegular() || path == filepath.Join(root, releaseManifestName) {
+			if path == filepath.Join(root, releaseManifestName) { return nil }
+			return errors.New("staging tree contains a non-regular file")
+		}
+		return os.Chmod(path, 0644)
+	}); err != nil { return err }
+	return os.Chmod(root, 02750)
+}
 
 func writeReleaseManifest(stagePath, releaseID, digest string, artifactBytes int64) error {
 	manifest := releaseManifest{Version: 1, ReleaseID: releaseID, ArtifactSHA256: digest, ArtifactBytes: artifactBytes}
