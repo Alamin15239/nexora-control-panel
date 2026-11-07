@@ -182,7 +182,7 @@ func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T)
 	digest := sha256.Sum256([]byte("artifact"))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\"}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeId\":\"previous-runtime-node\"}"))
 	}))
 	defer server.Close()
 	ack, err := ReportHealthCheck(context.Background(), server.Client(), Config{
@@ -208,7 +208,7 @@ func TestReportHealthCheckRejectsContradictoryAcknowledgement(t *testing.T) {
 	_, privateKey := testIdentity(t)
 	digest := sha256.Sum256([]byte("artifact"))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"succeeded\",\"workloadHealth\":\"healthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\"}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"succeeded\",\"workloadHealth\":\"healthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeId\":\"previous-runtime-node\"}"))
 	}))
 	defer server.Close()
 	_, err := ReportHealthCheck(context.Background(), server.Client(), Config{
