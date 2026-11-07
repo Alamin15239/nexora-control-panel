@@ -1,83 +1,81 @@
 # Nexora Control
 
-A multi-tenant hosting and application deployment platform built around Cloudflare's serverless and edge infrastructure. Nexora's selected direction is a Cloudflare-native alternative for supported web workloads, not a traditional unrestricted Linux VPS/cPanel service.
+Nexora is a multi-tenant hosting control plane and application-deployment platform. Its selected architecture uses Cloudflare for the dashboard, API, metadata and edge services, with a separate isolated compute plane for workloads that need a conventional application runtime.
 
-## Current architecture
+**Current implementation status:** substantial control-plane and runtime foundations exist, but Nexora is not yet a production-complete cPanel replacement or a customer-ready build-to-live application host. See [the current platform status](docs/architecture/current-platform-status.md) before enabling workloads or onboarding customers.
 
-- Web: Next.js 15, React 19, TypeScript and Tailwind CSS, deployed to Cloudflare Workers using the OpenNext adapter.
-- API: NestJS with Prisma and PostgreSQL.
-- Current API foundation: NestJS, Prisma and PostgreSQL (migration to Cloudflare Workers and D1 is planned, not yet completed).
-- Existing Go Linux agent: validation-only foundation; it is not the selected execution model for Cloudflare-native hosting.
-- Target infrastructure: Workers, D1, R2, KV, Durable Objects, Queues, Cron Triggers and Cloudflare DNS/Custom Domains.
+## Selected architecture
 
-Nexora's target model is Cloudflare-native deployment and resource orchestration. Cloudflare Workers are not general-purpose Linux VPS instances and do not provide unrestricted SSH, arbitrary root processes or standard PHP-FPM hosting.
+- **Dashboard:** Next.js 15, React 19, TypeScript and Tailwind CSS; configured for Cloudflare Workers using OpenNext in `apps/web`.
+- **Control-plane API:** Hono on Cloudflare Workers in `apps/cloudflare-api`.
+- **Database:** Cloudflare D1 with reviewed SQL migrations in `apps/cloudflare-api/migrations`.
+- **Artifact storage:** private Cloudflare R2 through the API's `ARTIFACTS` binding.
+- **Edge and domains:** Cloudflare DNS, proxy, TLS and supported custom-hostname routing.
+- **Application compute:** separate Linux application-node pools using constrained rootless OCI or stronger microVM isolation.
+- **Legacy foundation:** `apps/api` (NestJS/Prisma) and legacy Linux hosting-agent code remain in the repository; they are not interchangeable with the selected Cloudflare control plane or the new application runtime-node service.
 
-## Current implemented functionality
+Cloudflare Workers are not general-purpose Linux VPS instances. Conventional PHP-FPM, arbitrary processes and unrestricted containers require a separately implemented and secured compute environment.
 
-- Responsive Nexora dashboard shell.
-- Sign-in and workspace registration interface.
-- Next.js authentication proxy that stores the bearer session in an HttpOnly, SameSite=Lax cookie rather than browser local storage.
-- API registration (creates user, organization and OWNER membership), login, logout and current-user endpoints.
-- Scrypt password hashing, short-lived signed sessions, persisted token hashes, database-backed session revocation and active membership checks.
-- Persistent failed-login attempt tracking.
-- Go agent CLI for version reporting and local agent configuration validation.
+## Implemented foundations
 
-Dashboard metric cards and infrastructure status are still setup placeholders. The web interface does not yet provision or manage real hosting resources.
+- Organization-scoped authentication and control-plane API.
+- GitHub App connection, repository discovery and hosting-account project linking.
+- Manual deployment dispatch, immutable commit binding, trusted workflow SHA approval and GitHub Actions OIDC verification.
+- One-time artifact upload capabilities and private R2 artifact staging.
+- D1 project, release, runtime-profile, node-pool, node-identity and usage schema.
+- Authenticated application-node enrollment/heartbeat and signed read-only desired-state polling.
+- Linux archive-validation, rootless Podman, release-delivery, volume, secret-bundle and durable supervisor primitives.
+- Runtime settings and build-usage metadata in the dashboard.
 
-## Cloudflare deployment
+These components are not proof that the full release lifecycle is enabled in production. The runtime node remains read-only and customer workload execution remains disabled.
 
-Cloudflare is the selected deployment provider for both the dashboard and API. The dashboard is configured as the `nexora-dashboard` Worker using `apps/web/wrangler.toml` and the OpenNext adapter. The API is deployed separately as `nexora-api` and uses the `nexora-production` D1 database. Vercel is not required. See [the Cloudflare-first architecture](docs/cloudflare-first-architecture.md) for deployment details, free-tier constraints and supported hosting model. The Google Cloud document is retained only as a historical alternative.
+## What is not production-ready yet
 
-## Development setup
+- Complete static artifact validation, publishing, atomic activation and rollback.
+- A production build workflow installed and approved in customer repositories.
+- An isolated builder with enforced resource and egress policies.
+- A complete application-node lifecycle connected to rootless OCI execution.
+- Runtime secret delivery/rotation, persistent-volume quotas, ingress routing and recovery.
+- Automatic push deployments, complete deployment logs and customer rollback controls.
+- Production acceptance tests for tenant isolation and hostile build/artifact inputs.
 
-Requirements: Node.js 20+, pnpm 9+, Go 1.23+ and PostgreSQL.
+The sample workflow in `docs/templates/nexora-deploy.yml` is an artifact-staging scaffold, not a working production deployment. Do not interpret a queued workflow or uploaded artifact as a live website.
+
+## Development
+
+Requirements vary by package. The root workspace uses pnpm 9.
 
 ```sh
 pnpm install
-pnpm --filter @nexora/database db:generate
-pnpm --filter @nexora/api dev
-```
-
-In a separate terminal:
-
-```sh
 pnpm --filter @nexora/web dev
 ```
 
-Configure the environment variables below before using authentication.
+Run the Cloudflare API locally in a separate terminal:
 
-## Environment
+```sh
+pnpm --filter @nexora/cloudflare-api dev
+```
 
-API:
-- `DATABASE_URL`: PostgreSQL connection string.
-- `SESSION_SECRET`: at least 32 random bytes.
-- `ALLOW_PUBLIC_REGISTRATION`: `true` to enable self-service registration; otherwise registration is disabled.
+Useful validation commands:
 
-Web:
-- `NEXORA_API_URL`: base URL of the Cloudflare Worker API. Production is configured in `apps/web/wrangler.toml`; local development can use `.env.local`.
+```sh
+pnpm --filter @nexora/web typecheck
+pnpm --filter @nexora/cloudflare-api typecheck
+```
 
-Generate a session secret using `openssl rand -base64 48`. Keep all real credentials in deployment secret settings, never in Git.
-
-The Prisma schema has changed to include persistent auth sessions and login-attempt tracking. Update the development database using `pnpm --filter @nexora/database exec prisma db push`. For production, create and review a checked-in migration before applying changes; do not use unreviewed `db push` as a production migration strategy.
-
-## Security and release status
-
-The authentication slice is an initial implementation, not a production-complete identity system. Email verification, password reset, MFA challenge flows, refresh-token rotation, registration abuse protection, robust distributed rate limiting, session/device management and security monitoring remain outstanding. Configure TLS, strict CORS, request limits, trusted proxy behavior and security headers at the deployment boundary.
-
-All business controllers must explicitly apply authentication and role guards. Every tenant-scoped query must use the authenticated organization scope and object-level authorization.
-
-The Go agent does not yet connect to the control plane, send telemetry or execute provisioning operations. Hosting account provisioning, websites, databases, DNS, SSL, FTP, mail, backups, reseller functions and billing are not yet implemented. Do not market the current build as a complete cPanel replacement until those functions are implemented, integrated and tested.
+Configure local bindings and secrets using Wrangler's local development mechanisms. Never commit API tokens, GitHub App private keys, encryption keys, session secrets or customer credentials.
 
 ## Security principles
 
-- Tenant isolation for every customer-owned resource.
-- MFA for privileged accounts.
-- Short-lived, revocable credentials.
-- Mutual TLS between control plane and server agents.
-- Explicit allowlists for privileged server operations.
-- Auditable changes and privileged actions.
-- Encrypted, independently stored backups.
-- No arbitrary root shell execution.
+- Bind every customer-owned row and object to the authenticated organization.
+- Enforce object-level authorization; opaque IDs are not authorization.
+- Keep customer builds and runtime processes out of the API Worker and privileged host agents.
+- Use ephemeral, least-privilege credentials and one-time, scoped artifact capabilities.
+- Verify immutable source identity, trusted workflow identity and artifact digests.
+- Enforce CPU, memory, process, disk, network and time limits server-side.
+- Keep secrets out of source archives, images, logs, telemetry and browser code.
+- Use immutable releases, health checks and failure-safe rollback.
+- Audit privileged operations and fail closed when trust or capacity checks fail.
 
 ## License
 
