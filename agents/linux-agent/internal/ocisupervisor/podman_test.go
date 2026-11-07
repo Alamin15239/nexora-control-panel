@@ -185,3 +185,34 @@ func TestStartRejectsSymlinkAndWritablePersistentDataDirectories(t *testing.T) {
 	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for unsafe persistent data directory: %+v", runner.calls) }
 }
 
+
+func TestStartMountsPersistentDataAndSecretsWithExpectedAccess(t *testing.T) {
+	spec := validSpec(t)
+	secretDir := filepath.Join(t.TempDir(), "secrets")
+	if err := os.Mkdir(secretDir, 0700); err != nil { t.Fatal(err) }
+	secretPath := filepath.Join(secretDir, "DATABASE_URL")
+	if err := os.WriteFile(secretPath, []byte("postgres://private"), 0400); err != nil { t.Fatal(err) }
+	spec.SecretDir = secretDir
+	runner := &fakeRunner{rootless: "true"}
+	p := Podman{Runner: runner, AllowedRegistries: []string{"registry.example.com"}}
+	if _, err := p.Start(context.Background(), spec); err != nil { t.Fatal(err) }
+	create := strings.Join(runner.calls[1], " ")
+	for _, required := range []string{
+		"dst=/var/lib/nexora,rw=true",
+		"src=" + secretDir + ",dst=/run/secrets,ro=true",
+	} {
+		if !strings.Contains(create, required) { t.Errorf("create command missing %q: %s", required, create) }
+	}
+}
+
+func TestStartRejectsUnsafeSecretDirectoryBeforePodmanInvocation(t *testing.T) {
+	spec := validSpec(t)
+	secretDir := filepath.Join(t.TempDir(), "secrets")
+	if err := os.Mkdir(secretDir, 0755); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(secretDir, "TOKEN"), []byte("secret"), 0400); err != nil { t.Fatal(err) }
+	spec.SecretDir = secretDir
+	runner := &fakeRunner{rootless: "true"}
+	p := Podman{Runner: runner, AllowedRegistries: []string{"registry.example.com"}}
+	if _, err := p.Start(context.Background(), spec); err == nil { t.Fatal("group/world accessible secret directory accepted") }
+	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for unsafe secret directory: %+v", runner.calls) }
+}
