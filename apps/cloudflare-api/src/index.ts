@@ -1601,6 +1601,33 @@ app.get("/v1/customer/hosting-accounts", async (c) => {
   return c.json({ accounts: result.results ?? [] });
 });
 
+// Customer account overview is available only to an active account member.
+app.get("/v1/customer/hosting-accounts/:id/overview", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.primary_domain, a.status, a.created_at,
+            p.name AS plan_name, p.disk_limit_bytes, p.bandwidth_limit_bytes,
+            p.website_limit, p.database_limit, p.mailbox_limit,
+            m.role AS account_role,
+            (SELECT COUNT(*) FROM domains d
+             WHERE d.hosting_account_id = a.id) AS websites,
+            (SELECT COUNT(*) FROM hosting_databases d
+             WHERE d.hosting_account_id = a.id AND d.status != 'DELETED') AS databases
+     FROM hosting_account_memberships m
+     JOIN hosting_accounts a
+       ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     JOIN hosting_plans p
+       ON p.id = a.plan_id AND p.organization_id = a.organization_id
+     WHERE a.id = ? AND m.user_id = ? AND m.organization_id = ?
+       AND m.status = 'ACTIVE' AND a.status = 'ACTIVE'
+     LIMIT 1`,
+  ).bind(accountId, identity.id, identity.organizationId).first();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  return c.json({ account });
+});
+
 app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
