@@ -462,7 +462,7 @@ test("per-node Ed25519 usage reports are accepted once and duplicate delivery is
   assert.equal(firstResult.buildSecondsUsed, 90);
   assert.equal(firstResult.buildMinutesLimit, 300);
 
-  const replay = await worker.fetch(await signedNodeRequest(body, pair.privateKey), environment(db), {} as ExecutionContext);
+  const replay = await worker.fetch(await signedNodeRequest(body, pair.privateKey, "9".repeat(32)), environment(db), {} as ExecutionContext);
   assert.equal(replay.status, 200);
   const replayResult = await replay.json() as { accepted: boolean; duplicate: boolean; buildSecondsUsed: number };
   assert.equal(replayResult.accepted, true);
