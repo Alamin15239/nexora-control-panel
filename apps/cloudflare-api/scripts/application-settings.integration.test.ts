@@ -136,8 +136,26 @@ const identity = (role: TestIdentity["role"], organizationId = "org-a"): TestIde
   role,
 });
 
-function environment(db: TestD1) {
-  return { DB: db as unknown as D1Database };
+function environment(db: TestD1, meteringSecret?: string) {
+  return { DB: db as unknown as D1Database, APPLICATION_BUILDER_METERING_SECRET: meteringSecret };
+}
+
+async function signedBuilderRequest(body: unknown, secret: string, timestamp = String(Math.floor(Date.now() / 1000))) {
+  const rawBody = JSON.stringify(body);
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key,
+    new TextEncoder().encode(timestamp + "." + rawBody)));
+  const signature = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test/internal/v1/application-build-usage", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-builder-timestamp": timestamp,
+      "x-nexora-builder-signature": "sha256=" + signature,
+    },
+    body: rawBody,
+  });
 }
 
 function request(method: string, path: string, body?: unknown, authenticated = true) {
@@ -286,4 +304,51 @@ test("project usage GET does not expose another organization's project", async (
   db.projectOrganizationId = "org-b";
   const response = await worker.fetch(request("GET", "/v1/applications/projects/project-a/usage"), environment(db), {} as ExecutionContext);
   assert.equal(response.status, 404);
+});
+
+
+test("builder usage ingestion is disabled when the signing secret is not configured", async () => {
+  const db = new TestD1(null);
+  const response = await worker.fetch(
+    request("POST", "/internal/v1/application-build-usage", { deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" }),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 503);
+});
+
+test("builder usage ingestion rejects an invalid HMAC signature", async () => {
+  const db = new TestD1(null);
+  const body = { deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" };
+  const rawBody = JSON.stringify(body);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-build-usage", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-nexora-builder-timestamp": timestamp, "x-nexora-builder-signature": "sha256=" + "0".repeat(64) },
+    body: rawBody,
+  }), environment(db, "s".repeat(48)), {} as ExecutionContext);
+  assert.equal(response.status, 401);
+});
+
+test("builder usage ingestion verifies HMAC before validating payload", async () => {
+  const db = new TestD1(null);
+  const secret = "s".repeat(48);
+  const response = await worker.fetch(
+    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 0, buildResult: "succeeded" }, secret),
+    environment(db, secret),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 400);
+});
+
+test("builder usage ingestion rejects stale signed reports", async () => {
+  const db = new TestD1(null);
+  const secret = "s".repeat(48);
+  const staleTimestamp = String(Math.floor(Date.now() / 1000) - 600);
+  const response = await worker.fetch(
+    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" }, secret, staleTimestamp),
+    environment(db, secret),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 401);
 });
