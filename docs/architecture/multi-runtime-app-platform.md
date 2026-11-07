@@ -90,6 +90,14 @@ Error paths: FAILED, CANCELLED and ROLLED_BACK. Transitions must be conditional 
 - Enable only after all prior gates, runbooks, alerts, incident response, backups, restore drills, usage enforcement and support processes are ready.
 - Start with an allowlisted pilot and expand only against measured capacity.
 
+## Monthly build-minute accounting
+
+Hosting plans carry an explicit monthly application build-minute allowance (default 300 minutes; administrators may configure 0–100,000 minutes). The period is the UTC calendar month. Usage is stored as integer build seconds to avoid rounding each short build upward; API responses expose both seconds and fractional minutes.
+
+The control plane now has a tenant-scoped usage-period aggregate and an immutable per-deployment usage-event ledger. The ledger enforces one event per project/deployment, validates that the project, organization, deployment, and period agree, and restricts event source to the future isolated builder. The project usage read endpoint reports the current UTC period and allowance.
+
+**Important implementation boundary:** the isolated builder does not yet exist, so no trusted metering writer is connected. The endpoint therefore reports `meteringStatus: not_connected`, and the control plane does not claim that usage is being measured. Build dispatch quota enforcement remains disabled until a signed, authenticated builder can submit idempotent completion records and the platform has tested retry, timeout, partial-build, and duplicate-delivery behavior. Customer builds remain disabled.
+
 ## Hosting-plan runtime ceilings
 
 The control plane now stores application CPU (millicores), memory (MiB), storage (MiB) and process ceilings on each hosting plan. Project runtime settings are checked against the plan attached to the project's hosting account. Effective application storage is the lower of the app storage ceiling and the account's existing disk quota. The API exposes the effective limits to the dashboard and rejects settings that exceed them.
