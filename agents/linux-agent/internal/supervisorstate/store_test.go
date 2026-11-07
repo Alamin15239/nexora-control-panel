@@ -171,3 +171,10 @@ func TestUpsertManyEmptyBatchDoesNotCreateStateFile(t *testing.T) {
 		t.Fatalf("empty batch unexpectedly created state file: %v", err)
 	}
 }
+
+func TestLoadMissingSnapshotReturnsEmptyFirstBootState(t *testing.T) {
+	store, _ := newStore(t)
+	items, err := store.Load()
+	if err != nil { t.Fatal(err) }
+	if items == nil || len(items) != 0 { t.Fatalf("expected non-nil empty first-boot state, got %+v", items) }
+}
