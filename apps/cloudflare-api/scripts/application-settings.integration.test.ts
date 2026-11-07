@@ -37,6 +37,18 @@ class TestD1 {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
         if (query.includes("FROM auth_sessions s")) return db.identity as T | null;
+        if (query.includes("FROM github_projects p") && query.includes("JOIN hosting_accounts h")) {
+          const [projectId, organizationId] = values;
+          return projectId === "project-a" && organizationId === db.projectOrganizationId
+            ? ({
+                id: "project-a",
+                appCpuMillis: 1000,
+                appMemoryMiB: 512,
+                appDiskMiB: 2048,
+                appProcessLimit: 128,
+                accountDiskLimitBytes: 10 * 1024 * 1024 * 1024,
+              } as T) : null;
+        }
         if (query.includes("FROM github_projects WHERE id = ? AND organization_id = ?")) {
           const [projectId, organizationId] = values;
           return projectId === "project-a" && organizationId === db.projectOrganizationId
@@ -51,6 +63,10 @@ class TestD1 {
           const base = {
             id: "project-a",
             repositoryFullName: "Alamin15239/example-app",
+            planCpuMillis: 1000,
+            planMemoryMiB: 512,
+            planDiskMiB: 2048,
+            planProcessLimit: 128,
           };
           if (!db.settings) return { ...base, settingsId: null } as T;
           const s = db.settings;
@@ -184,14 +200,30 @@ test("settings PUT rejects resource values outside platform bounds", async () =>
   assert.equal(db.writes, 0);
 });
 
+test("settings PUT rejects resources above the assigned hosting plan quota", async () => {
+  const db = new TestD1(identity("OWNER"));
+  const response = await worker.fetch(request("PUT", "/v1/applications/projects/project-a/settings", {
+    ...validSettings, memoryMiB: 513,
+  }), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 400);
+  const result = await response.json() as { message: string; planResourceLimits: { memoryMiB: number } };
+  assert.match(result.message, /hosting plan quotas/i);
+  assert.equal(result.planResourceLimits.memoryMiB, 512);
+  assert.equal(db.writes, 0);
+});
+
 test("OWNER can save settings and read them back as metadata only", async () => {
   const db = new TestD1(identity("OWNER"));
   const put = await worker.fetch(request("PUT", "/v1/applications/projects/project-a/settings", validSettings), environment(db), {} as ExecutionContext);
   assert.equal(put.status, 200);
-  const saved = await put.json() as { saved: boolean; executionEnabled: boolean; planQuotasEnforced: boolean };
+  const saved = await put.json() as {
+    saved: boolean; executionEnabled: boolean; planQuotasEnforced: boolean;
+    planResourceLimits: { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number };
+  };
   assert.equal(saved.saved, true);
   assert.equal(saved.executionEnabled, false);
-  assert.equal(saved.planQuotasEnforced, false);
+  assert.equal(saved.planQuotasEnforced, true);
+  assert.equal(saved.planResourceLimits.memoryMiB, 512);
   assert.equal(db.writes, 1);
   assert.equal(db.audits, 1);
 
@@ -199,9 +231,11 @@ test("OWNER can save settings and read them back as metadata only", async () => 
   assert.equal(get.status, 200);
   const result = await get.json() as {
     executionEnabled: boolean;
+    planLimits: { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number };
     settings: { runtimeProfileId: string; buildContext: string; resources: { memoryMiB: number } } | null;
   };
   assert.equal(result.executionEnabled, false);
+  assert.equal(result.planLimits.memoryMiB, 512);
   assert.equal(result.settings?.runtimeProfileId, "runtime-nodejs-v1");
   assert.equal(result.settings?.buildContext, ".");
   assert.equal(result.settings?.resources.memoryMiB, 512);
