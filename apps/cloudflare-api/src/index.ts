@@ -3635,6 +3635,84 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   }
 });
 
+
+// Runtime catalog is metadata only. Disabled profiles cannot be selected for execution.
+app.get("/v1/applications/runtime-profiles", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const rows = await c.env.DB.prepare(
+    `SELECT id, runtime_family AS runtimeFamily, profile_key AS profileKey,
+            display_name AS displayName, profile_version AS profileVersion,
+            execution_kind AS executionKind, default_port AS defaultPort,
+            enabled
+     FROM application_runtime_profiles
+     ORDER BY runtime_family, profile_key`,
+  ).all<{
+    id: string; runtimeFamily: string; profileKey: string; displayName: string;
+    profileVersion: number; executionKind: string; defaultPort: number | null; enabled: number;
+  }>();
+  return c.json({
+    profiles: (rows.results ?? []).map((profile) => ({
+      ...profile,
+      enabled: profile.enabled === 1,
+      selectable: profile.enabled === 1,
+    })),
+    executionEnabled: false,
+    message: "Runtime execution remains disabled until isolated builders and application nodes pass platform acceptance tests.",
+  });
+});
+
+app.get("/v1/applications/projects/:projectId/settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, p.repository_full_name AS repositoryFullName,
+            s.id AS settingsId, s.runtime_profile_id AS runtimeProfileId,
+            rp.runtime_family AS runtimeFamily, rp.profile_key AS runtimeProfileKey,
+            rp.enabled AS runtimeEnabled, s.spec_version AS specVersion,
+            s.build_method AS buildMethod, s.build_context AS buildContext,
+            s.build_command AS buildCommand, s.output_directory AS outputDirectory,
+            s.start_command AS startCommand, s.listen_port AS listenPort,
+            s.health_check_path AS healthCheckPath, s.cpu_millis AS cpuMillis,
+            s.memory_mib AS memoryMiB, s.disk_mib AS diskMiB,
+            s.process_limit AS processLimit, s.updated_at AS updatedAt
+     FROM github_projects p
+     LEFT JOIN application_project_settings s
+       ON s.project_id = p.id AND s.organization_id = p.organization_id
+     LEFT JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id
+     WHERE p.id = ? AND p.organization_id = ?
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<Record<string, unknown>>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  return c.json({
+    project: { id: project.id, repositoryFullName: project.repositoryFullName },
+    settings: project.settingsId ? {
+      id: project.settingsId,
+      runtimeProfileId: project.runtimeProfileId,
+      runtimeFamily: project.runtimeFamily,
+      runtimeProfileKey: project.runtimeProfileKey,
+      runtimeEnabled: project.runtimeEnabled === 1,
+      specVersion: project.specVersion,
+      buildMethod: project.buildMethod,
+      buildContext: project.buildContext,
+      buildCommand: project.buildCommand,
+      outputDirectory: project.outputDirectory,
+      startCommand: project.startCommand,
+      listenPort: project.listenPort,
+      healthCheckPath: project.healthCheckPath,
+      resources: {
+        cpuMillis: project.cpuMillis,
+        memoryMiB: project.memoryMiB,
+        diskMiB: project.diskMiB,
+        processLimit: project.processLimit,
+      },
+      selectable: project.runtimeEnabled === 1,
+    } : null,
+    executionEnabled: false,
+  });
+});
+
 app.get("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
