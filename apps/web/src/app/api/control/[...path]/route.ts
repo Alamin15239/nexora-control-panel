@@ -71,7 +71,7 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
 ) {
   const { path } = await context.params;
   if (!Array.isArray(path) || !allowedRoute(path, method)) {
