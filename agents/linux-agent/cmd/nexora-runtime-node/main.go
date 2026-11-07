@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,33 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimecontroller"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimepoller"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/supervisorstate"
+)
+
+var runtimeNodeIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/ocisupervisor"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimecontroller"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimepoller"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/supervisorstate"
+)
+
 )
 
 type Config struct {
@@ -55,11 +83,13 @@ func loadConfig(path string) (Config, error) {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil { return cfg, fmt.Errorf("decode runtime config: %w", err) }
+	var extra any
+	if err := decoder.Decode(&extra); err == nil { return cfg, errors.New("runtime config contains trailing JSON data") }
 	u, err := url.Parse(cfg.ControlPlaneURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return cfg, errors.New("control_plane_url must be an HTTPS origin without credentials, path, query or fragment")
 	}
-	if len(cfg.NodeIdentity) < 3 || len(cfg.NodeIdentity) > 128 {
+	if !runtimeNodeIdentityPattern.MatchString(cfg.NodeIdentity) {
 		return cfg, errors.New("node_identity is invalid")
 	}
 	if !filepath.IsAbs(cfg.PrivateKeyFile) || filepath.Clean(cfg.PrivateKeyFile) != cfg.PrivateKeyFile {
@@ -85,6 +115,7 @@ func loadConfig(path string) (Config, error) {
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	info, err := os.Lstat(path)
 	if err != nil { return nil, err }
+	if info.Size() > 256 { return nil, errors.New("Ed25519 private key file exceeds size limit") }
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("Ed25519 private key file must be regular and owner-only")
 	}
