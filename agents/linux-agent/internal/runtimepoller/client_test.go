@@ -15,6 +15,9 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
 )
 
+func stringPtr(value string) *string { return &value }
+func intPtr(value int) *int { return &value }
+
 func testSnapshot() Snapshot {
 	return Snapshot{
 		NodeIdentity: "runtime-a", PolledAt: time.Now().UTC(), ExecutionEnabled: false,
@@ -23,6 +26,7 @@ func testSnapshot() Snapshot {
 			WorkloadID: "workload-a", ProjectID: "project-a", WorkloadKind: "web",
 			WorkloadStatus: "healthy", DesiredReplicas: 1, ObservedReplicas: 1,
 			ReleaseID: "release-a", ReleaseState: "succeeded", ReleaseSpecVersion: 2,
+			ImageDigest: stringPtr("registry.nexoraedge.digital/org/app@sha256:" + strings.Repeat("a", 64)), ListenPort: intPtr(3000),
 			SettingsSpecVersion: 2, RuntimeProfileID: "runtime-nodejs-v1",
 			RuntimeProfileKey: "nodejs-v1", RuntimeFamily: "nodejs", ExecutionKind: "oci",
 			CPUMillis: 500, MemoryMiB: 512, DiskMiB: 2048, ProcessLimit: 128,
@@ -89,6 +93,10 @@ func TestPollRejectsInvalidWorkloadAndDuplicateIDs(t *testing.T) {
 	for _, mutate := range []func(*Snapshot){
 		func(s *Snapshot) { s.Workloads[0].ReleaseState = "building" },
 		func(s *Snapshot) { s.Workloads[0].CPUMillis = 9000 },
+		func(s *Snapshot) { s.Workloads[0].RuntimeProfileKey = "container-v1" },
+		func(s *Snapshot) { s.Workloads[0].ImageDigest = stringPtr("registry.example/app:latest") },
+		func(s *Snapshot) { s.Workloads[0].ListenPort = intPtr(8080) },
+		func(s *Snapshot) { s.Workloads[0].DesiredReplicas = 2 },
 		func(s *Snapshot) { s.Workloads = append(s.Workloads, s.Workloads[0]) },
 	} {
 		snapshot := testSnapshot()
