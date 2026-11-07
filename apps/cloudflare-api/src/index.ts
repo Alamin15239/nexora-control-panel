@@ -3699,9 +3699,9 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
     "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, p.status AS poolStatus, " +
     "p.isolation_level AS isolationLevel, " +
-    "EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
+    "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key IS NOT NULL) AS hasOnlineRuntime " +
+    "AND n.signing_public_key IS NOT NULL ORDER BY n.last_heartbeat_at DESC, n.id LIMIT 1) AS assignedNodeId " +
     "FROM application_project_settings s " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
@@ -3709,14 +3709,14 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   ).bind(project.id, identity.organizationId).first<{
     runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
     runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
-    hasOnlineRuntime: number;
+    assignedNodeId: string | null;
   }>();
   if (runtimeAssignment && (
     runtimeAssignment.runtimeEnabled !== 1 ||
     !runtimeAssignment.nodePoolId ||
     runtimeAssignment.poolStatus !== "ready" ||
     !["rootless", "microvm"].includes(runtimeAssignment.isolationLevel ?? "") ||
-    runtimeAssignment.hasOnlineRuntime !== 1
+    !runtimeAssignment.assignedNodeId
   )) {
     return c.json({
       message: "Application deployment is not admitted: the runtime must be enabled and assigned to a ready isolated pool with an online runtime node.",
@@ -3754,16 +3754,17 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     if (runtimeAssignment && applicationReleaseId) {
       creationStatements.push(c.env.DB.prepare(
         "INSERT INTO application_releases " +
-        "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, spec_version, state, source_commit_sha) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+        "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, assigned_node_id, spec_version, state, source_commit_sha) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
       ).bind(applicationReleaseId, identity.organizationId, project.id, deploymentId,
-        runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
+        runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.assignedNodeId,
+        runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
       creationStatements.push(c.env.DB.prepare(
         "INSERT INTO application_release_events " +
         "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
         "VALUES (?, ?, ?, NULL, 'queued', 'user', ?, 'deployment_queued', ?)",
       ).bind(crypto.randomUUID(), identity.organizationId, applicationReleaseId, identity.id,
-        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId })));
+        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId })));
     }
     const created = await c.env.DB.batch(creationStatements);
     if (Number(created[0]?.meta?.changes ?? 0) !== 1 ||
@@ -3830,6 +3831,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
         id: applicationReleaseId,
         deploymentId,
         nodePoolId: runtimeAssignment?.nodePoolId,
+        assignedNodeId: runtimeAssignment?.assignedNodeId,
         state: "queued",
       } : null,
       message: "GitHub Actions accepted the workflow dispatch. Application releases remain gated until the isolated runtime validates and publishes the artifact.",
