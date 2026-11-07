@@ -42,7 +42,7 @@ func TestProbeClassifiesHTTPFailuresWithoutFollowingRedirects(t *testing.T) {
 		failure string
 	}{
 		{name:"redirect",status:http.StatusFound,failure:"invalid_response"},
-		{name:"client error",status:http.StatusServiceUnavailable-400,failure:"http_4xx"},
+		{name:"client error",status:http.StatusBadRequest,failure:"http_4xx"},
 		{name:"server error",status:http.StatusServiceUnavailable,failure:"http_5xx"},
 	}
 	for _, testCase := range cases {
