@@ -185,8 +185,11 @@ BEGIN SELECT RAISE(ABORT, 'project organization mismatch'); END;
 
 CREATE TRIGGER IF NOT EXISTS application_releases_terminal_state_immutable
 BEFORE UPDATE OF state ON application_releases
-WHEN OLD.state IN ('succeeded','failed','cancelled','rolled_back')
- AND NEW.state <> OLD.state
+WHEN (
+  OLD.state IN ('failed','cancelled','rolled_back') AND NEW.state <> OLD.state
+) OR (
+  OLD.state = 'succeeded' AND NEW.state NOT IN ('succeeded','rolled_back')
+)
 BEGIN SELECT RAISE(ABORT, 'terminal release state is immutable'); END;
 
 
