@@ -148,12 +148,16 @@ must_reject(
 )
 db.execute("UPDATE application_node_signing_key_history SET retired_at=datetime('now') WHERE id='key-history-runtime'")
 
+db.execute("""INSERT INTO application_nodes
+(id,node_pool_id,node_identity,enrollment_key_hash,status,agent_version,signing_public_key,enrollment_consumed_at,last_heartbeat_at)
+VALUES ('runtime-node-b','pool-runtime','runtime-b',?,'online','0.4.0',?,datetime('now'),datetime('now'))""",
+    ("e" * 64, "d" * 64))
 db.execute("""INSERT INTO application_releases
 (id,organization_id,project_id,deployment_id,node_pool_id,runtime_profile_id,assigned_node_id,spec_version,source_commit_sha)
-VALUES ('release-a','org-a','project-a','deployment-a','pool-runtime','runtime-nodejs-v1','runtime-a',1,?)""", ("a" * 40,))
+VALUES ('release-a','org-a','project-a','deployment-a','pool-runtime','runtime-nodejs-v1','runtime-node-b',1,?)""", ("a" * 40,))
 assert db.execute(
     "SELECT assigned_node_id FROM application_releases WHERE id='release-a'"
-).fetchone()[0] == "runtime-a"
+).fetchone()[0] == "runtime-node-b"
 must_reject(
     "release cannot be assigned to a builder node",
     "UPDATE application_releases SET assigned_node_id='builder-a' WHERE id='release-a'",
