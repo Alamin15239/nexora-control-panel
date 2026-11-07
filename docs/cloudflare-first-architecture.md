@@ -34,9 +34,9 @@ Nexora's supported workload matrix must be explicit. Static websites, server-ren
 
 ## Current implementation status
 
-The repository contains the Hono/D1 control-plane API, GitHub App and OIDC foundations, R2 artifact staging, runtime-node contracts, and Linux rootless OCI/supervisor primitives. These components are not yet an end-to-end production hosting service.
+The repository contains the Hono/D1 control-plane API, GitHub App and OIDC foundations, R2 artifact staging, runtime-node contracts, a dedicated static artifact publisher, and Linux rootless OCI/supervisor primitives. The static publisher can validate and atomically activate static releases assigned to an enrolled node, but it is not installed or enabled on a live node and does not prove that Nginx serves the new release. It reports activation as `health_checking` until an actual HTTP origin probe succeeds.
 
-In particular, the runtime-node service currently performs read-only desired-state polling and refuses workload execution, command delivery and secret delivery. The sample GitHub Actions workflow stages static artifacts only; it does not publish or activate them. The current VirtualBox Ubuntu VM is a development/test machine and must not be treated as a production multi-tenant application node.
+The OCI runtime-node service still performs read-only desired-state polling and refuses container execution, command delivery and secret delivery. The sample GitHub Actions workflow stages static artifacts only; the reviewed workflow must be installed in the customer repository. The current VirtualBox Ubuntu VM is a development/test machine and must not be treated as a production multi-tenant application node.
 
 See [current platform status and rollout gates](architecture/current-platform-status.md) for the authoritative implementation inventory and next steps.
 
