@@ -49,3 +49,10 @@ BEFORE UPDATE OF public_key, node_id, activated_at ON application_node_signing_k
 BEGIN
   SELECT RAISE(ABORT, 'application node signing key history is immutable');
 END;
+
+CREATE TRIGGER IF NOT EXISTS application_node_key_history_retirement_once
+BEFORE UPDATE OF retired_at ON application_node_signing_key_history
+WHEN OLD.retired_at IS NOT NULL OR NEW.retired_at IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'signing key retirement is one-time and immutable');
+END;
