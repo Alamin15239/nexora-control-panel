@@ -2,7 +2,6 @@
 
 import { FormEvent, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ArrowLeft, Cloud, Mail } from "lucide-react";
 
 export default function ForgotPasswordPage() {
