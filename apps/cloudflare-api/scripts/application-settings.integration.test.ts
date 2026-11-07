@@ -37,7 +37,7 @@ class TestD1 {
     const statement = {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
-        if (query.includes("FROM application_usage_periods")) {
+        if (query.includes("LEFT JOIN application_usage_periods")) {
           const [periodStart, projectId, organizationId] = values;
           if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
           return (db.usageRow ?? { id: "project-a", buildMinutesLimit: 300, buildSecondsUsed: 0 }) as T;
