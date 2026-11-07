@@ -42,11 +42,11 @@ func CanonicalMessage(nodeIdentity, timestamp, nonce, method, path string, body 
 	if !methodPattern.MatchString(method) || method != strings.ToUpper(method) {
 		return nil, errors.New("invalid HTTP method")
 	}
-	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\\r\\n") {
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\r\n") {
 		return nil, errors.New("request path must be an absolute path without query or fragment")
 	}
 	digest := sha256.Sum256(body)
-	message := fmt.Sprintf("NEXORA-APPLICATION-NODE-V1\\n%s\\n%s\\n%s\\n%s\\n%s\\n%s",
+	message := fmt.Sprintf("NEXORA-APPLICATION-NODE-V1\n%s\n%s\n%s\n%s\n%s\n%s",
 		nodeIdentity, timestamp, nonce, method, path, hex.EncodeToString(digest[:]))
 	return []byte(message), nil
 }
