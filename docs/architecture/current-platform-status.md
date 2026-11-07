@@ -28,6 +28,8 @@ Cloudflare Workers are not general-purpose Linux VPS instances. A Workers-only d
 - Short-lived, one-time artifact-upload capability and bounded private R2 artifact upload endpoint.
 - D1 schema for projects, deployment/release records, runtime profiles, node pools, node identities, quotas and build-usage events.
 - Authenticated application-node enrollment, heartbeat, signed desired-state polling, artifact delivery and release/health-check protocol foundations.
+- Dedicated static artifact publisher daemon: assigned-node polling, trusted RS256 envelope verification, durable replay protection, SHA-256 verification, archive validation, private staging, immutable releases and atomic activation.
+- Static release activation reports to the API; the API intentionally leaves the release in `health_checking` until an actual HTTP origin probe succeeds.
 - Linux-side archive validation/extraction primitives, rootless Podman supervisor primitives, workload-volume and secret-bundle primitives, and durable supervisor metadata.
 - R2 artifact retention logic for eligible terminal artifacts.
 - Dashboard UI for GitHub connection, repository linking and runtime metadata configuration.
@@ -38,24 +40,26 @@ These are foundations and integration components. A code path or Wrangler bindin
 
 The repository does **not** yet provide a complete customer-facing build-to-live deployment path.
 
-1. The sample workflow at `docs/templates/nexora-deploy.yml` is a static-only artifact-staging scaffold. It is not installed as `.github/workflows/nexora-deploy.yml` in every customer repository and assumes npm, `package-lock.json` and `dist/`.
-2. The control plane can dispatch the named workflow only when the GitHub App credentials/permissions are configured and the project has an administrator-reviewed workflow SHA.
-3. OIDC exchange and private artifact staging do not publish files or activate an application release.
-4. Archive validation and the Linux OCI supervisor exist as primitives, but they are not yet composed into a production publisher and complete runtime lifecycle.
-5. The application runtime-node service is a read-only polling phase. It rejects execution, command delivery and secret delivery; it does not start or stop customer workloads.
-6. Automatic push deployment, complete logs, customer rollback UI, production health-check lifecycle, ingress routing and end-to-end release acceptance remain incomplete.
-7. Build-usage reporting exists, but build-dispatch quota enforcement is explicitly not enabled.
+1. The sample workflow at `docs/templates/nexora-deploy.yml` remains a static-only artifact-staging scaffold. It is not installed as `.github/workflows/nexora-deploy.yml` in every customer repository and assumes npm, `package-lock.json` and `dist/`.
+2. The control plane can dispatch the named workflow only when GitHub App credentials/permissions are configured and the project has an administrator-reviewed workflow SHA.
+3. The static publisher is implemented and CI-tested, but is not installed or enabled on a runtime node. Its `static-v1` profile remains disabled by default.
+4. Static activation requires operator-provisioned account release directories, a dedicated read-only web-server group, Nginx document-root routing, a node signing key and the matching deployment-envelope public key. These live prerequisites have not been verified.
+5. The publisher reports archive validation and atomic activation but deliberately does not report the site healthy. An external HTTP health probe, traffic verification and rollback orchestration are still required.
+6. The application runtime-node service remains read-only for OCI workloads. It rejects execution, command delivery and secret delivery; it does not start or stop customer containers.
+7. Automatic push deployment, complete logs, customer rollback UI, production health-check lifecycle, ingress routing and end-to-end release acceptance remain incomplete.
+8. Build-usage reporting exists, but build-dispatch quota enforcement is explicitly not enabled.
 
 The dashboard must continue to describe a project as configured—not deployed—until the complete flow has passed acceptance tests. Never report a deployment as successful merely because GitHub accepted a workflow-dispatch request or an artifact reached R2.
 
 ## Next engineering sequence
 
-### Gate 1 — Make the static deployment path complete
+### Gate 1 — Complete and verify static publishing
 - Install and pin a reviewed workflow template in a disposable test repository.
 - Keep the runner GitHub-hosted and ephemeral; never run customer build scripts on the Nexora VM, API Worker, privileged agent or production application node.
 - Verify GitHub OIDC trust, exact workflow SHA, repository/branch/commit binding, one-time upload capability and R2 checksum.
-- Implement the publisher: validate the complete archive, extract into a private staging directory, enforce account boundaries, create immutable release directories, atomically activate, and retain the previous release.
-- Add health checks, failure-safe rollback, bounded redacted logs and end-to-end tests before exposing a Deploy action.
+- Install the static publisher only on a dedicated non-production node after operator provisioning of its keys, replay store, account directories and web-server group.
+- Configure Nginx document roots and verify the actual HTTP origin, not just the release symlink.
+- Add external health checks, failure-safe rollback, bounded redacted logs and end-to-end tenant-isolation tests before exposing a Deploy action.
 
 ### Gate 2 — Support server-rendered applications
 - Implement a dedicated isolated build plane and a separate application-node pool.
