@@ -128,7 +128,8 @@ class ArtifactD1 {
             ? ["artifact_uploaded", "validating", "publishing"].includes(db.release.state)
             : ["ready_to_publish", "publishing"].includes(db.release.state);
           return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId &&
-            assignedNodeId === db.node.id && stateAllowed ? ({ ...db.release } as T) : null;
+            assignedNodeId === db.node.id && assignedNodeId === db.release.assignedNodeId &&
+            stateAllowed ? ({ ...db.release } as T) : null;
         }
         if (query.includes("SELECT state FROM application_releases")) {
           return ({ state: db.release.state } as T);
