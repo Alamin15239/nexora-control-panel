@@ -42,7 +42,7 @@ assert "buildContext must be a safe relative path." in put
 assert "outputDirectory must be null or a safe relative path." in put
 assert 'raw.includes("\\\\")' in put
 assert 'raw.split("/").some((part) => part === ".."' in put
-assert "buildCommand, 1000" in put and "startCommand, 1000" in put
+assert 'body.buildCommand, "buildCommand", 1000' in put and 'body.startCommand, "startCommand", 1000' in put
 assert "healthCheckPath, 200" in put
 assert "Resource values are outside the permitted platform bounds." in put
 for lower, upper in [("100", "8000"), ("128", "16384"), ("128", "65536"), ("16", "512")]:
