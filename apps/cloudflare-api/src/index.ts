@@ -3803,7 +3803,7 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   if (cpuMillis > project.appCpuMillis || memoryMiB > project.appMemoryMiB ||
       diskMiB > planDiskLimitMiB || processLimit > project.appProcessLimit) {
     return c.json({
-      message: "Requested runtime resources exceed the quotas of the hosting plan assigned to this project.",
+      message: "Requested runtime resources exceed the hosting plan quotas assigned to this project.",
       planResourceLimits: {
         cpuMillis: project.appCpuMillis,
         memoryMiB: project.appMemoryMiB,
