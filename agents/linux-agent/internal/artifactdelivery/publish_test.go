@@ -160,7 +160,7 @@ func TestFetchAndPublishRejectsMismatchedRequestedDeployment(t *testing.T) {
 }
 
 func TestFetchAndPublishRejectsInvalidEnvelopeBeforePublishing(t *testing.T) {
-	nodePublic, nodePrivate, err := ed25519.GenerateKey(rand.Reader)
+	_, nodePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatal(err) }
 	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil { t.Fatal(err) }
@@ -173,7 +173,9 @@ func TestFetchAndPublishRejectsInvalidEnvelopeBeforePublishing(t *testing.T) {
 	}
 	artifact := releaseArchive(t)
 	token := envelopeFor(t, signingKey, expected, artifact, now)
-	token = token[:len(token)-1] + "A"
+	replacement := "A"
+	if token[len(token)-1:] == replacement { replacement = "B" }
+	token = token[:len(token)-1] + replacement
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type","application/gzip")
 		w.Header().Set("Cache-Control","no-store")
