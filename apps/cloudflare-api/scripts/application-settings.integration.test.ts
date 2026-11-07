@@ -492,6 +492,7 @@ test("node enrollment consumes a one-time token and stores the Ed25519 public ke
   assert.equal(response.status, 200);
   assert.equal(db.node.status, "online");
   assert.equal(db.node.signingPublicKey, pair.publicKeyHex);
+  assert.deepEqual(db.keyHistory, [pair.publicKeyHex], "enrollment must record the initial key in the same transaction");
   const replay = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/enroll", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ nodeIdentity: "builder-a", enrollmentToken, publicKey: pair.publicKeyHex, agentVersion: "0.1.0" }),
