@@ -4672,42 +4672,47 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     return c.json({ message: "Application release is not awaiting archive validation." }, 409);
   }
 
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
-      "WHERE id = ? AND state = 'artifact_uploaded'",
-    ).bind(release.releaseId),
+      "WHERE id = ? AND state = 'artifact_uploaded'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "INSERT INTO application_release_events " +
       "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
       "SELECT ?, organization_id, id, 'artifact_uploaded', 'validating', 'node', ?, 'archive_validation_started', ? " +
-      "FROM application_releases WHERE id = ? AND state = 'validating'",
-    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+      "FROM application_releases WHERE id = ? AND state = 'validating'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'ready_to_publish', updated_at = datetime('now') " +
-      "WHERE id = ? AND state = 'validating'",
-    ).bind(release.releaseId),
+      "WHERE id = ? AND state = 'validating'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "INSERT INTO application_release_events " +
       "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
       "SELECT ?, organization_id, id, 'validating', 'ready_to_publish', 'node', ?, 'archive_validation_succeeded', ? " +
-      "FROM application_releases WHERE id = ? AND state = 'ready_to_publish'",
-    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+      "FROM application_releases WHERE id = ? AND state = 'ready_to_publish'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
-      "WHERE id = ? AND state = 'ready_to_publish'",
-    ).bind(release.releaseId),
+      "WHERE id = ? AND state = 'ready_to_publish'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "INSERT INTO application_release_events " +
       "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
       "SELECT ?, organization_id, id, 'ready_to_publish', 'publishing', 'node', ?, 'archive_validated_for_publish', ? " +
-      "FROM application_releases WHERE id = ? AND state = 'publishing'",
-    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+      "FROM application_releases WHERE id = ? AND state = 'publishing'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
-      "WHERE id = ? AND status = 'online' AND revoked_at IS NULL",
-    ).bind(node.id),
-  ]);
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ]);;
   if ([0, 2, 4, 6].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1) ||
       [1, 3, 5].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1)) {
     return c.json({ message: "Archive validation state transition could not be committed atomically." }, 409);
