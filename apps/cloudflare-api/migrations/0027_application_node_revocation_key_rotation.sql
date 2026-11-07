@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS application_node_signing_key_history (
 CREATE INDEX IF NOT EXISTS idx_application_node_key_history
   ON application_node_signing_key_history(node_id, activated_at);
 
+-- Preserve the currently active public key for nodes enrolled before key-history tracking existed.
+INSERT OR IGNORE INTO application_node_signing_key_history (id, node_id, public_key, activated_at)
+SELECT 'initial-' || id, id, signing_public_key, COALESCE(enrollment_consumed_at, created_at)
+FROM application_nodes
+WHERE signing_public_key IS NOT NULL;
+
 -- Revocation is terminal: no status/key/challenge mutation can reactivate a revoked node.
 CREATE TRIGGER IF NOT EXISTS application_node_revocation_terminal
 BEFORE UPDATE ON application_nodes
