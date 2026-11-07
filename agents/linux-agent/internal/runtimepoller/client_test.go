@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,7 +48,8 @@ func TestPollSignsExactGETAndDecodesReadOnlySnapshot(t *testing.T) {
 	expected := testSnapshot()
 	client, server := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != desiredStatePath { t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path) }
-		if r.Body != nil { t.Error("poll request unexpectedly has a body") }
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil || len(body) != 0 { t.Errorf("poll request unexpectedly has a body: %q (%v)", body, readErr) }
 		proof := appnodeauth.Proof{
 			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
 			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
