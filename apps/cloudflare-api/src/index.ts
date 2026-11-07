@@ -250,6 +250,29 @@ async function verifyNodeSignature(publicKeyHex: string, timestamp: string, nonc
   }
 }
 
+async function verifyApplicationNodeRequestSignature(
+  publicKeyHex: string, nodeIdentity: string, timestamp: string, nonce: string,
+  method: string, path: string, rawBody: string, signatureHex: string,
+): Promise<boolean> {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      method !== method.toUpperCase() || !path.startsWith("/") || /[?#\r\n]/.test(path)) return false;
+  const issuedAt = Number(timestamp);
+  if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
+  const publicKey = decodeHex(publicKeyHex, 32);
+  const signature = decodeHex(signatureHex, 64);
+  if (!publicKey || !signature) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
+    const message = [
+      "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, method, path, await sha256(rawBody),
+    ].join("\n");
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, signature, new TextEncoder().encode(message));
+  } catch {
+    return false;
+  }
+}
+
 async function nodeOperatorAuthorized(request: Request, env: Bindings): Promise<boolean> {
   const configured = env.APPLICATION_NODE_OPERATOR_TOKEN ?? "";
   const supplied = request.headers.get("authorization") ?? "";
@@ -4135,6 +4158,131 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
   ).bind(body.agentVersion, node.id).run();
   if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node is no longer authorized." }, 409);
   return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
+});
+
+app.post("/internal/v1/application-nodes/artifact", async (c) => {
+  if (!c.env.ARTIFACTS) return c.json({ message: "Private application artifact storage is unavailable." }, 503);
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 1024) {
+    return c.json({ message: "Artifact request body is empty or too large." }, 413);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized for artifact delivery." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid artifact request JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "deploymentId") ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId)) {
+    return c.json({ message: "Invalid artifact request payload." }, 400);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.organization_id AS organizationId, r.project_id AS projectId, " +
+    "r.deployment_id AS deploymentId, r.node_pool_id AS nodePoolId, r.state, " +
+    "r.artifact_digest AS releaseArtifactDigest, r.artifact_bytes AS releaseArtifactBytes, " +
+    "d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes, " +
+    "d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId, " +
+    "p.github_repository_id AS repositoryId FROM application_releases r " +
+    "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.state IN ('ready_to_publish','publishing') LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId).first<{
+    releaseId: string; organizationId: string; projectId: string; deploymentId: string;
+    nodePoolId: string; state: string; releaseArtifactDigest: string | null;
+    releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
+    artifactBytes: number | null; artifactSha256: string | null;
+    hostingAccountId: string; repositoryId: string;
+  }>();
+  if (!release) return c.json({ message: "No publishable release is assigned to this runtime node pool." }, 404);
+  if (!release.artifactKey || !Number.isSafeInteger(release.artifactBytes) ||
+      !Number.isSafeInteger(release.releaseArtifactBytes) ||
+      release.artifactBytes !== release.releaseArtifactBytes ||
+      release.artifactSha256 !== release.releaseArtifactDigest ||
+      (release.artifactBytes ?? 0) < 1 || (release.artifactBytes ?? 0) > 100 * 1024 * 1024 ||
+      !/^[a-f0-9]{64}$/.test(release.artifactSha256 ?? "") ||
+      !/^[a-f0-9]{40}$/.test(release.commitSha) ||
+      !/^[1-9][0-9]{0,19}$/.test(release.repositoryId)) {
+    return c.json({ message: "Release artifact metadata is missing or inconsistent." }, 409);
+  }
+  const object = await c.env.ARTIFACTS.get(release.artifactKey);
+  if (!object || object.size !== release.artifactBytes ||
+      object.customMetadata?.organizationId !== release.organizationId ||
+      object.customMetadata?.projectId !== release.projectId ||
+      object.customMetadata?.deploymentId !== release.deploymentId ||
+      object.customMetadata?.commitSha !== release.commitSha ||
+      object.customMetadata?.artifactSha256 !== release.artifactSha256) {
+    return c.json({ message: "Stored artifact integrity metadata does not match its release." }, 409);
+  }
+  let envelope: string;
+  try {
+    envelope = await signDeploymentEnvelope(c.env, {
+      organizationId: release.organizationId, projectId: release.projectId,
+      deploymentId: release.deploymentId, hostingAccountId: release.hostingAccountId,
+      repositoryId: release.repositoryId, commitSha: release.commitSha,
+      artifactSha256: release.artifactSha256, artifactBytes: release.artifactBytes!,
+    });
+  } catch (error) {
+    console.error("Application deployment envelope signing unavailable:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Application deployment envelope signing is not configured." }, 503);
+  }
+  if (release.state === "ready_to_publish") {
+    const transition = await c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'ready_to_publish'",
+    ).bind(release.releaseId).run();
+    if (Number(transition.meta?.changes ?? 0) !== 1) {
+      const latest = await c.env.DB.prepare("SELECT state FROM application_releases WHERE id = ? LIMIT 1")
+        .bind(release.releaseId).first<{ state: string }>();
+      if (latest?.state !== "publishing") {
+        return c.json({ message: "Release is no longer eligible for artifact delivery." }, 409);
+      }
+    }
+  }
+  await c.env.DB.prepare(
+    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'online'",
+  ).bind(node.id).run();
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/gzip",
+      "Content-Length": String(release.artifactBytes),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Nexora-Deployment-Envelope": envelope,
+      "X-Nexora-Artifact-SHA256": release.artifactSha256,
+      "X-Nexora-Release-ID": release.releaseId,
+    },
+  });
 });
 
 app.post("/internal/v1/application-build-usage", async (c) => {
