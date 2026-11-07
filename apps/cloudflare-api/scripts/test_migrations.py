@@ -98,6 +98,7 @@ for node_id in ("builder-untrusted", "runtime-a"):
 db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,status)
 VALUES ('node-a','pool-a','node-a',?,'pending')""", ("b" * 64,))
+assert db.execute("SELECT node_role FROM application_nodes WHERE id='node-a'").fetchone()[0] == "runtime", "New nodes must default to runtime, not builder"
 must_reject(
     "invalid Ed25519 public key encoding",
     "UPDATE application_nodes SET signing_public_key='not-a-public-key' WHERE id='node-a'",
