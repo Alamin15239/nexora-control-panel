@@ -36,6 +36,11 @@ func (f *fakeStore) Upsert(item supervisorstate.WorkloadState) error {
 	f.items[item.WorkloadID] = item
 	return nil
 }
+func (f *fakeStore) Load() ([]supervisorstate.WorkloadState, error) {
+	out := make([]supervisorstate.WorkloadState, 0, len(f.items))
+	for _, item := range f.items { out = append(out, item) }
+	return out, nil
+}
 func (f *fakeStore) Delete(id string) error {
 	if f.deleteErr != nil { return f.deleteErr }
 	delete(f.items, id)
@@ -113,4 +118,44 @@ func TestConvergeReportsPersistenceFailure(t *testing.T) {
 	store := &fakeStore{upsertErr: errors.New("disk full")}
 	_, err := (Controller{Backend: backend, State: store}).Converge(context.Background(), desired(true, ""))
 	if err == nil { t.Fatal("persistence failure was ignored") }
+}
+
+func TestRecoverVerifiesAndRefreshesPersistedState(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	store := &fakeStore{items: map[string]supervisorstate.WorkloadState{
+		"workload-001": {WorkloadID: "workload-001", ReleaseID: "release-001", ContainerID: id, State: "exited"},
+	}}
+	backend := &fakeBackend{workload: ocisupervisor.Workload{
+		ContainerID: id, WorkloadID: "workload-001", ReleaseID: "release-001", State: ocisupervisor.StateRunning,
+	}}
+	report, err := (Controller{Backend: backend, State: store}).Recover(context.Background())
+	if err != nil { t.Fatal(err) }
+	if report.Checked != 1 || report.Reconciled != 1 || len(report.Workloads) != 1 {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+	if store.items["workload-001"].State != "running" { t.Fatal("recovered observed state was not persisted") }
+}
+
+func TestRecoverFailsClosedOnOwnershipMismatch(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	store := &fakeStore{items: map[string]supervisorstate.WorkloadState{
+		"workload-001": {WorkloadID: "workload-001", ReleaseID: "release-001", ContainerID: id, State: "running"},
+	}}
+	backend := &fakeBackend{workload: ocisupervisor.Workload{
+		ContainerID: id, WorkloadID: "other-workload", ReleaseID: "release-001", State: ocisupervisor.StateRunning,
+	}}
+	if _, err := (Controller{Backend: backend, State: store}).Recover(context.Background()); err == nil {
+		t.Fatal("recovery accepted a container with mismatched ownership")
+	}
+}
+
+func TestRecoverFailsClosedWhenContainerCannotBeInspected(t *testing.T) {
+	id := "0123456789abcdef0123456789abcdef"
+	store := &fakeStore{items: map[string]supervisorstate.WorkloadState{
+		"workload-001": {WorkloadID: "workload-001", ReleaseID: "release-001", ContainerID: id, State: "running"},
+	}}
+	backend := &fakeBackend{inspectErr: errors.New("container not found")}
+	if _, err := (Controller{Backend: backend, State: store}).Recover(context.Background()); err == nil {
+		t.Fatal("recovery accepted an uninspectable persisted container")
+	}
 }
