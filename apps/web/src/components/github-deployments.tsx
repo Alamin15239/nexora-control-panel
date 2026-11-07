@@ -120,7 +120,7 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
         <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
           <div className="h-full rounded-full bg-blue-600" style={{ width: `${usage.buildMinutesLimit > 0 ? Math.min(100, (usage.buildMinutesUsed / usage.buildMinutesLimit) * 100) : usage.quotaExhausted ? 100 : 0}%` }}/>
         </div>
-        <p className="mt-2 text-[11px] text-amber-700">{usage.meteringStatus === "not_connected" ? "Metering is not connected yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted." : "Usage is measured by the isolated builder."}</p>
+        <p className="mt-2 text-[11px] text-amber-700">{usage.meteringStatus !== "active" ? "Builder metering has not reported usage yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted. Dispatch enforcement is not enabled." : "Usage has been reported by the authenticated builder. Dispatch quota enforcement remains disabled."}</p>
       </div>}
       {loading ? <p className="text-xs text-slate-500">Loading runtime catalog…</p> : <form onSubmit={save} className="grid gap-3 md:grid-cols-2">
         <label className="space-y-1 text-xs font-medium text-slate-700 md:col-span-2">Runtime profile
