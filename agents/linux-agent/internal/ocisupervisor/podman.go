@@ -1,0 +1,154 @@
+// Package ocisupervisor provides a rootless Podman backend for immutable OCI
+// application releases. It is not wired into the agent service yet.
+package ocisupervisor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+var (
+	idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{2,63}$`)
+	imagePattern = regexp.MustCompile(`^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$`)
+)
+
+type Spec struct {
+	WorkloadID string
+	ReleaseID string
+	ImageDigest string
+	ReleaseDir string
+	HostPort int
+	ContainerPort int
+	CPUMillis int
+	MemoryMiB int
+	ProcessLimit int
+}
+
+type Runner interface {
+	Run(context.Context, ...string) ([]byte, error)
+}
+
+type OSRunner struct {
+	Binary string
+}
+
+func (r OSRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
+	binary := r.Binary
+	if binary == "" { binary = "podman" }
+	output, err := exec.CommandContext(ctx, binary, args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("podman %s: %w: %s", args[0], err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
+type Podman struct {
+	Runner Runner
+}
+
+func (p Podman) runner() Runner {
+	if p.Runner != nil { return p.Runner }
+	return OSRunner{}
+}
+
+func validateSpec(spec Spec) error {
+	if !idPattern.MatchString(spec.WorkloadID) || !idPattern.MatchString(spec.ReleaseID) {
+		return errors.New("workload and release IDs must be opaque platform identifiers")
+	}
+	if !imagePattern.MatchString(spec.ImageDigest) || strings.Contains(spec.ImageDigest, "..") {
+		return errors.New("OCI image must be pinned to a valid sha256 digest")
+	}
+	if !filepath.IsAbs(spec.ReleaseDir) || filepath.Clean(spec.ReleaseDir) != spec.ReleaseDir {
+		return errors.New("release directory must be an absolute clean path")
+	}
+	info, err := os.Lstat(spec.ReleaseDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return errors.New("release directory must be a real directory not writable by group or others")
+	}
+	if spec.HostPort < 1024 || spec.HostPort > 65535 || spec.ContainerPort < 1 || spec.ContainerPort > 65535 {
+		return errors.New("assigned host and container ports are outside permitted ranges")
+	}
+	if spec.CPUMillis < 100 || spec.CPUMillis > 8000 ||
+		spec.MemoryMiB < 128 || spec.MemoryMiB > 16384 ||
+		spec.ProcessLimit < 16 || spec.ProcessLimit > 512 {
+		return errors.New("runtime resource limits are outside platform bounds")
+	}
+	return nil
+}
+
+func (p Podman) EnsureRootless(ctx context.Context) error {
+	output, err := p.runner().Run(ctx, "info", "--format", "{{.Host.Security.Rootless}}")
+	if err != nil { return fmt.Errorf("inspect Podman security mode: %w", err) }
+	if strings.TrimSpace(string(output)) != "true" {
+		return errors.New("Nexora runtime requires rootless Podman; refusing privileged container execution")
+	}
+	return nil
+}
+
+// Start creates and starts a constrained container. It does not accept an
+// arbitrary command, environment, mount list, or network mode from a customer.
+// The image must be built by the isolated builder and pinned by immutable digest.
+func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
+	if err := validateSpec(spec); err != nil { return "", err }
+	if err := p.EnsureRootless(ctx); err != nil { return "", err }
+
+	name := "nxr-" + spec.WorkloadID
+	cpu := fmt.Sprintf("%.3f", float64(spec.CPUMillis)/1000)
+	memory := strconv.Itoa(spec.MemoryMiB) + "m"
+	args := []string{
+		"create",
+		"--name", name,
+		"--label", "io.nexora.managed=true",
+		"--label", "io.nexora.workload=" + spec.WorkloadID,
+		"--label", "io.nexora.release=" + spec.ReleaseID,
+		"--network", "slirp4netns",
+		"--publish", fmt.Sprintf("127.0.0.1:%d:%d", spec.HostPort, spec.ContainerPort),
+		"--read-only",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges",
+		"--user", "10001:10001",
+		"--pids-limit", strconv.Itoa(spec.ProcessLimit),
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--cpus", cpu,
+		"--init",
+		"--ipc", "private",
+		"--pid", "private",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
+		"--mount", "type=bind,src=" + spec.ReleaseDir + ",dst=/app,ro=true",
+		"--workdir", "/app",
+		spec.ImageDigest,
+	}
+	created, err := p.runner().Run(ctx, args...)
+	if err != nil { return "", fmt.Errorf("create constrained workload: %w", err) }
+	containerID := strings.TrimSpace(string(created))
+	if containerID == "" { return "", errors.New("Podman returned an empty container identifier") }
+	if _, err := p.runner().Run(ctx, "start", containerID); err != nil {
+		_, _ = p.runner().Run(context.Background(), "rm", "--force", containerID)
+		return "", fmt.Errorf("start constrained workload: %w", err)
+	}
+	return containerID, nil
+}
+
+func (p Podman) Stop(ctx context.Context, containerID string) error {
+	if !regexp.MustCompile(`^[a-f0-9]{12,64}$`).MatchString(containerID) {
+		return errors.New("invalid container identifier")
+	}
+	_, err := p.runner().Run(ctx, "stop", "--time", "10", containerID)
+	return err
+}
+
+func (p Podman) Remove(ctx context.Context, containerID string) error {
+	if !regexp.MustCompile(`^[a-f0-9]{12,64}$`).MatchString(containerID) {
+		return errors.New("invalid container identifier")
+	}
+	_, err := p.runner().Run(ctx, "rm", containerID)
+	return err
+}
