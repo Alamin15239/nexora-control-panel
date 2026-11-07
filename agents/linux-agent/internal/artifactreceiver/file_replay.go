@@ -61,6 +61,12 @@ func (g FileReplayGuard) Consume(ctx context.Context, jti string, expiresAt time
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close deployment replay record: %w", err)
 	}
+	directory, err := os.Open(g.Directory)
+	if err != nil { return fmt.Errorf("open replay guard directory: %w", err) }
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil { return fmt.Errorf("sync replay guard directory: %w", syncErr) }
+	if closeErr != nil { return fmt.Errorf("close replay guard directory: %w", closeErr) }
 	keep = true
 	return nil
 }
