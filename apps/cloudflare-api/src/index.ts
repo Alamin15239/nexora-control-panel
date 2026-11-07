@@ -27,6 +27,7 @@ type Bindings = {
   GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE?: string;
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
+  APPLICATION_NODE_OPERATOR_TOKEN?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -247,6 +248,13 @@ async function verifyNodeSignature(publicKeyHex: string, timestamp: string, nonc
   } catch {
     return false;
   }
+}
+
+async function nodeOperatorAuthorized(request: Request, env: Bindings): Promise<boolean> {
+  const configured = env.APPLICATION_NODE_OPERATOR_TOKEN ?? "";
+  const supplied = request.headers.get("authorization") ?? "";
+  if (configured.length < 32 || !/^Bearer [A-Za-z0-9_-]{32,}$/.test(supplied)) return false;
+  return constantTimeEqual(supplied.slice(7), configured);
 }
 
 async function bearerIdentity(request: Request, db: D1Database) {
@@ -3931,6 +3939,105 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
     executionEnabled: false,
     message: "Usage reports are accepted only from the authenticated isolated builder; build dispatch quota enforcement remains disabled.",
   });
+});
+
+app.post("/internal/v1/operator/application-nodes/:nodeId/revoke", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) return c.json({ message: "Node operator authorization required." }, 401);
+  const nodeId = c.req.param("nodeId");
+  let input: unknown = {};
+  const rawBody = await c.req.text();
+  if (rawBody.length > 1024) return c.json({ message: "Request body is too large." }, 413);
+  if (rawBody) {
+    try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "reason") ||
+      (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 500 ||
+        /[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]/.test(body.reason)))) {
+    return c.json({ message: "Invalid revocation payload." }, 400);
+  }
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET status = 'revoked', revoked_at = datetime('now'), revoked_reason = ?, " +
+    "key_rotation_challenge_hash = NULL, key_rotation_challenge_expires_at = NULL, " +
+    "enrollment_key_hash = ?, updated_at = datetime('now') " +
+    "WHERE id = ? AND status <> 'revoked'",
+  ).bind(body.reason ?? "Revoked by platform operator", randomHex(32), nodeId).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node not found or already revoked." }, 404);
+  return c.json({ revoked: true, nodeId, terminal: true });
+});
+
+app.post("/internal/v1/operator/application-nodes/:nodeId/key-rotation-challenge", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) return c.json({ message: "Node operator authorization required." }, 401);
+  const nodeId = c.req.param("nodeId");
+  const challenge = randomHex(32);
+  const challengeHash = await sha256(challenge);
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET key_rotation_challenge_hash = ?, " +
+    "key_rotation_challenge_expires_at = datetime('now', '+10 minutes'), updated_at = datetime('now') " +
+    "WHERE id = ? AND status IN ('online','draining') AND signing_public_key IS NOT NULL AND revoked_at IS NULL",
+  ).bind(challengeHash, nodeId).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Active enrolled node not found." }, 404);
+  return c.json({ nodeId, challenge, expiresInSeconds: 600, proofRequired: "current Ed25519 signing key" });
+});
+
+app.post("/internal/v1/application-nodes/rotate-key", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) return c.json({ message: "Node identity is required." }, 401);
+  const rawBody = await c.req.text();
+  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT id, signing_public_key AS signingPublicKey, key_rotation_challenge_hash AS challengeHash, " +
+    "key_rotation_challenge_expires_at AS challengeExpiresAt FROM application_nodes " +
+    "WHERE node_identity = ? AND status IN ('online','draining') AND revoked_at IS NULL " +
+    "AND signing_public_key IS NOT NULL AND key_rotation_challenge_hash IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string; challengeHash: string; challengeExpiresAt: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["newPublicKey", "challenge"].includes(key)) ||
+      typeof body.newPublicKey !== "string" || !/^[a-f0-9]{64}$/i.test(body.newPublicKey) ||
+      typeof body.challenge !== "string" || !/^[a-f0-9]{64}$/i.test(body.challenge)) {
+    return c.json({ message: "Invalid key rotation payload." }, 400);
+  }
+  if (await sha256(body.challenge) !== node.challengeHash || Date.parse(node.challengeExpiresAt + "Z") <= Date.now()) {
+    return c.json({ message: "Key rotation challenge is invalid or expired." }, 409);
+  }
+  if (body.newPublicKey.toLowerCase() === node.signingPublicKey) return c.json({ message: "New key must differ from the current key." }, 400);
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET signing_public_key = ?, key_rotation_challenge_hash = NULL, " +
+      "key_rotation_challenge_expires_at = NULL, signing_key_rotated_at = datetime('now'), " +
+      "last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND signing_public_key = ? AND key_rotation_challenge_hash = ? " +
+      "AND key_rotation_challenge_expires_at > datetime('now') AND status IN ('online','draining') AND revoked_at IS NULL",
+    ).bind(body.newPublicKey.toLowerCase(), node.id, nodeIdentity, node.signingPublicKey, node.challengeHash),
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO application_node_signing_key_history (id,node_id,public_key,retired_at) VALUES (?,?,?,datetime('now'))",
+    ).bind(crypto.randomUUID(), node.id, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_node_signing_key_history (id,node_id,public_key) VALUES (?,?,?)",
+    ).bind(crypto.randomUUID(), node.id, body.newPublicKey.toLowerCase()),
+  ]);
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Key rotation challenge was consumed or node is no longer authorized." }, 409);
+  return c.json({ rotated: true, nodeIdentity, credentialModel: "ed25519_per_node" });
 });
 
 app.post("/internal/v1/application-nodes/enroll", async (c) => {
