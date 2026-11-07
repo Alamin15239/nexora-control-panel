@@ -26,7 +26,9 @@ test("signs and verifies an organization-scoped session", () => {
 test("rejects expired, tampered and malformed tokens", () => {
   const token = signSessionToken(identity, secret, 1_800_000_000, 60);
   assert.equal(verifySessionToken(token, secret, 1_800_000_060), null);
-  assert.equal(verifySessionToken(`${token.slice(0, -1)}x`, secret, 1_800_000_001), null);
+  const [header, payload, signed] = token.split(".");
+  const changedPayload = (payload[0] === "A" ? "B" : "A") + payload.slice(1);
+  assert.equal(verifySessionToken(`${header}.${changedPayload}.${signed}`, secret, 1_800_000_001), null);
   assert.equal(verifySessionToken("not-a-token", secret), null);
 });
 
