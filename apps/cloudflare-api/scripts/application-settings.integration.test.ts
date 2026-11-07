@@ -278,7 +278,7 @@ test("project usage GET is tenant-scoped and reports current monthly allowance",
   assert.equal(result.quotaExhausted, false);
   assert.equal(result.executionEnabled, false);
   assert.equal(result.meteringStatus, "not_connected");
-  assert.match(result.periodStart, /^\\d{4}-\\d{2}-01$/);
+  assert.match(result.periodStart, /^\d{4}-\d{2}-01$/);
 });
 
 test("project usage GET does not expose another organization's project", async () => {
