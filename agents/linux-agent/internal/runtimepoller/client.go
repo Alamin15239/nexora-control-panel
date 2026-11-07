@@ -112,13 +112,24 @@ func (c *Client) Poll(ctx context.Context) (Snapshot, error) {
 		if workload.WorkloadID == "" || workload.ReleaseID == "" ||
 			workload.ReleaseState != "succeeded" ||
 			(workload.DesiredState != "running" && workload.DesiredState != "stopped") ||
-			workload.DesiredReplicas < 0 || workload.DesiredReplicas > 100 ||
-			workload.ObservedReplicas < 0 || workload.ObservedReplicas > 100 ||
+			workload.DesiredReplicas < 0 || workload.DesiredReplicas > 1 ||
+			workload.ObservedReplicas < 0 || workload.ObservedReplicas > 1 ||
 			workload.CPUMillis < 100 || workload.CPUMillis > 8000 ||
 			workload.MemoryMiB < 128 || workload.MemoryMiB > 16384 ||
 			workload.DiskMiB < 128 || workload.DiskMiB > 65536 ||
 			workload.ProcessLimit < 16 || workload.ProcessLimit > 512 {
 			return empty, errors.New("desired-state workload metadata is outside permitted bounds")
+		}
+		// Only the first Node.js web profile is admitted. Execution is still
+		// disabled by the control plane and enforced as read-only by this client.
+		if workload.RuntimeProfileKey != "nodejs-v1" ||
+			workload.RuntimeFamily != "nodejs" ||
+			workload.ExecutionKind != "oci" ||
+			workload.WorkloadKind != "web" ||
+			workload.ListenPort == nil || *workload.ListenPort != 3000 ||
+			workload.ImageDigest == nil || !validImmutableOCIImage(*workload.ImageDigest) ||
+			workload.ReleaseSpecVersion < 1 || workload.SettingsSpecVersion < 1 {
+			return empty, errors.New("workload does not satisfy the nodejs-v1 immutable web-image contract")
 		}
 		if _, exists := seen[workload.WorkloadID]; exists {
 			return empty, errors.New("desired-state response contains duplicate workload identifiers")
@@ -126,6 +137,35 @@ func (c *Client) Poll(ctx context.Context) (Snapshot, error) {
 		seen[workload.WorkloadID] = struct{}{}
 	}
 	return snapshot, nil
+}
+
+// validImmutableOCIImage accepts a registry-qualified, digest-pinned image
+// reference. Mutable tags and malformed digest suffixes are never admitted.
+func validImmutableOCIImage(ref string) bool {
+	parts := strings.Split(ref, "@sha256:")
+	if len(parts) != 2 || len(parts[1]) != 64 || strings.ToLower(parts[1]) != parts[1] {
+		return false
+	}
+	for _, ch := range parts[1] {
+		if !(ch >= '0' && ch <= '9') && !(ch >= 'a' && ch <= 'f') {
+			return false
+		}
+	}
+	name := parts[0]
+	slash := strings.IndexByte(name, '/')
+	if slash <= 0 || slash == len(name)-1 || strings.ContainsAny(name, " \t\r\n@") {
+		return false
+	}
+	registry := name[:slash]
+	if strings.ContainsAny(registry, "?#") || strings.HasPrefix(registry, ".") || strings.HasSuffix(registry, ".") {
+		return false
+	}
+	for _, segment := range strings.Split(name[slash+1:], "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func isLoopback(host string) bool {
