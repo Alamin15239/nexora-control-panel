@@ -78,6 +78,10 @@ db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,node_role,status,signing_public_key,enrollment_consumed_at)
 VALUES ('runtime-a','pool-runtime','runtime-a','hash-runtime','runtime','online',?,datetime('now'))""", ("c" * 64,))
 
+db.execute("""INSERT INTO application_usage_periods
+(id,organization_id,project_id,period_start,build_minutes_limit)
+VALUES ('usage-period-a','org-a','project-a','2026-11-01',300)""")
+
 # Node identity and pool isolation are explicit security gates.
 assert db.execute("SELECT node_role FROM application_nodes WHERE id='builder-a'").fetchone()[0] == "builder"
 for node_id in ("builder-untrusted", "runtime-a"):
