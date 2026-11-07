@@ -24,19 +24,6 @@ actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE typ
 missing = required - actual
 assert not missing, f"Missing application tables: {sorted(missing)}"
 
-# Node identity and pool isolation are explicit security gates.
-assert db.execute("SELECT node_role FROM application_nodes WHERE id='builder-a'").fetchone()[0] == "builder"
-for node_id in ("builder-untrusted", "runtime-a"):
-    rejected = False
-    try:
-        db.execute("""INSERT INTO application_usage_events
-        (id,organization_id,project_id,deployment_id,period_start,build_seconds,source,build_result,node_id)
-        VALUES (?,?,?,?,?,?,'isolated_builder','succeeded',?)""",
-        ("evt-" + node_id, "org-a", "project-a", "deployment-a", "2026-11-01", 30, node_id))
-    except sqlite3.IntegrityError:
-        rejected = True
-    assert rejected, f"Untrusted or runtime node was allowed to report builder usage: {node_id}"
-
 # Minimal, valid project/deployment fixture in two separate tenants.
 db.execute("INSERT INTO organizations(id,name,slug) VALUES ('org-a','Org A','org-a'),('org-b','Org B','org-b')")
 db.execute("INSERT INTO users(id,email,status) VALUES ('user-a','a@example.test','ACTIVE')")
@@ -90,6 +77,19 @@ VALUES ('pool-runtime','Runtime pool','production','test-region','microvm','read
 db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,node_role,status,signing_public_key,enrollment_consumed_at)
 VALUES ('runtime-a','pool-runtime','runtime-a','hash-runtime','runtime','online',?,datetime('now'))""", ("c" * 64,))
+
+# Node identity and pool isolation are explicit security gates.
+assert db.execute("SELECT node_role FROM application_nodes WHERE id='builder-a'").fetchone()[0] == "builder"
+for node_id in ("builder-untrusted", "runtime-a"):
+    rejected = False
+    try:
+        db.execute("""INSERT INTO application_usage_events
+        (id,organization_id,project_id,deployment_id,period_start,build_seconds,source,build_result,node_id)
+        VALUES (?,?,?,?,?,?,'isolated_builder','succeeded',?)""",
+        ("evt-" + node_id, "org-a", "project-a", "deployment-a", "2026-11-01", 30, node_id))
+    except sqlite3.IntegrityError:
+        rejected = True
+    assert rejected, f"Untrusted or runtime node was allowed to report builder usage: {node_id}"
 db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,status)
 VALUES ('node-a','pool-a','builder-a',?,'pending')""", ("b" * 64,))
