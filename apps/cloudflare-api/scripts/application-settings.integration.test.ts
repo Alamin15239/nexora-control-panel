@@ -68,7 +68,7 @@ class TestD1 {
           const [deploymentId, nodeId] = values;
           const event = db.usageEvents.get(String(deploymentId));
           return event && event.nodeId === nodeId
-            ? ({ id: event.id, periodStart: event.periodStart, organizationId: event.organizationId, projectId: event.projectId } as T) : null;
+            ? ({ id: event.id, periodStart: event.periodStart, organizationId: event.organizationId, projectId: event.projectId, buildSeconds: event.buildSeconds, buildResult: event.buildResult } as T) : null;
         }
         if (query.includes("FROM application_usage_events")) {
           const [organizationId, projectId, deploymentId, nodeId] = values;
