@@ -51,6 +51,7 @@ func (r OSRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 
 type Podman struct {
 	Runner Runner
+	AllowedRegistries []string
 }
 
 func (p Podman) runner() Runner {
@@ -97,6 +98,14 @@ func (p Podman) EnsureRootless(ctx context.Context) error {
 // The image must be built by the isolated builder and pinned by immutable digest.
 func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
 	if err := validateSpec(spec); err != nil { return "", err }
+	registry := strings.SplitN(spec.ImageDigest, "/", 2)[0]
+	allowed := false
+	for _, candidate := range p.AllowedRegistries {
+		if candidate == registry { allowed = true; break }
+	}
+	if !allowed {
+		return "", errors.New("OCI image registry is not in the operator allowlist")
+	}
 	if err := p.EnsureRootless(ctx); err != nil { return "", err }
 
 	name := "nxr-" + spec.WorkloadID
