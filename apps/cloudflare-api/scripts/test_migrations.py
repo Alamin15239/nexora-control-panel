@@ -110,6 +110,11 @@ VALUES ('node-a',?,'2026-11-07 00:10:00')""", ("d" * 32,))
 db.execute("""INSERT INTO application_node_signing_key_history (id,node_id,public_key)
 VALUES ('key-history-runtime','runtime-a',?)""", ("c" * 64,))
 must_reject(
+    "signing key history deletion",
+    "DELETE FROM application_node_signing_key_history WHERE id='key-history-runtime'",
+    (),
+)
+must_reject(
     "signing key history mutation",
     "UPDATE application_node_signing_key_history SET public_key=? WHERE id='key-history-runtime'",
     ("d" * 64,),
