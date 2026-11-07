@@ -3992,8 +3992,7 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
   if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
   const body = input as Record<string, unknown>;
   if (Object.keys(body).some((key) => key !== "agentVersion") ||
-      typeof body.agentVersion !== "string" || body.agentVersion.length < 1 || body.agentVersion.length > 64 ||
-      /[\\u0000-\\u001f\\u007f]/.test(body.agentVersion)) {
+      typeof body.agentVersion !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
     return c.json({ message: "Invalid heartbeat payload." }, 400);
   }
   const nonceResult = await c.env.DB.prepare(
