@@ -3589,14 +3589,25 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
       throw new Error("R2 stored object checksum does not match the declared artifact digest");
     }
   
-    const updated = await c.env.DB.prepare(
-      "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
-    ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId).run();
-    if ((updated.meta.changes ?? 0) !== 1) {
+    const updates = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
+      ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "UPDATE application_releases SET artifact_digest = ?, artifact_bytes = ?, state = 'artifact_uploaded', updated_at = datetime('now') " +
+        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(artifactSHA256, receivedBytes, token.deploymentId, token.organizationId),
+    ]);
+    if (Number(updates[0]?.meta?.changes ?? 0) !== 1) {
       await c.env.ARTIFACTS.delete(objectKey);
       return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
     }
-    return c.json({ received: true, deploymentId: token.deploymentId, bytes: receivedBytes }, 202);
+    return c.json({
+      received: true,
+      deploymentId: token.deploymentId,
+      bytes: receivedBytes,
+      applicationReleaseUpdated: Number(updates[1]?.meta?.changes ?? 0) === 1,
+    }, 202);
   } catch (error) {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
     await c.env.DB.prepare(
