@@ -143,7 +143,7 @@ func ExtractGzipTar(input io.ReadSeeker, destination string, limits Limits) (Res
 	if result != validated {
 		return Result{}, errors.New("archive contents changed between validation and extraction")
 	}
-	if !bytesEqual(validatedHash, extractionDigest.Sum(nil)) {
+	if !bytes.Equal(validatedHash, extractionDigest.Sum(nil)) {
 		return Result{}, errors.New("archive bytes changed between validation and extraction")
 	}
 	return result, nil
