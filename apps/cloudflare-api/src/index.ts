@@ -1403,7 +1403,7 @@ app.post("/v1/agent/heartbeat", async (c) => {
 type HostingPlanRow = {
   id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null;
   website_limit: number; database_limit: number; mailbox_limit: number;
-  app_cpu_millis: number; app_memory_mib: number; app_disk_mib: number; app_process_limit: number;
+  app_cpu_millis: number; app_memory_mib: number; app_disk_mib: number; app_process_limit: number; app_build_minutes_month: number;
   active: number; created_at: string;
 };
 
@@ -1413,7 +1413,7 @@ app.get("/v1/hosting-plans", async (c) => {
   const result = await c.env.DB.prepare(
     `SELECT id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit,
             database_limit, mailbox_limit, app_cpu_millis, app_memory_mib,
-            app_disk_mib, app_process_limit, active, created_at
+            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at
      FROM hosting_plans WHERE organization_id = ? ORDER BY created_at DESC`,
   ).bind(identity.organizationId).all<HostingPlanRow>();
   return c.json({ plans: result.results ?? [] });
@@ -1437,6 +1437,7 @@ app.post("/v1/hosting-plans", async (c) => {
   const appMemoryMiB = input.appMemoryMiB === undefined ? 512 : Number(input.appMemoryMiB);
   const appDiskMiB = input.appDiskMiB === undefined ? 2048 : Number(input.appDiskMiB);
   const appProcessLimit = input.appProcessLimit === undefined ? 128 : Number(input.appProcessLimit);
+  const appBuildMinutesMonth = input.appBuildMinutesMonth === undefined ? 300 : Number(input.appBuildMinutesMonth);
   if (!name || name.length > 80) return c.json({ message: "Plan name is required (maximum 80 characters)" }, 400);
   if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
   if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
@@ -1446,7 +1447,8 @@ app.post("/v1/hosting-plans", async (c) => {
   if (!Number.isInteger(appCpuMillis) || appCpuMillis < 100 || appCpuMillis > 8000 ||
       !Number.isInteger(appMemoryMiB) || appMemoryMiB < 128 || appMemoryMiB > 16384 ||
       !Number.isInteger(appDiskMiB) || appDiskMiB < 128 || appDiskMiB > 65536 ||
-      !Number.isInteger(appProcessLimit) || appProcessLimit < 16 || appProcessLimit > 512) {
+      !Number.isInteger(appProcessLimit) || appProcessLimit < 16 || appProcessLimit > 512 ||
+      !Number.isInteger(appBuildMinutesMonth) || appBuildMinutesMonth < 0 || appBuildMinutesMonth > 100000) {
     return c.json({ message: "Application runtime quotas are outside the supported platform bounds." }, 400);
   }
   const id = crypto.randomUUID();
@@ -1455,10 +1457,10 @@ app.post("/v1/hosting-plans", async (c) => {
       c.env.DB.prepare(
         `INSERT INTO hosting_plans
          (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit,
-          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
-        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit),
+        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth),
       c.env.DB.prepare(
         "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_plan.create', 'hosting_plan', ?)",
       ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
@@ -1467,7 +1469,7 @@ app.post("/v1/hosting-plans", async (c) => {
       bandwidth_limit_bytes: bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
       website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit,
       app_cpu_millis: appCpuMillis, app_memory_mib: appMemoryMiB, app_disk_mib: appDiskMiB,
-      app_process_limit: appProcessLimit, active: 1 } }, 201);
+      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1 } }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/UNIQUE constraint failed: hosting_plans.organization_id, hosting_plans.name/i.test(message)) {
@@ -3871,6 +3873,39 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   });
 });
 
+app.get("/v1/applications/projects/:projectId/usage", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const now = new Date();
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const row = await c.env.DB.prepare(
+    `SELECT p.id, hp.app_build_minutes_month AS buildMinutesLimit,
+            COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed
+     FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
+     LEFT JOIN application_usage_periods u
+       ON u.organization_id = p.organization_id AND u.project_id = p.id AND u.period_start = ?
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(periodStart, projectId, identity.organizationId).first<{
+    id: string; buildMinutesLimit: number; buildSecondsUsed: number;
+  }>();
+  if (!row) return c.json({ message: "GitHub project not found." }, 404);
+  const quotaSeconds = row.buildMinutesLimit * 60;
+  return c.json({
+    periodStart,
+    buildMinutesLimit: row.buildMinutesLimit,
+    buildSecondsUsed: row.buildSecondsUsed,
+    buildMinutesUsed: Math.round((row.buildSecondsUsed / 60) * 100) / 100,
+    buildSecondsRemaining: Math.max(0, quotaSeconds - row.buildSecondsUsed),
+    quotaExhausted: row.buildSecondsUsed >= quotaSeconds,
+    meteringStatus: "not_connected",
+    executionEnabled: false,
+    message: "Usage reporting is available; trusted builder metering and dispatch quota enforcement are not enabled yet.",
+  });
+});
+
 app.get("/v1/applications/projects/:projectId/settings", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
@@ -3888,7 +3923,8 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
             s.process_limit AS processLimit, s.updated_at AS updatedAt,
             hp.app_cpu_millis AS planCpuMillis, hp.app_memory_mib AS planMemoryMiB,
             MIN(hp.app_disk_mib, CAST(hp.disk_limit_bytes / 1048576 AS INTEGER)) AS planDiskMiB,
-            hp.app_process_limit AS planProcessLimit
+            hp.app_process_limit AS planProcessLimit,
+            hp.app_build_minutes_month AS planBuildMinutesMonth
      FROM github_projects p
      JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
@@ -3906,6 +3942,7 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
       memoryMiB: project.planMemoryMiB,
       diskMiB: project.planDiskMiB,
       processLimit: project.planProcessLimit,
+      buildMinutesPerMonth: project.planBuildMinutesMonth,
     },
     settings: project.settingsId ? {
       id: project.settingsId,
