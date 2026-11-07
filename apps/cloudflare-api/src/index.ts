@@ -1664,18 +1664,18 @@ app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
   const membership = await c.env.DB.prepare(
     `SELECT a.id FROM hosting_account_memberships m
      JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
-     WHERE a.id = ? AND a.organization_id = ? AND m.user_id = ?
+     WHERE a.id = ? AND m.user_id = ?
        AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
-  ).bind(accountId, identity.organizationId, identity.id).first<{ id: string }>();
+  ).bind(accountId, identity.id).first<{ id: string }>();
   if (!membership) return c.json({ message: "Hosting account not found" }, 404);
   const result = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.engine, d.status, d.created_at,
             (SELECT COUNT(*) FROM hosting_database_users u
              WHERE u.database_id = d.id AND u.status = 'ACTIVE') AS active_users
      FROM hosting_databases d
-     WHERE d.hosting_account_id = ? AND d.organization_id = ? AND d.status != 'DELETED'
+     WHERE d.hosting_account_id = ? AND d.status != 'DELETED'
      ORDER BY d.created_at DESC`,
-  ).bind(membership.id, identity.organizationId).all();
+  ).bind(membership.id).all();
   return c.json({ databases: result.results ?? [] });
 });
 
