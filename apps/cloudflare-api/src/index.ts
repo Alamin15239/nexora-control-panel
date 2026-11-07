@@ -3968,6 +3968,48 @@ app.post("/internal/v1/application-nodes/enroll", async (c) => {
     credentialModel: "ed25519_per_node", executionEnabled: false });
 });
 
+app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
+    return c.json({ message: "Node identity is required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status IN ('online', 'draining') AND p.status = 'ready' " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "agentVersion") ||
+      typeof body.agentVersion !== "string" || body.agentVersion.length < 1 || body.agentVersion.length > 64 ||
+      /[\\u0000-\\u001f\\u007f]/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid heartbeat payload." }, 400);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET agent_version = ?, last_heartbeat_at = datetime('now'), " +
+    "last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND status IN ('online', 'draining')",
+  ).bind(body.agentVersion, node.id).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node is no longer authorized." }, 409);
+  return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
+});
+
 app.post("/internal/v1/application-build-usage", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
