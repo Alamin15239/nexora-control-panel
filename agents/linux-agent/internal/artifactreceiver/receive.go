@@ -38,7 +38,8 @@ type Request struct {
 	BaseDir  string
 	Now      time.Time
 	Limits   deployarchive.Limits
-	Replay   ReplayGuard
+	Replay      ReplayGuard
+	OnValidated func(context.Context, deployenvelope.Claims, deployarchive.Result) error
 }
 
 type Result struct {
@@ -103,6 +104,11 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	releasesInfo, err := os.Lstat(releasesRoot)
 	if err != nil || !releasesInfo.IsDir() || releasesInfo.Mode()&os.ModeSymlink != 0 || releasesInfo.Mode().Perm()&0022 != 0 {
 		return result, errors.New("publisher releases directory must be a real, non-writable-by-others directory")
+	}
+	if request.OnValidated != nil {
+		if err := request.OnValidated(ctx, claims, archiveResult); err != nil {
+			return result, fmt.Errorf("report validated deployment archive: %w", err)
+		}
 	}
 
 	if err := request.Replay.Consume(ctx, claims.JWTID, time.Unix(claims.ExpiresAt, 0)); err != nil {
