@@ -80,7 +80,7 @@ VALUES ('runtime-a','pool-runtime','runtime-a','hash-runtime','runtime','online'
 
 db.execute("""INSERT INTO application_usage_periods
 (id,organization_id,project_id,period_start,build_minutes_limit)
-VALUES ('usage-period-a','org-a','project-a','2026-11-01',300)""")
+VALUES ('usage-a','org-a','project-a','2026-11-01',300)""")
 
 # Node identity and pool isolation are explicit security gates.
 assert db.execute("SELECT node_role FROM application_nodes WHERE id='builder-a'").fetchone()[0] == "builder"
@@ -151,9 +151,6 @@ must_reject(
 
 violations = list(db.execute("PRAGMA foreign_key_check"))
 # Usage periods are tenant-bound; aggregation and event marking are idempotent.
-db.execute("""INSERT INTO application_usage_periods
-(id,organization_id,project_id,period_start,build_seconds_used,build_minutes_limit)
-VALUES ('usage-a','org-a','project-a','2026-11-01',0,300)""")
 db.execute("""INSERT INTO application_usage_events
 (id,organization_id,project_id,deployment_id,period_start,build_seconds,source,node_id)
 VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder','node-a')""")
