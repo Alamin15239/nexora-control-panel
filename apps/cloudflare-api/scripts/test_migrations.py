@@ -27,6 +27,17 @@ assert not missing, f"Missing application tables: {sorted(missing)}"
 db.execute("INSERT INTO organizations(id,name,slug) VALUES ('org-a','Org A','org-a'),('org-b','Org B','org-b')")
 db.execute("INSERT INTO users(id,email,status) VALUES ('user-a','a@example.test','ACTIVE')")
 db.execute("INSERT INTO hosting_plans(id,organization_id,name,disk_limit_bytes) VALUES ('plan-a','org-a','Plan A',1000000)")
+plan_limits = db.execute(
+    """SELECT app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit
+       FROM hosting_plans WHERE id='plan-a'"""
+).fetchone()
+assert plan_limits == (500, 512, 2048, 128), f"Unexpected default runtime plan quotas: {plan_limits}"
+must_reject_plan_quota = False
+try:
+    db.execute("UPDATE hosting_plans SET app_memory_mib=16385 WHERE id='plan-a'")
+except sqlite3.IntegrityError:
+    must_reject_plan_quota = True
+assert must_reject_plan_quota, "Hosting plan memory quota CHECK constraint was not enforced"
 db.execute("INSERT INTO servers(id,organization_id,hostname,primary_ip) VALUES ('server-a','org-a','node-a','192.0.2.10')")
 db.execute("INSERT INTO hosting_accounts(id,organization_id,server_id,plan_id,username) VALUES ('account-a','org-a','server-a','plan-a','tenant-a')")
 db.execute("""INSERT INTO github_connections
@@ -83,4 +94,4 @@ must_reject(
 
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, tenant guards, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, tenant guards, release transitions, and foreign keys verified.")
