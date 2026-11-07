@@ -11,6 +11,7 @@ func newStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
 	if err := os.Mkdir(dir, 0700); err != nil { t.Fatal(err) }
+	if err := os.Chmod(dir, 0700); err != nil { t.Fatal(err) }
 	store, err := Open(filepath.Join(dir, "runtime.json"))
 	if err != nil { t.Fatal(err) }
 	return store, dir
