@@ -4468,7 +4468,9 @@ app.get("/internal/v1/application-nodes/desired-state", async (c) => {
     "JOIN application_project_settings s ON s.project_id = w.project_id " +
     "AND s.organization_id = w.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
-    "WHERE w.node_id = ? ORDER BY w.updated_at DESC LIMIT 100",
+    "WHERE w.node_id = ? AND rp.enabled = 1 AND rp.profile_key = 'nodejs-v1' " +
+    "AND rp.runtime_family = 'nodejs' AND rp.execution_kind = 'oci' " +
+    "ORDER BY w.updated_at DESC LIMIT 100",
   ).bind(node.id).all<{
     workloadId: string; projectId: string; workloadKind: string; workloadStatus: string;
     desiredReplicas: number; observedReplicas: number; releaseId: string; releaseState: string;
