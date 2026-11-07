@@ -40,6 +40,7 @@ func TestOpenRejectsUnsafeParentAndRootSymlink(t *testing.T) {
 	root := t.TempDir()
 	unsafe := filepath.Join(root, "unsafe")
 	if err := os.Mkdir(unsafe, 0777); err != nil { t.Fatal(err) }
+	if err := os.Chmod(unsafe, 0777); err != nil { t.Fatal(err) }
 	if _, err := Open(filepath.Join(unsafe, "volumes")); err == nil { t.Fatal("unsafe parent accepted") }
 
 	parent := filepath.Join(root, "private")
