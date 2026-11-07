@@ -10,12 +10,12 @@ package artifactreceiver
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -111,8 +111,8 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	}
 
 	stageIDBytes := make([]byte, 16)
-	if _, err := io.ReadFull(bytes.NewReader(digest[:16]), stageIDBytes); err != nil {
-		return result, fmt.Errorf("derive private staging identifier: %w", err)
+	if _, err := rand.Read(stageIDBytes); err != nil {
+		return result, fmt.Errorf("generate private staging identifier: %w", err)
 	}
 	stageID := "artifact-" + hex.EncodeToString(stageIDBytes)
 	stagePath := filepath.Join(stagingRoot, stageID)
