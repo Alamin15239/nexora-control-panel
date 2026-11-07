@@ -3885,8 +3885,13 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
             s.start_command AS startCommand, s.listen_port AS listenPort,
             s.health_check_path AS healthCheckPath, s.cpu_millis AS cpuMillis,
             s.memory_mib AS memoryMiB, s.disk_mib AS diskMiB,
-            s.process_limit AS processLimit, s.updated_at AS updatedAt
+            s.process_limit AS processLimit, s.updated_at AS updatedAt,
+            hp.app_cpu_millis AS planCpuMillis, hp.app_memory_mib AS planMemoryMiB,
+            MIN(hp.app_disk_mib, CAST(hp.disk_limit_bytes / 1048576 AS INTEGER)) AS planDiskMiB,
+            hp.app_process_limit AS planProcessLimit
      FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
      LEFT JOIN application_project_settings s
        ON s.project_id = p.id AND s.organization_id = p.organization_id
      LEFT JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id
@@ -3896,6 +3901,12 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   return c.json({
     project: { id: project.id, repositoryFullName: project.repositoryFullName },
+    planLimits: {
+      cpuMillis: project.planCpuMillis,
+      memoryMiB: project.planMemoryMiB,
+      diskMiB: project.planDiskMiB,
+      processLimit: project.planProcessLimit,
+    },
     settings: project.settingsId ? {
       id: project.settingsId,
       runtimeProfileId: project.runtimeProfileId,
