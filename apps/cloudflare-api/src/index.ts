@@ -4508,8 +4508,10 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.state IN ('ready_to_publish','publishing') LIMIT 1",
-  ).bind(body.deploymentId, node.nodePoolId).first<{
+    "WHERE r.deployment_id = ? AND r.node_pool_id = " +
+    "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
+    "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, purpose, purpose).first<{
     releaseId: string; organizationId: string; projectId: string; deploymentId: string;
     nodePoolId: string; state: string; releaseArtifactDigest: string | null;
     releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
@@ -4548,7 +4550,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     console.error("Application deployment envelope signing unavailable:", error instanceof Error ? error.message : "unknown error");
     return c.json({ message: "Application deployment envelope signing is not configured." }, 503);
   }
-  if (release.state === "ready_to_publish") {
+  if (purpose === "publish" && release.state === "ready_to_publish") {
     const transition = await c.env.DB.prepare(
       "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
       "WHERE id = ? AND state = 'ready_to_publish'",
