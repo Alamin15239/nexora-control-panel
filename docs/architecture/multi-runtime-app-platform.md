@@ -256,3 +256,22 @@ The query is constrained to workloads whose `node_id` equals the authenticated n
 The endpoint always returns `executionEnabled: false`, `commandsIncluded: false`, and `secretsIncluded: false`. It is a read-only protocol foundation, not authorization to start customer workloads.
 
 The Linux runtime polling client signs GET requests with the node's Ed25519 key, requires HTTPS except for loopback tests, bounds response size, rejects unknown fields, duplicate workload IDs, invalid release states and out-of-range resource values, and fails closed if the API ever indicates execution or secret/command delivery is enabled. The client does not invoke the OCI supervisor.
+
+
+## Runtime node service: read-only polling phase
+
+The Linux agent repository now contains a separate `cmd/nexora-runtime-node` binary and `systemd/nexora-runtime-node.service`. It runs as a dedicated unprivileged `nexora-runtime` account, reads an owner-only configuration and Ed25519 key file, performs fail-closed verification of the persisted supervisor snapshot at startup, and polls the authenticated desired-state endpoint. The service rejects any response that advertises execution, command delivery, or secret delivery. It does not call workload convergence and does not start, stop, restart, or publish customer code.
+
+The service is a control-plane polling client only. It is not installed or enabled on the development VM by this change. A real runtime node still requires operator-managed account/key/config provisioning, rootless Podman setup, storage and network policy, service health/rollback integration, and end-to-end acceptance tests.
+
+## Per-workload persistent data directories
+
+The Linux agent now contains `internal/runtimevolume`, which creates stable per-workload directories beneath a private service-owned volume root. It validates workload IDs, ownership, directory type, symlink exclusion, and owner-only permissions. Its removal operation only removes an empty directory; it never recursively deletes customer data. The rootless OCI backend accepts the exact operator-provided persistent-data path and mounts it read/write at `/var/lib/nexora` while keeping the application release mount read-only.
+
+This is **not disk quota enforcement**. A directory and bind mount do not impose a hard byte or inode limit. Filesystem project quotas, XFS/ext4 quota configuration, per-node capacity admission, usage accounting, and quota-exhaustion tests remain mandatory before customer workloads can be enabled. The volume manager is a tested primitive and is not yet called by the node polling service or a production lifecycle reconciler.
+
+## Immutable runtime secret bundles
+
+The Linux agent now contains `internal/runtimesecrets`, a local primitive for materializing a new immutable secret bundle under a private workload directory. It validates identifier and key formats, limits each value to 64 KiB and the aggregate bundle to 256 KiB, writes each value to a mode-0400 file, fsyncs files/directories, and refuses to overwrite an existing bundle ID. The OCI backend validates the directory and file permissions and can bind it read-only at `/run/secrets`. Secret values are not passed through container environment variables or command-line arguments.
+
+This does **not** implement secret retrieval, API authorization, encryption at rest, key management, rotation/revocation, bundle garbage collection, or end-to-end delivery. The materializer must only receive values from a future authenticated and narrowly scoped secret-delivery channel. No secret-delivery API exists in this slice, and the runtime polling contract continues to reject secret delivery. Do not pass customer secrets to this primitive from an untrusted source or enable customer workloads on this basis.
