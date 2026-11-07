@@ -406,6 +406,103 @@ app.post("/v1/auth/register", async (c) => {
   }
 });
 
+app.post("/v1/auth/forgot-password", async (c) => {
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "If the account exists, a password reset link will be sent." }); }
+
+  const email = normalizeEmail(input.email);
+  const generic = { message: "If the account exists, a password reset link will be sent." };
+  if (!validEmail(email)) return c.json(generic);
+
+  const user = await c.env.DB.prepare(
+    "SELECT id, email, display_name AS displayName FROM users WHERE email = ? COLLATE NOCASE AND status = 'ACTIVE' LIMIT 1",
+  ).bind(email).first<{ id: string; email: string; displayName: string | null }>();
+  if (!user) return c.json(generic);
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const throttleKey = await sha256("password-reset|" + user.id);
+  const recent = await c.env.DB.prepare(
+    "SELECT created_at AS createdAt FROM password_reset_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(user.id).first<{ createdAt: string }>();
+  if (recent && now.getTime() - Date.parse(recent.createdAt) < 60_000) return c.json(generic);
+
+  const token = randomHex(32);
+  const tokenHash = await sha256(token);
+  const expiresAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL")
+      .bind(nowIso, user.id),
+    c.env.DB.prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(crypto.randomUUID(), user.id, tokenHash, expiresAt, nowIso),
+  ]);
+
+  if (c.env.RESEND_API_KEY && c.env.EMAIL_FROM) {
+    const baseUrl = (c.env.DASHBOARD_URL || "https://web.nexoraedge.digital").replace(/\/$/, "");
+    const resetUrl = baseUrl + "/reset-password?token=" + encodeURIComponent(token);
+    const safeName = escapeEmailHtml(user.displayName || "there");
+    const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">
+      <h2>Reset your Nexora password</h2><p>Hello ${safeName},</p>
+      <p>We received a request to reset your Nexora Control password. Use the secure link below within 30 minutes.</p>
+      <p><a href="${resetUrl}" style="display:inline-block;padding:12px 20px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>
+      <p>If you did not request this, you can ignore this email. Your password will not change.</p>
+      <p style="font-size:12px;color:#64748b">This link can only be used once and expires in 30 minutes.</p>
+    </div>`;
+    try {
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [user.email], subject: "Reset your Nexora password", html }),
+      });
+      if (!response.ok) {
+        console.error("Password reset email rejected:", response.status, (await response.text()).slice(0, 500));
+      }
+    } catch (error) {
+      console.error("Password reset email delivery failed:", error);
+    }
+  } else {
+    console.error("Password reset requested but Resend is not configured");
+  }
+
+  return c.json(generic);
+});
+
+app.post("/v1/auth/reset-password", async (c) => {
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid reset request" }, 400); }
+
+  const token = typeof input.token === "string" ? input.token.trim() : "";
+  const password = typeof input.password === "string" ? input.password : "";
+  if (!/^[a-f0-9]{64}$/i.test(token)) return c.json({ message: "This reset link is invalid or has expired. Request a new one." }, 400);
+  if (password.length < 12 || password.length > 128) {
+    return c.json({ message: "Password must be between 12 and 128 characters" }, 400);
+  }
+
+  const tokenHash = await sha256(token);
+  const now = new Date().toISOString();
+  const reset = await c.env.DB.prepare(
+    "SELECT id, user_id AS userId FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
+  ).bind(tokenHash, now).first<{ id: string; userId: string }>();
+  if (!reset) return c.json({ message: "This reset link is invalid or has expired. Request a new one." }, 400);
+
+  const claimed = await c.env.DB.prepare(
+    "UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?",
+  ).bind(now, reset.id, now).run();
+  if ((claimed.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "This reset link is invalid or has expired. Request a new one." }, 400);
+  }
+
+  const passwordHash = await hashPassword(password);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ? AND status = 'ACTIVE'").bind(passwordHash, reset.userId),
+    c.env.DB.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, reset.userId),
+    c.env.DB.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL").bind(now, reset.userId),
+  ]);
+  return c.json({ success: true, message: "Your password has been reset. Sign in with your new password." });
+});
+
 app.post("/v1/auth/login", async (c) => {
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
