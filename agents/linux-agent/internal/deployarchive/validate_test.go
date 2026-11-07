@@ -146,3 +146,15 @@ func TestValidateGzipTarRejectsConcatenatedGzipPayload(t *testing.T) {
 		t.Fatal("unexpected concatenated gzip member was accepted")
 	}
 }
+
+
+func TestValidateGzipTarRejectsReservedPublisherManifestPath(t *testing.T) {
+	archive := makeArchive(t, testEntry{
+		name: "./.nexora-release.json",
+		kind: tar.TypeReg,
+		body: "{\"version\":1}",
+	})
+	if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{}); err == nil {
+		t.Fatal("customer archive was allowed to provide publisher-owned release metadata")
+	}
+}
