@@ -24,14 +24,16 @@ Cloudflare Workers are not general-purpose Linux VPS instances. Conventional PHP
 - One-time artifact upload capabilities and private R2 artifact staging.
 - D1 project, release, runtime-profile, node-pool, node-identity and usage schema.
 - Authenticated application-node enrollment/heartbeat and signed read-only desired-state polling.
-- Linux archive-validation, rootless Podman, release-delivery, volume, secret-bundle and durable supervisor primitives.
+- A dedicated static artifact publisher with assigned-node polling, signed deployment-envelope verification, durable replay protection, archive validation, immutable release storage and atomic activation.
+- Linux rootless Podman, release-delivery, volume, secret-bundle and durable supervisor primitives.
 - Runtime settings and build-usage metadata in the dashboard.
 
-These components are not proof that the full release lifecycle is enabled in production. The runtime node remains read-only and customer workload execution remains disabled.
+These components are not proof that the full release lifecycle is enabled in production. The static publisher is not installed or enabled on a node; its runtime profile remains disabled by default. Static activation also needs operator-provisioned account directories, Nginx routing and a real HTTP health probe. The OCI runtime node remains read-only and customer container execution remains disabled.
 
 ## What is not production-ready yet
 
-- Complete static artifact validation, publishing, atomic activation and rollback.
+- Installing and verifying the static publisher on a dedicated non-production node, including account-directory permissions and Nginx document-root routing.
+- External HTTP health checks, automated rollback orchestration and end-to-end static deployment acceptance.
 - A production build workflow installed and approved in customer repositories.
 - An isolated builder with enforced resource and egress policies.
 - A complete application-node lifecycle connected to rootless OCI execution.
