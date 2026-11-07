@@ -318,6 +318,41 @@ assert db.execute(
     "SELECT status FROM hosting_account_memberships WHERE id='account-member-a'"
 ).fetchone()[0] == "REVOKED"
 
+
+# Customer resource inventory queries must remain scoped to the selected active membership.
+db.execute("INSERT INTO users(id,email,status) VALUES ('user-b','b@example.test','ACTIVE')")
+db.execute("INSERT INTO memberships(id,user_id,organization_id,role) VALUES ('org-member-b','user-b','org-b','MEMBER')")
+db.execute("INSERT INTO hosting_plans(id,organization_id,name,disk_limit_bytes) VALUES ('plan-b','org-b','Plan B',1000000)")
+db.execute("INSERT INTO servers(id,organization_id,hostname,primary_ip) VALUES ('server-b','org-b','node-b','192.0.2.11')")
+db.execute("INSERT INTO hosting_accounts(id,organization_id,server_id,plan_id,username,status) VALUES ('account-b','org-b','server-b','plan-b','tenant-b','ACTIVE')")
+db.execute("UPDATE hosting_accounts SET status='ACTIVE' WHERE id='account-a'")
+db.execute("INSERT INTO domains(id,hosting_account_id,name,document_root,is_primary) VALUES ('domain-a','account-a','a.example.test','/home/tenant-a/public_html',1)")
+db.execute("INSERT INTO domains(id,hosting_account_id,name,document_root) VALUES ('domain-b','account-b','b.example.test','/home/tenant-b/public_html')")
+db.execute("INSERT INTO hosting_databases(id,organization_id,hosting_account_id,name,engine,status) VALUES ('db-a','org-a','account-a','tenant_a_app','MARIADB','ACTIVE')")
+db.execute("INSERT INTO hosting_databases(id,organization_id,hosting_account_id,name,engine,status) VALUES ('db-b','org-b','account-b','tenant_b_app','MARIADB','ACTIVE')")
+db.execute("""INSERT INTO hosting_account_memberships
+(id,hosting_account_id,organization_id,user_id,role)
+VALUES ('account-member-b','account-b','org-b','user-b','ACCOUNT_OWNER')""")
+customer_membership_query = """SELECT a.id FROM hosting_account_memberships m
+JOIN hosting_accounts a ON a.id=m.hosting_account_id AND a.organization_id=m.organization_id
+WHERE a.id=? AND a.organization_id=? AND m.user_id=?
+AND m.status='ACTIVE' AND a.status='ACTIVE' LIMIT 1"""
+assert db.execute(customer_membership_query, ("account-a","org-a","user-a")).fetchone() == ("account-a",)
+assert db.execute(customer_membership_query, ("account-b","org-a","user-a")).fetchone() is None
+assert db.execute(customer_membership_query, ("account-a","org-b","user-b")).fetchone() is None
+customer_domains = db.execute(
+    "SELECT id,name FROM domains WHERE hosting_account_id=? ORDER BY is_primary DESC,created_at ASC",
+    ("account-a",),
+).fetchall()
+assert customer_domains == [("domain-a","a.example.test")], f"Customer domains escaped account scope: {customer_domains}"
+customer_databases = db.execute(
+    "SELECT id,name FROM hosting_databases WHERE hosting_account_id=? AND organization_id=? AND status!='DELETED' ORDER BY created_at DESC",
+    ("account-a","org-a"),
+).fetchall()
+assert customer_databases == [("db-a","tenant_a_app")], f"Customer databases escaped account scope: {customer_databases}"
+db.execute("UPDATE hosting_account_memberships SET status='REVOKED' WHERE id='account-member-a'")
+assert db.execute(customer_membership_query, ("account-a","org-a","user-a")).fetchone() is None, "Revoked membership retained customer resource access"
+
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
 print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, and foreign keys verified.")
