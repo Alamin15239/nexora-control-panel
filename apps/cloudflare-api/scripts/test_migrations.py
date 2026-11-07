@@ -134,5 +134,10 @@ must_reject(
     (),
 )
 violations = list(db.execute("PRAGMA foreign_key_check"))
+db.execute("UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (SELECT COALESCE(SUM(build_seconds),0) FROM application_usage_events WHERE organization_id=? AND project_id=? AND period_start=? AND aggregated_at IS NULL) WHERE organization_id=? AND project_id=? AND period_start=?", ("org-a","project-a","2026-11-01","org-a","project-a","2026-11-01"))
+db.execute("UPDATE application_usage_events SET aggregated_at=? WHERE id=?", ("2026-11-07 00:00:00","usage-event-a"))
+db.execute("INSERT OR IGNORE INTO application_usage_events (id,organization_id,project_id,deployment_id,period_start,build_seconds,source) VALUES (?,?,?,?,?,?,?)", ("usage-event-replay","org-a","project-a","deployment-a","2026-11-01",120,"isolated_builder"))
+db.execute("UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (SELECT COALESCE(SUM(build_seconds),0) FROM application_usage_events WHERE organization_id=? AND project_id=? AND period_start=? AND aggregated_at IS NULL) WHERE organization_id=? AND project_id=? AND period_start=?", ("org-a","project-a","2026-11-01","org-a","project-a","2026-11-01"))
+assert db.execute("SELECT build_seconds_used FROM application_usage_periods WHERE id=?", ("usage-a",)).fetchone()[0] == 120, "Duplicate report changed aggregate usage"
 assert not violations, f"Foreign-key violations: {violations}"
 print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, usage ledger idempotency/tenant guards/immutable aggregation, release transitions, and foreign keys verified.")
