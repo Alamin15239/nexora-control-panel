@@ -23,6 +23,7 @@ import (
 const (
 	ArtifactRequestPath = "/internal/v1/application-nodes/artifact"
 	ArtifactValidationReportPath = "/internal/v1/application-nodes/releases/validated"
+	ArtifactActivationReportPath = "/internal/v1/application-nodes/releases/activated"
 	DefaultMaxArtifactBytes int64 = 100 << 20
 	maxEnvelopeBytes = 8 << 10
 )
@@ -241,4 +242,87 @@ func ReportValidated(ctx context.Context, client *http.Client, cfg Config, repor
 			strings.TrimSpace(string(message)))
 	}
 	return nil
+}
+
+
+type ActivationReport struct {
+	DeploymentID string
+	ReleaseID string
+	ArtifactSHA256 string
+}
+
+// ReportActivated acknowledges that the verified release directory has been
+// atomically activated. It does not claim that the customer process is running
+// or healthy; the control plane moves the release only to health_checking.
+func ReportActivated(ctx context.Context, client *http.Client, cfg Config, report ActivationReport) error {
+	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
+		return errors.New("application-node Ed25519 private key is invalid")
+	}
+	if cfg.NodeIdentity == "" || !regexpID(report.DeploymentID) || !regexpID(report.ReleaseID) ||
+		report.DeploymentID != report.ReleaseID ||
+		len(report.ArtifactSHA256) != 64 || strings.ToLower(report.ArtifactSHA256) != report.ArtifactSHA256 {
+		return errors.New("release activation report is outside permitted bounds")
+	}
+	if _, err := hex.DecodeString(report.ArtifactSHA256); err != nil {
+		return errors.New("release activation SHA-256 is malformed")
+	}
+	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
+		return errors.New("control plane URL must be an HTTPS origin without a path")
+	}
+	body, err := json.Marshal(struct {
+		DeploymentID string `json:"deploymentId"`
+		ReleaseID string `json:"releaseId"`
+		ArtifactSHA256 string `json:"artifactSha256"`
+	}{
+		DeploymentID: report.DeploymentID,
+		ReleaseID: report.ReleaseID,
+		ArtifactSHA256: report.ArtifactSHA256,
+	})
+	if err != nil {
+		return fmt.Errorf("encode release activation report: %w", err)
+	}
+	proof, err := appnodeauth.Sign(cfg.PrivateKey, cfg.NodeIdentity, http.MethodPost,
+		ArtifactActivationReportPath, body, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("sign release activation report: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.String()+ArtifactActivationReportPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create release activation report request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if err := proof.Apply(request, cfg.NodeIdentity); err != nil {
+		return fmt.Errorf("apply node request proof: %w", err)
+	}
+	activeClient := client
+	if activeClient == nil {
+		activeClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *activeClient
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := safeClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("submit release activation report: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("release activation endpoint returned %s: %s", response.Status,
+			strings.TrimSpace(string(message)))
+	}
+	return nil
+}
+
+func regexpID(value string) bool {
+	if value == "" || len(value) > 128 { return false }
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') &&
+			!(char >= '0' && char <= '9') && char != '_' && char != '-' {
+			return false
+		}
+	}
+	return true
 }
