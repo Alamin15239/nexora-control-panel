@@ -114,6 +114,34 @@ func (s *Store) Upsert(item WorkloadState) error {
 	return s.writeLocked(current)
 }
 
+// UpsertMany validates the entire batch before writing one durable snapshot.
+// Duplicate workload IDs in a batch are rejected to avoid order-dependent updates.
+func (s *Store) UpsertMany(items []WorkloadState) error {
+	if len(items) == 0 { return nil }
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if err := validate(item); err != nil { return err }
+		if _, exists := seen[item.WorkloadID]; exists {
+			return errors.New("duplicate workload identifier in state batch")
+		}
+		seen[item.WorkloadID] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := s.readLocked()
+	if err != nil && !os.IsNotExist(err) { return err }
+	if current.Workloads == nil {
+		current = snapshot{Version: schemaVersion, Workloads: make(map[string]WorkloadState)}
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		item.UpdatedAt = now
+		current.Workloads[item.WorkloadID] = item
+	}
+	current.UpdatedAt = now
+	return s.writeLocked(current)
+}
+
 func (s *Store) Delete(workloadID string) error {
 	if !opaqueID.MatchString(workloadID) {
 		return errors.New("invalid workload identifier")
