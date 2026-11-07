@@ -173,9 +173,14 @@ func TestFetchAndPublishRejectsInvalidEnvelopeBeforePublishing(t *testing.T) {
 	}
 	artifact := releaseArchive(t)
 	token := envelopeFor(t, signingKey, expected, artifact, now)
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || len(parts[2]) < 2 {
+		t.Fatal("test JWT must be a compact three-part token")
+	}
 	replacement := "A"
-	if token[len(token)-1:] == replacement { replacement = "B" }
-	token = token[:len(token)-1] + replacement
+	if parts[2][:1] == replacement { replacement = "B" }
+	parts[2] = replacement + parts[2][1:]
+	token = strings.Join(parts, ".")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type","application/gzip")
 		w.Header().Set("Cache-Control","no-store")
