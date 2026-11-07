@@ -316,7 +316,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -550,6 +550,27 @@ function validIp(value: string): boolean {
 
 function canManageServers(role: string): boolean {
   return role === "OWNER" || role === "ADMIN";
+}
+
+type HostingAccountMemberRole = "ACCOUNT_OWNER" | "ACCOUNT_ADMIN" | "ACCOUNT_DEVELOPER" | "ACCOUNT_READONLY";
+
+async function hasHostingAccountReadAccess(
+  db: D1Database,
+  identity: { id: string; organizationId: string; role: string },
+  hostingAccountId: string,
+): Promise<boolean> {
+  if (canManageServers(identity.role)) return true;
+  const membership = await db.prepare(
+    `SELECT m.role
+     FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id
+     WHERE m.hosting_account_id = ? AND m.user_id = ?
+       AND m.organization_id = ? AND a.organization_id = ?
+       AND m.status = 'ACTIVE' AND a.status = 'ACTIVE'
+     LIMIT 1`,
+  ).bind(hostingAccountId, identity.id, identity.organizationId, identity.organizationId)
+    .first<{ role: HostingAccountMemberRole }>();
+  return Boolean(membership);
 }
 
 function dnsErrorStatus(error: unknown): 400 | 502 {
@@ -1578,6 +1599,130 @@ function validDomain(value: string): boolean {
     /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
   ) && value.includes(".");
 }
+
+// Customer cPanel APIs expose only hosting accounts explicitly assigned to the signed-in user.
+app.get("/v1/customer/hosting-accounts", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.primary_domain, a.status, a.created_at,
+            p.name AS plan_name, p.disk_limit_bytes, p.bandwidth_limit_bytes,
+            p.website_limit, p.database_limit, p.mailbox_limit,
+            (SELECT COUNT(*) FROM domains d WHERE d.hosting_account_id = a.id) AS websites,
+            (SELECT COUNT(*) FROM hosting_databases d WHERE d.hosting_account_id = a.id AND d.status != 'DELETED') AS databases,
+            m.role AS account_role
+     FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id
+     JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE m.user_id = ? AND m.organization_id = ? AND m.status = 'ACTIVE'
+       AND a.organization_id = ? AND a.status = 'ACTIVE'
+     ORDER BY a.created_at DESC`,
+  ).bind(identity.id, identity.organizationId, identity.organizationId).all();
+  return c.json({ accounts: result.results ?? [] });
+});
+
+app.get("/v1/customer/hosting-accounts/:id/overview", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const allowed = await hasHostingAccountReadAccess(c.env.DB, identity, accountId);
+  if (!allowed) return c.json({ message: "Hosting account not found" }, 404);
+  const account = await c.env.DB.prepare(
+    `SELECT a.id, a.username, a.primary_domain, a.status, a.created_at,
+            p.name AS plan_name, p.disk_limit_bytes, p.bandwidth_limit_bytes,
+            p.website_limit, p.database_limit, p.mailbox_limit,
+            (SELECT COUNT(*) FROM domains d WHERE d.hosting_account_id = a.id) AS websites,
+            (SELECT COUNT(*) FROM hosting_databases d WHERE d.hosting_account_id = a.id AND d.status != 'DELETED') AS databases,
+            (SELECT COUNT(*) FROM hosting_database_users u
+             JOIN hosting_databases d ON d.id = u.database_id
+             WHERE d.hosting_account_id = a.id AND u.status != 'REVOKED') AS database_users
+     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE'
+     LIMIT 1`,
+  ).bind(accountId, identity.organizationId).first();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  return c.json({ account });
+});
+
+// Account assignments are controlled by WHM administrators, not by cPanel users.
+app.get("/v1/hosting-accounts/:id/members", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare(
+    "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(accountId, identity.organizationId).first();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT m.id, m.user_id, u.email, u.display_name, m.role, m.status, m.created_at
+     FROM hosting_account_memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.hosting_account_id = ? AND m.organization_id = ?
+     ORDER BY m.created_at ASC`,
+  ).bind(accountId, identity.organizationId).all();
+  return c.json({ members: result.results ?? [] });
+});
+
+app.post("/v1/hosting-accounts/:id/members", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const email = typeof input.email === "string" ? normalizeEmail(input.email) : "";
+  const role = typeof input.role === "string" ? input.role : "ACCOUNT_ADMIN";
+  if (!validEmail(email) || !["ACCOUNT_OWNER", "ACCOUNT_ADMIN", "ACCOUNT_DEVELOPER", "ACCOUNT_READONLY"].includes(role)) {
+    return c.json({ message: "Provide a valid organization member email and account role." }, 400);
+  }
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare(
+    "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(accountId, identity.organizationId).first();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  const user = await c.env.DB.prepare(
+    `SELECT u.id FROM users u JOIN memberships m ON m.user_id = u.id
+     WHERE u.email = ? AND u.status = 'ACTIVE' AND m.organization_id = ? LIMIT 1`,
+  ).bind(email, identity.organizationId).first<{ id: string }>();
+  if (!user) return c.json({ message: "The user must first be an active member of this organization." }, 404);
+  const membershipId = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO hosting_account_memberships
+       (id, organization_id, hosting_account_id, user_id, role, status)
+     VALUES (?, ?, ?, ?, ?, 'ACTIVE')
+     ON CONFLICT(hosting_account_id, user_id) DO UPDATE SET
+       role = excluded.role, status = 'ACTIVE', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+  ).bind(membershipId, identity.organizationId, accountId, user.id, role).run();
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.member_assigned', 'hosting_account', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ userId: user.id, email, role })).run();
+  return c.json({ membership: { hostingAccountId: accountId, userId: user.id, email, role, status: "ACTIVE" } }, 201);
+});
+
+app.delete("/v1/hosting-accounts/:id/members/:userId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const userId = c.req.param("userId");
+  const target = await c.env.DB.prepare(
+    "SELECT role FROM hosting_account_memberships WHERE hosting_account_id = ? AND user_id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(accountId, userId, identity.organizationId).first<{ role: HostingAccountMemberRole }>();
+  if (!target) return c.json({ message: "Active account member not found" }, 404);
+  if (target.role === "ACCOUNT_OWNER") {
+    const owners = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM hosting_account_memberships WHERE hosting_account_id = ? AND organization_id = ? AND role = 'ACCOUNT_OWNER' AND status = 'ACTIVE'",
+    ).bind(accountId, identity.organizationId).first<{ count: number }>();
+    if ((owners?.count ?? 0) <= 1) return c.json({ message: "Assign another account owner before revoking the last owner." }, 409);
+  }
+  await c.env.DB.prepare(
+    "UPDATE hosting_account_memberships SET status = 'REVOKED', updated_at = ? WHERE hosting_account_id = ? AND user_id = ? AND organization_id = ?",
+  ).bind(new Date().toISOString(), accountId, userId, identity.organizationId).run();
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.member_revoked', 'hosting_account', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ userId, previousRole: target.role })).run();
+  return c.json({ success: true });
+});
 
 app.get("/v1/hosting-accounts", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
