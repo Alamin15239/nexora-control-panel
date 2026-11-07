@@ -18,6 +18,7 @@ required = {
     "application_runtime_profiles", "application_node_pools", "application_nodes",
     "application_project_settings", "application_releases",
     "application_release_events", "application_workloads",
+    "application_usage_periods", "application_usage_events",
 }
 actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 missing = required - actual
@@ -28,10 +29,10 @@ db.execute("INSERT INTO organizations(id,name,slug) VALUES ('org-a','Org A','org
 db.execute("INSERT INTO users(id,email,status) VALUES ('user-a','a@example.test','ACTIVE')")
 db.execute("INSERT INTO hosting_plans(id,organization_id,name,disk_limit_bytes) VALUES ('plan-a','org-a','Plan A',1000000)")
 plan_limits = db.execute(
-    """SELECT app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit
+    """SELECT app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month
        FROM hosting_plans WHERE id='plan-a'"""
 ).fetchone()
-assert plan_limits == (500, 512, 2048, 128), f"Unexpected default runtime plan quotas: {plan_limits}"
+assert plan_limits == (500, 512, 2048, 128, 300), f"Unexpected default runtime plan quotas: {plan_limits}"
 must_reject_plan_quota = False
 try:
     db.execute("UPDATE hosting_plans SET app_memory_mib=16385 WHERE id='plan-a'")
@@ -93,5 +94,33 @@ must_reject(
 )
 
 violations = list(db.execute("PRAGMA foreign_key_check"))
+# Usage periods are tenant-bound and event identifiers are idempotent.
+db.execute("""INSERT INTO application_usage_periods
+(id,organization_id,project_id,period_start,build_seconds_used,build_minutes_limit)
+VALUES ('usage-a','org-a','project-a','2026-11-01',0,300)""")
+db.execute("""INSERT INTO application_usage_events
+(id,organization_id,project_id,deployment_id,period_start,build_seconds,source)
+VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder')""")
+must_reject(
+    "duplicate usage event for deployment",
+    """INSERT INTO application_usage_events
+    (id,organization_id,project_id,deployment_id,period_start,build_seconds,source)
+    VALUES ('usage-event-b','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder')""",
+    (),
+)
+must_reject(
+    "usage period cross-tenant write",
+    """INSERT INTO application_usage_periods
+    (id,organization_id,project_id,period_start,build_minutes_limit)
+    VALUES ('usage-b','org-b','project-a','2026-11-01',300)""",
+    (),
+)
+must_reject(
+    "invalid usage source",
+    """INSERT INTO application_usage_events
+    (id,organization_id,project_id,deployment_id,period_start,build_seconds,source)
+    VALUES ('usage-event-invalid','org-a','project-a','deployment-b','2026-11-01',120,'client')""",
+    (),
+)
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, tenant guards, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, usage ledger idempotency/tenant guards, release transitions, and foreign keys verified.")
