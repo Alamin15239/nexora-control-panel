@@ -149,3 +149,10 @@ A workload class is ready only when its build profile, runtime image, isolation 
 ## Builder node isolation classification
 
 Node pools default to `isolation_level=untrusted`. A pool must be explicitly classified as `rootless` or `microvm` before a builder node from that pool can submit build-usage reports. Nodes carry a control-plane-assigned `node_role` (`builder` or `runtime`); runtime nodes cannot report builder usage. The API checks both attributes before accepting a report, and a D1 insert trigger independently enforces the same rule. This classification is an admission gate, not proof that the host is actually hardened: pool operators must separately validate rootless isolation or microVM boundaries before changing the classification. Existing pools remain untrusted by default, and customer execution stays disabled.
+
+
+## Offline verified artifact receiver primitive
+
+The Linux agent now contains a standalone `internal/artifactreceiver` composition layer. It verifies the RS256 deployment envelope against caller-supplied, independently resolved deployment identity; checks exact artifact byte count and SHA-256; validates the gzip TAR before extraction; consumes the signed envelope JTI through a caller-provided durable replay guard; extracts into a newly created private staging directory; and invokes the atomic release publisher. Tests cover successful publication, cross-project identity mismatch, digest tampering, and replay rejection.
+
+This package is deliberately not a network service and is not connected to R2, the Cloudflare API, node authentication, deployment status transitions, health checks, or runtime execution. The caller must authenticate the node, resolve the expected organization/project/deployment/account/repository/commit from trusted control-plane data, load trusted RSA public keys, and provide an atomic durable JTI store. Its base directory and all parents must be operator-owned and inaccessible to untrusted local users. A failed publish may leave an immutable release stored but inactive if the final activation step fails; the caller must reconcile that state before retrying. Customer publishing remains disabled.
