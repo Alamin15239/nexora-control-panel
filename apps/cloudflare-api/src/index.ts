@@ -351,7 +351,7 @@ app.post("/v1/auth/register", async (c) => {
     return c.json({ message: "Password must be between 12 and 128 characters" }, 400);
   }
 
-  // Limit workspace creation by source IP to reduce automated public sign-up abuse.
+  // Limit customer registration by source IP to reduce automated public sign-up abuse.
   const registrationIp = c.req.header("CF-Connecting-IP") ?? "unknown";
   const registrationBucket = await sha256("register|" + registrationIp);
   const registrationLimit = await c.env.DB.prepare(
@@ -386,12 +386,12 @@ app.post("/v1/auth/register", async (c) => {
         .bind(userId, email, passwordHash, name),
       c.env.DB.prepare("INSERT INTO organizations (id, name, slug, status) VALUES (?, ?, ?, 'ACTIVE')")
         .bind(organizationId, organizationName, slug),
-      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'OWNER')")
+      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'MEMBER')")
         .bind(membershipId, userId, organizationId),
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.register', 'organization', ?)")
         .bind(crypto.randomUUID(), organizationId, userId, organizationId),
     ]);
-    const session = await issueSession(c.env.DB, userId, organizationId, "OWNER");
+    const session = await issueSession(c.env.DB, userId, organizationId, "MEMBER");
     return c.json({
       user: { id: userId, email, displayName: name },
       organization: { id: organizationId, name: organizationName, slug },
@@ -454,6 +454,9 @@ app.post("/v1/auth/login", async (c) => {
 
   await c.env.DB.prepare("DELETE FROM login_attempts WHERE bucket_key = ?").bind(bucketKey).run();
   const role = membership.role as Role;
+  const customerAccess = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(user.id).first<{ active: number }>();
   const session = await issueSession(c.env.DB, user.id, membership.organizationId, role);
   await c.env.DB.prepare(
     "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, source_ip) VALUES (?, ?, ?, 'auth.login', 'user', ?, ?)",
@@ -461,6 +464,7 @@ app.post("/v1/auth/login", async (c) => {
 
   return c.json({
     user: { id: user.id, email: user.email, displayName: user.displayName },
+    customerAccess: Boolean(customerAccess),
     ...session,
   });
 });
@@ -510,12 +514,16 @@ app.get("/v1/overview", async (c) => {
 app.get("/v1/auth/me", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const customerAccess = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(identity.id).first<{ active: number }>();
   return c.json({
     id: identity.id,
     email: identity.email,
     displayName: identity.displayName,
     organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
     role: identity.role,
+    customerAccess: Boolean(customerAccess),
   });
 });
 
@@ -1594,10 +1602,10 @@ app.get("/v1/customer/hosting-accounts", async (c) => {
        ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
      JOIN hosting_plans p
        ON p.id = a.plan_id AND p.organization_id = a.organization_id
-     WHERE m.user_id = ? AND m.organization_id = ?
+     WHERE m.user_id = ?
        AND m.status = 'ACTIVE' AND a.status = 'ACTIVE'
      ORDER BY a.created_at DESC`,
-  ).bind(identity.id, identity.organizationId).all();
+  ).bind(identity.id).all();
   return c.json({ accounts: result.results ?? [] });
 });
 
@@ -1620,10 +1628,10 @@ app.get("/v1/customer/hosting-accounts/:id/overview", async (c) => {
        ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
      JOIN hosting_plans p
        ON p.id = a.plan_id AND p.organization_id = a.organization_id
-     WHERE a.id = ? AND m.user_id = ? AND m.organization_id = ?
+     WHERE a.id = ? AND m.user_id = ?
        AND m.status = 'ACTIVE' AND a.status = 'ACTIVE'
      LIMIT 1`,
-  ).bind(accountId, identity.id, identity.organizationId).first();
+  ).bind(accountId, identity.id).first();
   if (!account) return c.json({ message: "Hosting account not found" }, 404);
   return c.json({ account });
 });
@@ -1636,9 +1644,9 @@ app.get("/v1/customer/hosting-accounts/:id/domains", async (c) => {
   const membership = await c.env.DB.prepare(
     `SELECT a.id FROM hosting_account_memberships m
      JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
-     WHERE a.id = ? AND a.organization_id = ? AND m.user_id = ?
+     WHERE a.id = ? AND m.user_id = ?
        AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
-  ).bind(accountId, identity.organizationId, identity.id).first<{ id: string }>();
+  ).bind(accountId, identity.id).first<{ id: string }>();
   if (!membership) return c.json({ message: "Hosting account not found" }, 404);
   const result = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at,
@@ -1660,18 +1668,18 @@ app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
   const membership = await c.env.DB.prepare(
     `SELECT a.id FROM hosting_account_memberships m
      JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
-     WHERE a.id = ? AND a.organization_id = ? AND m.user_id = ?
+     WHERE a.id = ? AND m.user_id = ?
        AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
-  ).bind(accountId, identity.organizationId, identity.id).first<{ id: string }>();
+  ).bind(accountId, identity.id).first<{ id: string }>();
   if (!membership) return c.json({ message: "Hosting account not found" }, 404);
   const result = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.engine, d.status, d.created_at,
             (SELECT COUNT(*) FROM hosting_database_users u
              WHERE u.database_id = d.id AND u.status = 'ACTIVE') AS active_users
      FROM hosting_databases d
-     WHERE d.hosting_account_id = ? AND d.organization_id = ? AND d.status != 'DELETED'
+     WHERE d.hosting_account_id = ? AND d.status != 'DELETED'
      ORDER BY d.created_at DESC`,
-  ).bind(membership.id, identity.organizationId).all();
+  ).bind(membership.id).all();
   return c.json({ databases: result.results ?? [] });
 });
 
@@ -1715,12 +1723,9 @@ app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
   if (!account) return c.json({ message: "Hosting account not found" }, 404);
 
   const user = await c.env.DB.prepare(
-    `SELECT u.id FROM users u
-     JOIN memberships om ON om.user_id = u.id AND om.organization_id = ?
-     WHERE u.email = ? COLLATE NOCASE AND u.status = 'ACTIVE'
-     LIMIT 1`,
-  ).bind(identity.organizationId, email).first<{ id: string }>();
-  if (!user) return c.json({ message: "That user must first be invited to this workspace and activate their Nexora login." }, 404);
+    "SELECT id FROM users WHERE email = ? COLLATE NOCASE AND status = 'ACTIVE' LIMIT 1",
+  ).bind(email).first<{ id: string }>();
+  if (!user) return c.json({ message: "No active Nexora login exists for that email. Ask the customer to register first." }, 404);
 
   const now = new Date().toISOString();
   const membershipId = crypto.randomUUID();
