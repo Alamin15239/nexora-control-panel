@@ -115,6 +115,17 @@ must_reject(
     VALUES ('usage-b','org-b','project-a','2026-11-01',300)""",
     (),
 )
+db.execute("UPDATE application_usage_events SET aggregated_at='2026-11-07 00:00:00' WHERE id='usage-event-a'")
+must_reject(
+    "aggregated usage event payload mutation",
+    "UPDATE application_usage_events SET build_seconds=999 WHERE id='usage-event-a'",
+    (),
+)
+must_reject(
+    "usage event aggregate marker cannot be reset",
+    "UPDATE application_usage_events SET aggregated_at=NULL WHERE id='usage-event-a'",
+    (),
+)
 must_reject(
     "invalid usage source",
     """INSERT INTO application_usage_events
@@ -122,5 +133,6 @@ must_reject(
     VALUES ('usage-event-invalid','org-a','project-a','deployment-b','2026-11-01',120,'client')""",
     (),
 )
+violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, usage ledger idempotency/tenant guards, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, usage ledger idempotency/tenant guards/immutable aggregation, release transitions, and foreign keys verified.")
