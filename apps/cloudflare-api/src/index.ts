@@ -3777,7 +3777,7 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   } catch (error) {
     return c.json({ message: error instanceof Error ? error.message : "Invalid command field." }, 400);
   }
-  if (healthCheckPath !== null && !/^\/[A-Za-z0-9._~!app.get("/v1/applications/projects/:projectId/settings", async (c) => {'()*+,;=:@%/-]*$/.test(healthCheckPath)) {
+  if (healthCheckPath !== null && !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%\-\/]*$/.test(healthCheckPath)) {
     return c.json({ message: "healthCheckPath must be an absolute URL path without query or fragment." }, 400);
   }
 
