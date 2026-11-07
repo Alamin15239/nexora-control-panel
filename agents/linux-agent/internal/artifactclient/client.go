@@ -350,6 +350,7 @@ type HealthCheckAcknowledgement struct {
 	WorkloadHealth string `json:"workloadHealth"`
 	RollbackRequired bool `json:"rollbackRequired"`
 	RollbackTargetDeploymentID *string `json:"rollbackTargetDeploymentId"`
+	RollbackTargetNodeID *string `json:"rollbackTargetNodeId"`
 }
 
 // ReportHealthCheck sends a signed node assertion after the runtime supervisor
@@ -462,10 +463,12 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	}
 	if !acknowledgement.Accepted || acknowledgement.DeploymentID != report.DeploymentID ||
 		acknowledgement.ReleaseState != expectedState || acknowledgement.WorkloadHealth != expectedHealth ||
-		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil) ||
+		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetNodeID != nil) ||
+		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetNodeID == nil)) ||
 		(acknowledgement.RollbackTargetDeploymentID != nil &&
 			(!regexpID(*acknowledgement.RollbackTargetDeploymentID) ||
-				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID)) ||
+				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID ||
+				!regexpID(*acknowledgement.RollbackTargetNodeID))) ||
 		(report.HealthStatus == "healthy" && acknowledgement.RollbackRequired) {
 		return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement does not match the submitted result")
 	}
