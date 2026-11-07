@@ -28,7 +28,8 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [memoryMiB, setMemoryMiB] = useState("512");
   const [diskMiB, setDiskMiB] = useState("2048");
   const [processLimit, setProcessLimit] = useState("128");
-  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);\n  const [usage, setUsage] = useState<RuntimeUsage | null>(null);
+  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);
+  const [usage, setUsage] = useState<RuntimeUsage | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -42,13 +43,16 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
     try {
       const [profileResponse, settingsResponse, usageResponse] = await Promise.all([
         fetch("/api/control/applications/runtime-profiles", { cache: "no-store" }),
-        fetch(`/api/control/applications/projects/${projectId}/settings`, { cache: "no-store" }),\n        fetch(`/api/control/applications/projects/${projectId}/usage`, { cache: "no-store" }),
+        fetch(`/api/control/applications/projects/${projectId}/settings`, { cache: "no-store" }),
+        fetch(`/api/control/applications/projects/${projectId}/usage`, { cache: "no-store" }),
       ]);
       const [profileData, settingsData, usageData] = await Promise.all([profileResponse.json(), settingsResponse.json(), usageResponse.json()]);
       if (!profileResponse.ok) throw new Error(profileData.message ?? "Unable to load runtime catalog.");
-      if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");\n      if (!usageResponse.ok) throw new Error(usageData.message ?? "Unable to load monthly build usage.");
+      if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");
+      if (!usageResponse.ok) throw new Error(usageData.message ?? "Unable to load monthly build usage.");
       setProfiles(profileData.profiles ?? []);
-      setPlanLimits(settingsData.planLimits ?? null);\n      setUsage(usageData);
+      setPlanLimits(settingsData.planLimits ?? null);
+      setUsage(usageData);
       const current = settingsData.settings;
       if (current) {
         setRuntimeProfileId(current.runtimeProfileId ?? "");
