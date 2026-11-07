@@ -113,7 +113,6 @@ func newFixture(t *testing.T) fixture {
 		request:Request{
 			Token:token, Artifact:artifact, Expected:expected,
 			Keys:map[string]*rsa.PublicKey{"test-key":&key.PublicKey},
-			Issuer:expected.Issuer, Audience:expected.Audience,
 			BaseDir:base, Now:now, Replay:&memoryReplayGuard{seen:map[string]bool{}},
 		},
 	}
