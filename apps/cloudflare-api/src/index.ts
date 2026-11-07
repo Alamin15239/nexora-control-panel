@@ -3662,6 +3662,161 @@ app.get("/v1/applications/runtime-profiles", async (c) => {
   });
 });
 
+app.put("/v1/applications/projects/:projectId/settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    "SELECT id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(projectId, identity.organizationId).first<{ id: string }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ message: "Request body must be valid JSON." }, 400);
+  }
+
+  const allowed = new Set([
+    "runtimeProfileId", "buildMethod", "buildContext", "buildCommand",
+    "outputDirectory", "startCommand", "listenPort", "healthCheckPath",
+    "cpuMillis", "memoryMiB", "diskMiB", "processLimit",
+  ]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    return c.json({ message: "Request contains unsupported settings." }, 400);
+  }
+
+  const runtimeProfileId = typeof body.runtimeProfileId === "string" ? body.runtimeProfileId.trim() : "";
+  if (!runtimeProfileId || runtimeProfileId.length > 128) {
+    return c.json({ message: "A valid runtimeProfileId is required." }, 400);
+  }
+  const profile = await c.env.DB.prepare(
+    "SELECT id, runtime_family AS runtimeFamily, enabled FROM application_runtime_profiles WHERE id = ? LIMIT 1",
+  ).bind(runtimeProfileId).first<{ id: string; runtimeFamily: string; enabled: number }>();
+  if (!profile) return c.json({ message: "Unknown runtime profile." }, 400);
+
+  const buildMethod = body.buildMethod ?? "managed";
+  if (buildMethod !== "static" && buildMethod !== "managed" && buildMethod !== "dockerfile") {
+    return c.json({ message: "buildMethod must be static, managed, or dockerfile." }, 400);
+  }
+  if (profile.runtimeFamily === "static" && buildMethod !== "static") {
+    return c.json({ message: "Static websites must use the static build method." }, 400);
+  }
+  if (profile.runtimeFamily === "container" && buildMethod !== "dockerfile") {
+    return c.json({ message: "Custom OCI profiles must use the Dockerfile build method." }, 400);
+  }
+
+  const relativePath = (value: unknown, fallback: string, field: string): string | null => {
+    const raw = value === undefined ? fallback : value;
+    if (typeof raw !== "string" || raw.length > 240 || raw.startsWith("/") ||
+        raw.includes("\\") || raw.split("/").some((part) => part === ".." || part === "." && raw !== ".")) {
+      return null;
+    }
+    return raw;
+  };
+  const buildContext = relativePath(body.buildContext, ".", "buildContext");
+  if (buildContext === null) return c.json({ message: "buildContext must be a safe relative path." }, 400);
+
+  const outputDirectory = body.outputDirectory === undefined
+    ? (profile.runtimeFamily === "static" ? "dist" : null)
+    : body.outputDirectory;
+  if (outputDirectory !== null &&
+      (typeof outputDirectory !== "string" || outputDirectory.length > 240 ||
+       outputDirectory.startsWith("/") || outputDirectory.includes("\\") ||
+       outputDirectory.split("/").some((part) => part === ".." || part === "."))) {
+    return c.json({ message: "outputDirectory must be null or a safe relative path." }, 400);
+  }
+
+  const boundedText = (value: unknown, field: string, max: number): string | null => {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string" || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) {
+      throw new Error(field + " is invalid or too long.");
+    }
+    return value;
+  };
+  let buildCommand: string | null;
+  let startCommand: string | null;
+  let healthCheckPath: string | null;
+  try {
+    buildCommand = boundedText(body.buildCommand, "buildCommand", 1000);
+    startCommand = boundedText(body.startCommand, "startCommand", 1000);
+    healthCheckPath = boundedText(body.healthCheckPath, "healthCheckPath", 200);
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Invalid command field." }, 400);
+  }
+  if (healthCheckPath !== null && !/^\/[A-Za-z0-9._~!app.get("/v1/applications/projects/:projectId/settings", async (c) => {'()*+,;=:@%/-]*$/.test(healthCheckPath)) {
+    return c.json({ message: "healthCheckPath must be an absolute URL path without query or fragment." }, 400);
+  }
+
+  const boundedInteger = (value: unknown, fallback: number, min: number, max: number, field: string): number | null => {
+    const n = value === undefined ? fallback : value;
+    return typeof n === "number" && Number.isInteger(n) && n >= min && n <= max ? n : null;
+  };
+  const listenPort = body.listenPort === undefined || body.listenPort === null
+    ? null : boundedInteger(body.listenPort, 0, 1, 65535, "listenPort");
+  const cpuMillis = boundedInteger(body.cpuMillis, 500, 100, 8000, "cpuMillis");
+  const memoryMiB = boundedInteger(body.memoryMiB, 512, 128, 16384, "memoryMiB");
+  const diskMiB = boundedInteger(body.diskMiB, 2048, 128, 65536, "diskMiB");
+  const processLimit = boundedInteger(body.processLimit, 128, 16, 512, "processLimit");
+  if (listenPort === null && body.listenPort !== undefined && body.listenPort !== null ||
+      cpuMillis === null || memoryMiB === null || diskMiB === null || processLimit === null) {
+    return c.json({ message: "Resource values are outside the permitted platform bounds." }, 400);
+  }
+
+  const settingsId = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO application_project_settings
+      (id, organization_id, project_id, runtime_profile_id, spec_version,
+       build_method, build_context, build_command, output_directory, start_command,
+       listen_port, health_check_path, cpu_millis, memory_mib, disk_mib, process_limit,
+       updated_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(project_id) DO UPDATE SET
+       runtime_profile_id = excluded.runtime_profile_id,
+       spec_version = application_project_settings.spec_version + 1,
+       build_method = excluded.build_method,
+       build_context = excluded.build_context,
+       build_command = excluded.build_command,
+       output_directory = excluded.output_directory,
+       start_command = excluded.start_command,
+       listen_port = excluded.listen_port,
+       health_check_path = excluded.health_check_path,
+       cpu_millis = excluded.cpu_millis,
+       memory_mib = excluded.memory_mib,
+       disk_mib = excluded.disk_mib,
+       process_limit = excluded.process_limit,
+       updated_at = datetime('now')
+     WHERE application_project_settings.organization_id = excluded.organization_id`,
+  ).bind(
+    settingsId, identity.organizationId, projectId, runtimeProfileId,
+    buildMethod, buildContext, buildCommand, outputDirectory, startCommand,
+    listenPort, healthCheckPath, cpuMillis, memoryMiB, diskMiB, processLimit,
+  ).run();
+
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'application.settings_updated', 'github_project', ?, ?)",
+  ).bind(
+    crypto.randomUUID(), identity.organizationId, identity.id, projectId,
+    JSON.stringify({
+      runtimeProfileId, buildMethod, cpuMillis, memoryMiB, diskMiB, processLimit,
+      executionEnabled: false,
+    }),
+  ).run();
+
+  return c.json({
+    saved: true,
+    projectId,
+    runtimeProfileId,
+    runtimeEnabled: profile.enabled === 1,
+    executionEnabled: false,
+    resourceBounds: { cpuMillis: [100, 8000], memoryMiB: [128, 16384], diskMiB: [128, 65536], processLimit: [16, 512] },
+    message: "Configuration saved as metadata only. Customer builds and runtime execution remain disabled.",
+  });
+});
+
 app.get("/v1/applications/projects/:projectId/settings", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
