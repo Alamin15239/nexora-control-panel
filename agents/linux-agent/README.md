@@ -68,3 +68,24 @@ Do not apply this migration to the production VM until the full operation integr
 ## CI
 
 GitHub Actions runs provisioner tests, the complete Go test suite, race tests, `go vet`, builds the agent/helper/daemon, and validates the provisioning systemd unit. The control-plane API must have the required D1 migrations applied before job delivery is available.
+
+
+## Isolated application runtime node (read-only polling phase)
+
+The separate `nexora-runtime-node` binary is a dedicated runtime-node control client. It does not replace the legacy hosting agent and does not run inside the privileged provisioner.
+
+Build and test it:
+
+```sh
+go test ./...
+go test -race ./...
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-runtime-node ./cmd/nexora-runtime-node
+```
+
+The example configuration is `config.runtime-node.example.json`. Install it as `/etc/nexora-runtime/node.json`, owned by `nexora-runtime:nexora-runtime`, mode `0600`. Store the raw Ed25519 private key as 128 hexadecimal characters in the separate owner-only file configured by `private_key_file`. The state file parent must be a real directory owned by the runtime service account with mode `0700`.
+
+The service unit is `systemd/nexora-runtime-node.service`. It runs under a dedicated unprivileged `nexora-runtime` account, uses systemd filesystem/kernel restrictions, and writes only to `/var/lib/nexora-runtime`. Installation requires operator-created account, config and key files; do not install or enable it on the current development VM as part of CI work.
+
+At startup the process loads and validates the durable supervisor snapshot, then verifies every recorded container through Podman and fails closed on an ownership mismatch or missing container. An absent snapshot is treated as an empty first-boot state. It then performs signed Ed25519 desired-state polling at the configured interval.
+
+**Execution remains disabled.** The client rejects any response that enables execution or includes commands/secrets. It does not call `Controller.Converge`, start/stop/restart containers, create volumes, or deliver secrets. Rootless Podman service/storage integration, actual runtime activation, and host network policy remain separate acceptance gates. The example registry allowlist is configuration only and is not a claim that an image build or deployment pipeline exists.
