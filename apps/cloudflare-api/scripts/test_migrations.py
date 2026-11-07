@@ -333,6 +333,7 @@ db.execute("INSERT INTO hosting_databases(id,organization_id,hosting_account_id,
 db.execute("""INSERT INTO hosting_account_memberships
 (id,hosting_account_id,organization_id,user_id,role)
 VALUES ('account-member-b','account-b','org-b','user-b','ACCOUNT_OWNER')""")
+db.execute("UPDATE hosting_account_memberships SET status='ACTIVE' WHERE id='account-member-a'")
 customer_membership_query = """SELECT a.id FROM hosting_account_memberships m
 JOIN hosting_accounts a ON a.id=m.hosting_account_id AND a.organization_id=m.organization_id
 WHERE a.id=? AND a.organization_id=? AND m.user_id=?
