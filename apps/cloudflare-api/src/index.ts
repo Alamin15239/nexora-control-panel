@@ -4712,7 +4712,7 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
-  ]);;
+  ]);
   if ([0, 2, 4, 6].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1) ||
       [1, 3, 5].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1)) {
     return c.json({ message: "Archive validation state transition could not be committed atomically." }, 409);
