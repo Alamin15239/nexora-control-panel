@@ -3685,8 +3685,19 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
 
   const projectId = c.req.param("projectId");
   const project = await c.env.DB.prepare(
-    "SELECT id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
-  ).bind(projectId, identity.organizationId).first<{ id: string }>();
+    `SELECT p.id, hp.app_cpu_millis AS appCpuMillis,
+            hp.app_memory_mib AS appMemoryMiB,
+            hp.app_disk_mib AS appDiskMiB,
+            hp.app_process_limit AS appProcessLimit,
+            hp.disk_limit_bytes AS accountDiskLimitBytes
+     FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<{
+    id: string; appCpuMillis: number; appMemoryMiB: number;
+    appDiskMiB: number; appProcessLimit: number; accountDiskLimitBytes: number;
+  }>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
 
   let body: Record<string, unknown>;
@@ -3785,6 +3796,23 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
     return c.json({ message: "Resource values are outside the permitted platform bounds." }, 400);
   }
 
+  const planDiskLimitMiB = Math.min(
+    project.appDiskMiB,
+    Math.floor(project.accountDiskLimitBytes / (1024 * 1024)),
+  );
+  if (cpuMillis > project.appCpuMillis || memoryMiB > project.appMemoryMiB ||
+      diskMiB > planDiskLimitMiB || processLimit > project.appProcessLimit) {
+    return c.json({
+      message: "Requested runtime resources exceed the quotas of the hosting plan assigned to this project.",
+      planResourceLimits: {
+        cpuMillis: project.appCpuMillis,
+        memoryMiB: project.appMemoryMiB,
+        diskMiB: planDiskLimitMiB,
+        processLimit: project.appProcessLimit,
+      },
+    }, 400);
+  }
+
   const settingsId = crypto.randomUUID();
   await c.env.DB.prepare(
     `INSERT INTO application_project_settings
@@ -3832,8 +3860,14 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
     runtimeEnabled: profile.enabled === 1,
     executionEnabled: false,
     platformResourceBounds: { cpuMillis: [100, 8000], memoryMiB: [128, 16384], diskMiB: [128, 65536], processLimit: [16, 512] },
-    planQuotasEnforced: false,
-    message: "Configuration saved as metadata only. These are platform hard bounds, not plan quotas. Customer builds and runtime execution remain disabled.",
+    planResourceLimits: {
+      cpuMillis: project.appCpuMillis,
+      memoryMiB: project.appMemoryMiB,
+      diskMiB: planDiskLimitMiB,
+      processLimit: project.appProcessLimit,
+    },
+    planQuotasEnforced: true,
+    message: "Configuration saved as metadata only within the assigned hosting plan quotas. Customer builds and runtime execution remain disabled.",
   });
 });
 
