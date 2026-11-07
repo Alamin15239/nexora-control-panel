@@ -24,6 +24,7 @@ const (
 	ArtifactRequestPath = "/internal/v1/application-nodes/artifact"
 	ArtifactValidationReportPath = "/internal/v1/application-nodes/releases/validated"
 	ArtifactActivationReportPath = "/internal/v1/application-nodes/releases/activated"
+	ArtifactHealthCheckReportPath = "/internal/v1/application-nodes/releases/health-check"
 	DefaultMaxArtifactBytes int64 = 100 << 20
 	maxEnvelopeBytes = 8 << 10
 )
@@ -325,4 +326,99 @@ func regexpID(value string) bool {
 		}
 	}
 	return true
+}
+
+
+type HealthCheckReport struct {
+	DeploymentID string
+	ArtifactSHA256 string
+	ProbePath string
+	HealthStatus string
+	HTTPStatus int
+	DurationMs int64
+	FailureCode string
+}
+
+// ReportHealthCheck sends a signed node assertion after the runtime supervisor
+// actually probes the configured local application endpoint. A healthy report
+// can mark the release succeeded; an unhealthy report returns rollback guidance.
+func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, report HealthCheckReport) error {
+	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
+		return errors.New("application-node Ed25519 private key is invalid")
+	}
+	if cfg.NodeIdentity == "" || !regexpID(report.DeploymentID) ||
+		len(report.ArtifactSHA256) != 64 || strings.ToLower(report.ArtifactSHA256) != report.ArtifactSHA256 ||
+		!strings.HasPrefix(report.ProbePath, "/") || len(report.ProbePath) > 512 ||
+		strings.ContainsAny(report.ProbePath, "?#\r\n") ||
+		(report.HealthStatus != "healthy" && report.HealthStatus != "unhealthy") ||
+		report.HTTPStatus < 0 || report.HTTPStatus > 599 ||
+		report.DurationMs < 0 || report.DurationMs > 30000 {
+		return errors.New("health-check report is outside permitted bounds")
+	}
+	if _, err := hex.DecodeString(report.ArtifactSHA256); err != nil {
+		return errors.New("health-check artifact digest is malformed")
+	}
+	if report.HealthStatus == "healthy" &&
+		(report.HTTPStatus < 200 || report.HTTPStatus > 299 || report.FailureCode != "") {
+		return errors.New("healthy report requires a successful HTTP status and no failure code")
+	}
+	if report.HealthStatus == "unhealthy" && report.FailureCode == "" {
+		return errors.New("unhealthy report requires a failure code")
+	}
+	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
+		return errors.New("control plane URL must be an HTTPS origin without a path")
+	}
+	body, err := json.Marshal(struct {
+		DeploymentID string `json:"deploymentId"`
+		ArtifactSHA256 string `json:"artifactSha256"`
+		ProbePath string `json:"probePath"`
+		HealthStatus string `json:"healthStatus"`
+		HTTPStatus int `json:"httpStatus"`
+		DurationMs int64 `json:"durationMs"`
+		FailureCode string `json:"failureCode,omitempty"`
+	}{
+		DeploymentID: report.DeploymentID,
+		ArtifactSHA256: report.ArtifactSHA256,
+		ProbePath: report.ProbePath,
+		HealthStatus: report.HealthStatus,
+		HTTPStatus: report.HTTPStatus,
+		DurationMs: report.DurationMs,
+		FailureCode: report.FailureCode,
+	})
+	if err != nil {
+		return fmt.Errorf("encode health-check report: %w", err)
+	}
+	proof, err := appnodeauth.Sign(cfg.PrivateKey, cfg.NodeIdentity, http.MethodPost,
+		ArtifactHealthCheckReportPath, body, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("sign health-check report: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.String()+ArtifactHealthCheckReportPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create health-check report request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if err := proof.Apply(request, cfg.NodeIdentity); err != nil {
+		return fmt.Errorf("apply node request proof: %w", err)
+	}
+	activeClient := client
+	if activeClient == nil {
+		activeClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *activeClient
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := safeClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("submit health-check report: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("health-check endpoint returned %s: %s", response.Status,
+			strings.TrimSpace(string(message)))
+	}
+	return nil
 }
