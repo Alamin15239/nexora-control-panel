@@ -288,6 +288,36 @@ must_reject(
     VALUES ('usage-event-invalid','org-a','project-a','deployment-b','2026-11-01',120,'client')""",
     (),
 )
+# Customer cPanel membership is explicit, role-constrained, and tenant-bound.
+db.execute("""INSERT INTO hosting_account_memberships
+(id,hosting_account_id,organization_id,user_id,role)
+VALUES ('account-member-a','account-a','org-a','user-a','ACCOUNT_OWNER')""")
+assert db.execute(
+    """SELECT role FROM hosting_account_memberships
+       WHERE hosting_account_id='account-a' AND organization_id='org-a'
+         AND user_id='user-a' AND status='ACTIVE'"""
+).fetchone()[0] == "ACCOUNT_OWNER"
+must_reject(
+    "account membership cannot cross organization boundary",
+    """INSERT INTO hosting_account_memberships
+    (id,hosting_account_id,organization_id,user_id,role)
+    VALUES ('account-member-cross','account-a','org-b','user-a','ACCOUNT_ADMIN')""",
+    (),
+)
+must_reject(
+    "account membership role must be recognized",
+    """INSERT INTO hosting_account_memberships
+    (id,hosting_account_id,organization_id,user_id,role)
+    VALUES ('account-member-invalid','account-a','org-a','user-a','OWNER')""",
+    (),
+)
+db.execute(
+    "UPDATE hosting_account_memberships SET status='REVOKED' WHERE id='account-member-a'"
+)
+assert db.execute(
+    "SELECT status FROM hosting_account_memberships WHERE id='account-member-a'"
+).fetchone()[0] == "REVOKED"
+
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, and foreign keys verified.")
