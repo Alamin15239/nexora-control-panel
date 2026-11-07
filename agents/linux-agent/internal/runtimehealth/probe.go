@@ -138,7 +138,7 @@ func Probe(ctx context.Context, port int, path string, timeout time.Duration) Re
 
 func validatePath(path string) error {
 	if path == "" || len(path) > 512 || !strings.HasPrefix(path, "/") ||
-		strings.ContainsAny(path, "?#\r\n") {
+		strings.ContainsAny(path, "?#\\\\\r\\n") {
 		return fmt.Errorf("health-check path must be a local absolute path without query or fragment")
 	}
 	for _, r := range path {
