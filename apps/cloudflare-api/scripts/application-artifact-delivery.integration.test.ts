@@ -38,6 +38,12 @@ class ArtifactD1 {
   lastSignatureUpdated = false;
   validationEventDetails: string | null = null;
 
+  async batch(statements: Array<{ run: () => Promise<{ success: boolean; meta: { changes: number } }> }>) {
+    const results = [];
+    for (const statement of statements) results.push(await statement.run());
+    return results;
+  }
+
   prepare(query: string) {
     const db = this;
     let values: unknown[] = [];
@@ -77,7 +83,7 @@ class ArtifactD1 {
         if (query.includes("FROM application_releases r")) {
           const [deploymentId, nodePoolId] = values;
           const purpose = values[2];
-          const stateAllowed = query.includes("? = 'validate'")
+          const stateAllowed = purpose === "validate"
             ? ["artifact_uploaded", "validating", "publishing"].includes(db.release.state)
             : ["ready_to_publish", "publishing"].includes(db.release.state);
           return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId && stateAllowed
