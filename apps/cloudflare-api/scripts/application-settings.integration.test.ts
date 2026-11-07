@@ -52,7 +52,7 @@ class TestD1 {
         }
         if (query.includes("FROM application_nodes n")) {
           const [nodeIdentity] = values;
-          return nodeIdentity === db.node.nodeIdentity && db.node.status === "online" && db.node.poolReady && db.node.signingPublicKey
+          return nodeIdentity === db.node.nodeIdentity && ["online", "draining"].includes(db.node.status) && db.node.poolReady && db.node.signingPublicKey
             ? ({ id: db.node.id, signingPublicKey: db.node.signingPublicKey } as T) : null;
         }
         if (query.includes("FROM application_nodes WHERE node_identity")) {
@@ -140,6 +140,14 @@ class TestD1 {
       },
       async all<T>() { return { results: [] as T[] }; },
       async run() {
+        if (query.includes("UPDATE application_nodes SET agent_version")) {
+          const [agentVersion] = values;
+          if (["online", "draining"].includes(db.node.status) && db.node.signingPublicKey) {
+            db.node.agentVersion = String(agentVersion);
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
         if (query.includes("UPDATE application_nodes SET signing_public_key")) {
           const [publicKey, agentVersion, nodeIdentity, tokenHash] = values;
           if (nodeIdentity === db.node.nodeIdentity && tokenHash === db.node.enrollmentKeyHash &&
@@ -246,12 +254,12 @@ async function createNodeKeyPair() {
   return { publicKeyHex, privateKey };
 }
 
-async function signedNodeRequest(body: unknown, privateKey: CryptoKey, nonce = "a".repeat(32), timestamp = String(Math.floor(Date.now() / 1000))) {
+async function signedNodeRequest(body: unknown, privateKey: CryptoKey, nonce = "a".repeat(32), timestamp = String(Math.floor(Date.now() / 1000)), path = "/internal/v1/application-build-usage") {
   const rawBody = JSON.stringify(body);
   const message = new TextEncoder().encode(timestamp + "." + nonce + "." + rawBody);
   const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, message));
   const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return new Request("https://api.test/internal/v1/application-build-usage", {
+  return new Request("https://api.test" + path, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -518,4 +526,33 @@ test("per-node usage report rejects queued deployments", async () => {
   const response = await worker.fetch(await signedNodeRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" },
     pair.privateKey), environment(db), {} as ExecutionContext);
   assert.equal(response.status, 409);
+});
+
+
+test("signed node heartbeat updates agent version and accepts draining nodes", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "draining";
+  const response = await worker.fetch(
+    await signedNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
+      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    environment(db), {} as ExecutionContext,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(db.node.agentVersion, "0.2.0");
+  assert.equal(db.nodeNonces.has("7".repeat(32)), true);
+});
+
+test("signed node heartbeat rejects unexpected fields", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
+  const response = await worker.fetch(
+    await signedNodeRequest({ agentVersion: "0.2.0", status: "online" }, pair.privateKey, "8".repeat(32),
+      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    environment(db), {} as ExecutionContext,
+  );
+  assert.equal(response.status, 400);
 });
