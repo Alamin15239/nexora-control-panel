@@ -82,8 +82,9 @@ class ArtifactD1 {
           return db.validationEventDetails === values[1] ? ({ id: "validation-event" } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("healthCheckPath")) {
-          const [deploymentId, nodePoolId] = values;
-          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId
+          const [deploymentId, nodePoolId, assignedNodeId] = values;
+          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId &&
+            assignedNodeId === db.node.id && assignedNodeId === db.release.assignedNodeId
             ? ({
                 releaseRowId: db.release.releaseId,
                 state: db.release.state,
@@ -99,7 +100,7 @@ class ArtifactD1 {
         if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
           const [deploymentId, nodePoolId, assignedNodeId] = values;
           if (deploymentId !== db.release.deploymentId || nodePoolId !== db.release.nodePoolId ||
-              assignedNodeId !== db.node.id) return null;
+              assignedNodeId !== db.node.id || assignedNodeId !== db.release.assignedNodeId) return null;
           if (query.includes("releaseArtifactBytes")) {
             return ({
               releaseId: db.release.releaseId,
@@ -444,6 +445,17 @@ test("artifact delivery is scoped to the assigned node pool", async () => {
   const signer = await keyPair("RSASSA-PKCS1-v1_5");
   const env = await environment(db, signer.privateKeyPEM);
   db.release.nodePoolId = "another-pool";
+  const response = await worker.fetch(await signedArtifactRequest(node.privateKey), env, {} as ExecutionContext);
+  assert.equal(response.status, 404);
+});
+
+test("runtime node cannot fetch another node's assigned release in the same pool", async () => {
+  const db = new ArtifactD1();
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  const signer = await keyPair("RSASSA-PKCS1-v1_5");
+  const env = await environment(db, signer.privateKeyPEM);
+  db.release.assignedNodeId = "another-runtime-node";
   const response = await worker.fetch(await signedArtifactRequest(node.privateKey), env, {} as ExecutionContext);
   assert.equal(response.status, 404);
 });
