@@ -4508,7 +4508,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, purpose, purpose).first<{
