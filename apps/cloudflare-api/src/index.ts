@@ -4878,6 +4878,236 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
   });
 });
 
+app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Health-check reports must use application/json." }, 415);
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Health-check report body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 2048) {
+        await reader.cancel();
+        return c.json({ message: "Health-check report exceeds 2048 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read health-check report body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Health-check report body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) { rawBytes.set(chunk, offset); offset += chunk.byteLength; }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Health-check report must be valid UTF-8." }, 400);
+  }
+
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, decodedBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report health checks." }, 401);
+  }
+
+  let input: unknown;
+  try { input = JSON.parse(decodedBody); } catch { return c.json({ message: "Invalid health-check report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "deploymentId", "artifactSha256", "probePath", "healthStatus",
+    "httpStatus", "durationMs", "failureCode",
+  ]);
+  const failureCodes = new Set([
+    "connection_refused", "timeout", "http_4xx", "http_5xx",
+    "invalid_response", "process_exit", "probe_error",
+  ]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
+      typeof body.probePath !== "string" || !/^\/[A-Za-z0-9._~!app.post("/internal/v1/application-build-usage", async (c) => {'()*+,;=:@%\-\/]*$/.test(body.probePath) ||
+      body.probePath.length > 512 ||
+      !["healthy", "unhealthy"].includes(String(body.healthStatus)) ||
+      !Number.isInteger(body.httpStatus) || Number(body.httpStatus) < 0 || Number(body.httpStatus) > 599 ||
+      !Number.isInteger(body.durationMs) || Number(body.durationMs) < 0 || Number(body.durationMs) > 30000) {
+    return c.json({ message: "Health-check report is outside permitted bounds." }, 400);
+  }
+  const healthStatus = String(body.healthStatus);
+  const httpStatus = Number(body.httpStatus);
+  const durationMs = Number(body.durationMs);
+  const failureCode = body.failureCode === undefined ? "" : String(body.failureCode);
+  if ((healthStatus === "healthy" && (httpStatus < 200 || httpStatus > 299 || failureCode !== "")) ||
+      (healthStatus === "unhealthy" && (!failureCodes.has(failureCode) ||
+        (httpStatus >= 200 && httpStatus <= 299)))) {
+    return c.json({ message: "Health-check status, HTTP status, and failure code are inconsistent." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseRowId, r.state, r.artifact_digest AS artifactDigest, " +
+    "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
+    "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
+    "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId " +
+    "FROM application_releases r " +
+    "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
+    "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId).first<{
+    releaseRowId: string; state: string; artifactDigest: string | null;
+    deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
+    healthCheckPath: string | null; previousActiveReleaseId: string | null;
+    previousDeploymentId: string | null;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256) {
+    return c.json({ message: "Health-check report digest does not match the assigned release artifact." }, 409);
+  }
+  const expectedProbePath = release.healthCheckPath ?? "/";
+  if (body.probePath !== expectedProbePath) {
+    return c.json({ message: "Health-check path does not match the project runtime settings." }, 409);
+  }
+
+  const details = JSON.stringify({
+    artifactSha256: body.artifactSha256,
+    probePath: body.probePath,
+    healthStatus,
+    httpStatus,
+    durationMs,
+    failureCode: failureCode || null,
+  });
+  const eventCode = healthStatus === "healthy" ? "health_check_succeeded" : "health_check_failed";
+  const targetState = healthStatus === "healthy" ? "succeeded" : "failed";
+  if (release.state === "succeeded" || release.state === "failed") {
+    if (release.state !== targetState) {
+      return c.json({ message: "Health-check outcome conflicts with the terminal release state." }, 409);
+    }
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? AND event_code = ? " +
+      "AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseRowId, eventCode, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Terminal release has no matching health-check event." }, 409);
+    return c.json({
+      accepted: true, duplicate: true, deploymentId: body.deploymentId,
+      releaseState: targetState,
+      workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId),
+      rollbackTargetDeploymentId: healthStatus === "unhealthy" ? release.previousDeploymentId : null,
+    });
+  }
+  if (release.state !== "health_checking") {
+    return c.json({ message: "Application release is not awaiting a health-check report." }, 409);
+  }
+
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
+  const commonNodeArgs = [node.id, nodeIdentity, node.signingPublicKey];
+  const statements = healthStatus === "healthy" ? [
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'succeeded', finished_at = datetime('now'), " +
+      "failure_code = NULL, failure_message_redacted = NULL, updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'health_checking', 'succeeded', 'node', ?, 'health_check_succeeded', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'succeeded' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_workloads " +
+      "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
+      "VALUES (?, ?, ?, ?, ?, 'web', 'healthy', 1, 1) " +
+      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "active_release_id = excluded.active_release_id, node_id = excluded.node_id, status = 'healthy', " +
+      "desired_replicas = 1, observed_replicas = 1, updated_at = datetime('now')",
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ] : [
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), " +
+      "failure_code = ?, failure_message_redacted = 'Initial application health check failed.', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(failureCode, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'health_checking', 'failed', 'node', ?, 'health_check_failed', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'failed' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_workloads " +
+      "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
+      "VALUES (?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0) " +
+      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "status = 'unhealthy', observed_replicas = 0, updated_at = datetime('now')",
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+      release.previousActiveReleaseId, node.id),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ];
+
+  const results = await c.env.DB.batch(statements);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Health-check outcome could not be committed safely." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: targetState,
+    workloadHealth: healthStatus,
+    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId),
+    rollbackTargetDeploymentId: healthStatus === "unhealthy" ? release.previousDeploymentId : null,
+  });
+});
+
 app.post("/internal/v1/application-build-usage", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
