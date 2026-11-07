@@ -4485,8 +4485,10 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     return c.json({ message: "A JSON object is required." }, 400);
   }
   const body = input as Record<string, unknown>;
-  if (Object.keys(body).some((key) => key !== "deploymentId") ||
-      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId)) {
+  const purpose = body.purpose === undefined ? "publish" : body.purpose;
+  if (Object.keys(body).some((key) => !["deploymentId", "purpose"].includes(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      (purpose !== "validate" && purpose !== "publish")) {
     return c.json({ message: "Invalid artifact request payload." }, 400);
   }
   const nonceResult = await c.env.DB.prepare(
