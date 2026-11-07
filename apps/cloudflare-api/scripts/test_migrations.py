@@ -18,7 +18,7 @@ required = {
     "application_runtime_profiles", "application_node_pools", "application_nodes",
     "application_project_settings", "application_releases",
     "application_release_events", "application_workloads",
-    "application_usage_periods", "application_usage_events", "application_node_request_nonces",
+    "application_usage_periods", "application_usage_events", "application_node_request_nonces",\n    "application_node_signing_key_history",
 }
 actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 missing = required - actual
@@ -105,6 +105,25 @@ must_reject(
 db.execute("UPDATE application_nodes SET signing_public_key=? WHERE id='node-a'", ("c" * 64,))
 db.execute("""INSERT INTO application_node_request_nonces(node_id,nonce,expires_at)
 VALUES ('node-a',?,'2026-11-07 00:10:00')""", ("d" * 32,))
+db.execute("""INSERT INTO application_node_signing_key_history (id,node_id,public_key)
+VALUES ('key-history-runtime','runtime-a',?)""", ("c" * 64,))
+must_reject(
+    "signing key history mutation",
+    "UPDATE application_node_signing_key_history SET public_key=? WHERE id='key-history-runtime'",
+    ("d" * 64,),
+)
+db.execute("UPDATE application_nodes SET status='revoked', revoked_at=datetime('now') WHERE id='runtime-a'")
+must_reject(
+    "revoked node reactivation",
+    "UPDATE application_nodes SET status='online' WHERE id='runtime-a'",
+    (),
+)
+must_reject(
+    "revoked node signing key mutation",
+    "UPDATE application_nodes SET signing_public_key=? WHERE id='runtime-a'",
+    ("e" * 64,),
+)
+
 must_reject(
     "duplicate per-node request nonce",
     """INSERT INTO application_node_request_nonces(node_id,nonce,expires_at)
