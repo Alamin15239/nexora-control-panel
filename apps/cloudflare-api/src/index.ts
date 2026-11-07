@@ -285,7 +285,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -4003,11 +4003,15 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   const buildResult = String(body.buildResult);
   const db = c.env.DB;
   const priorEvent = await db.prepare(
-    "SELECT e.id, e.period_start AS periodStart, e.organization_id AS organizationId, e.project_id AS projectId " +
+    "SELECT e.id, e.period_start AS periodStart, e.organization_id AS organizationId, e.project_id AS projectId, " +
+    "e.build_seconds AS buildSeconds, e.build_result AS buildResult " +
     "FROM application_usage_events e WHERE e.deployment_id = ? AND e.node_id = ? LIMIT 1",
-  ).bind(deploymentId, node.id).first<{ id: string; periodStart: string; organizationId: string; projectId: string }>();
+  ).bind(deploymentId, node.id).first<{ id: string; periodStart: string; organizationId: string; projectId: string; buildSeconds: number; buildResult: string }>();
 
   if (priorEvent) {
+    if (priorEvent.buildSeconds !== buildSeconds || priorEvent.buildResult !== buildResult) {
+      return c.json({ message: "A conflicting report already exists for this deployment and node." }, 409);
+    }
     const priorUsage = await db.prepare(
       "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
       "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
