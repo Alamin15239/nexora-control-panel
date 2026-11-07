@@ -182,7 +182,7 @@ test("artifact delivery rejects non-JSON content types before database access", 
 
 test("artifact delivery enforces the request body limit while streaming", async () => {
   const db = new ArtifactD1();
-  const body = "{\\"deploymentId\\":\\"" + "x".repeat(1100) + "\\"}";
+  const body = '{"deploymentId":"' + "x".repeat(1100) + '"}';
   const response = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/artifact", {
     method: "POST",
     headers: {
