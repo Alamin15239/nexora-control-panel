@@ -13,6 +13,7 @@ type fakeRunner struct {
 	calls [][]string
 	rootless string
 	failStart bool
+	createOutput string
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -22,6 +23,7 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 		return []byte(f.rootless), nil
 	}
 	if len(args) >= 1 && args[0] == "create" {
+		if f.createOutput != "" { return []byte(f.createOutput), nil }
 		return []byte("0123456789abcdef0123456789abcdef"), nil
 	}
 	if len(args) >= 1 && args[0] == "start" && f.failStart {
@@ -147,4 +149,15 @@ func TestStartRejectsNonAllowlistedRegistryBeforePodmanInvocation(t *testing.T) 
 		t.Fatal("expected non-allowlisted image registry rejection")
 	}
 	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for untrusted image registry: %+v", runner.calls) }
+}
+
+func TestStartRejectsMalformedContainerIDBeforeStarting(t *testing.T) {
+	runner := &fakeRunner{rootless: "true", createOutput: "not-a-container-id"}
+	p := Podman{Runner: runner, AllowedRegistries: []string{"registry.example.com"}}
+	if _, err := p.Start(context.Background(), validSpec(t)); err == nil {
+		t.Fatal("malformed Podman container ID was accepted")
+	}
+	if len(runner.calls) != 2 || runner.calls[1][0] != "create" {
+		t.Fatalf("unexpected lifecycle commands after malformed ID: %+v", runner.calls)
+	}
 }
