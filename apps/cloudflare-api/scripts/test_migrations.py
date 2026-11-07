@@ -148,6 +148,10 @@ must_reject(
 )
 db.execute("UPDATE application_node_signing_key_history SET retired_at=datetime('now') WHERE id='key-history-runtime'")
 
+db.execute("""INSERT OR IGNORE INTO application_node_pools
+(id,name,environment,region,runtime_engine,status,isolation_level)
+VALUES ('pool-runtime','Dedicated Runtime Pool','staging','test-region','microvm','ready','microvm')""")
+db.execute("UPDATE application_node_pools SET status='ready', isolation_level='microvm' WHERE id='pool-runtime'")
 db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,status,agent_version,signing_public_key,enrollment_consumed_at,last_heartbeat_at)
 VALUES ('runtime-node-b','pool-runtime','runtime-b',?,'online','0.4.0',?,datetime('now'),datetime('now'))""",
