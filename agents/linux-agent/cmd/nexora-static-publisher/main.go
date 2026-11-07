@@ -1,0 +1,248 @@
+package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactclient"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactdelivery"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+)
+
+const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
+var identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$`)
+
+type Config struct {
+	ControlPlaneURL string `json:"control_plane_url"`
+	NodeIdentity string `json:"node_identity"`
+	PrivateKeyFile string `json:"private_key_file"`
+	DeploymentSigningPublicKeyFile string `json:"deployment_signing_public_key_file"`
+	DeploymentSigningKeyID string `json:"deployment_signing_key_id"`
+	DeploymentEnvelopeIssuer string `json:"deployment_envelope_issuer"`
+	DeploymentEnvelopeAudience string `json:"deployment_envelope_audience"`
+	PublisherRoot string `json:"publisher_root"`
+	ReplayDirectory string `json:"replay_directory"`
+	PollIntervalSeconds int `json:"poll_interval_seconds"`
+}
+
+type PendingRelease struct {
+	DeploymentID string `json:"deploymentId"`
+	OrganizationID string `json:"organizationId"`
+	ProjectID string `json:"projectId"`
+	HostingAccountID string `json:"hostingAccountId"`
+	RepositoryID string `json:"repositoryId"`
+	CommitSHA string `json:"commitSha"`
+}
+type PendingResponse struct {
+	NodeIdentity string `json:"nodeIdentity"`
+	PolledAt time.Time `json:"polledAt"`
+	Releases []PendingRelease `json:"releases"`
+}
+
+func main() {
+	configPath := flag.String("config", "/etc/nexora-static-publisher/node.json", "static publisher config")
+	flag.Parse()
+	if err := run(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "nexora-static-publisher:", err)
+		os.Exit(1)
+	}
+}
+
+func loadConfig(path string) (Config, error) {
+	var cfg Config
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return cfg, errors.New("config path must be absolute and clean")
+	}
+	info, err := os.Lstat(path)
+	if err != nil { return cfg, err }
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return cfg, errors.New("config must be a regular owner-only file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil { return cfg, err }
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil { return cfg, fmt.Errorf("decode config: %w", err) }
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF { return cfg, errors.New("config contains trailing JSON data") }
+	u, err := url.Parse(cfg.ControlPlaneURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return cfg, errors.New("control_plane_url must be an HTTPS origin")
+	}
+	if !identityPattern.MatchString(cfg.NodeIdentity) { return cfg, errors.New("node_identity is invalid") }
+	for name, value := range map[string]string{
+		"private_key_file": cfg.PrivateKeyFile,
+		"deployment_signing_public_key_file": cfg.DeploymentSigningPublicKeyFile,
+		"publisher_root": cfg.PublisherRoot,
+		"replay_directory": cfg.ReplayDirectory,
+	} {
+		if !filepath.IsAbs(value) || filepath.Clean(value) != value { return cfg, fmt.Errorf("%s must be an absolute clean path", name) }
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`).MatchString(cfg.DeploymentSigningKeyID) ||
+		cfg.DeploymentEnvelopeIssuer == "" || cfg.DeploymentEnvelopeAudience == "" {
+		return cfg, errors.New("deployment envelope key ID, issuer and audience are required")
+	}
+	if cfg.PollIntervalSeconds < 15 || cfg.PollIntervalSeconds > 600 {
+		return cfg, errors.New("poll_interval_seconds must be between 15 and 600")
+	}
+	return cfg, nil
+}
+
+func loadNodeKey(path string) (ed25519.PrivateKey, error) {
+	info, err := os.Lstat(path)
+	if err != nil { return nil, err }
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || info.Size() > 256 {
+		return nil, errors.New("node key must be a small regular owner-only file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil { return nil, err }
+	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(key) != ed25519.PrivateKeySize { return nil, errors.New("node key must contain a 64-byte Ed25519 private key in hex") }
+	return ed25519.PrivateKey(key), nil
+}
+
+func loadSigningKey(path string) (*rsa.PublicKey, error) {
+	info, err := os.Lstat(path)
+	if err != nil { return nil, err }
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0027 != 0 || info.Size() > 16<<10 {
+		return nil, errors.New("deployment signing public key must be a regular, non-world-readable file")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil { return nil, err }
+	block, _ := pem.Decode(raw)
+	if block == nil { return nil, errors.New("deployment signing public key is not PEM encoded") }
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		if key, pkcs1Err := x509.ParsePKCS1PublicKey(block.Bytes); pkcs1Err == nil { parsed = key } else { return nil, errors.New("unable to parse deployment signing public key") }
+	}
+	key, ok := parsed.(*rsa.PublicKey)
+	if !ok || key.N == nil || key.N.BitLen() < 2048 || key.E < 3 {
+		return nil, errors.New("deployment signing public key must be RSA-2048 or stronger")
+	}
+	return key, nil
+}
+
+func verifyPrivateDirectory(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil { return fmt.Errorf("inspect %s: %w", filepath.Base(path), err) }
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("%s must be a real directory not writable by group or others", filepath.Base(path))
+	}
+	return nil
+}
+
+func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25519.PrivateKey) ([]PendingRelease, error) {
+	body := []byte{}
+	proof, err := appnodeauth.Sign(key, cfg.NodeIdentity, http.MethodGet, pendingPath, body, time.Now().UTC())
+	if err != nil { return nil, fmt.Errorf("sign pending-release request: %w", err) }
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.ControlPlaneURL, "/")+pendingPath, nil)
+	if err != nil { return nil, err }
+	if err := proof.Apply(req, cfg.NodeIdentity); err != nil { return nil, err }
+	safeClient := *client
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := safeClient.Do(req)
+	if err != nil { return nil, fmt.Errorf("poll pending static releases: %w", err) }
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil { return nil, err }
+	if len(data) > 1<<20 { return nil, errors.New("pending-release response exceeds 1 MiB") }
+	if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("pending-release API returned HTTP %d", resp.StatusCode) }
+	var result PendingResponse
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil { return nil, fmt.Errorf("decode pending releases: %w", err) }
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF { return nil, errors.New("pending-release response contains trailing JSON") }
+	if result.NodeIdentity != cfg.NodeIdentity || result.PolledAt.IsZero() || len(result.Releases) > 10 {
+		return nil, errors.New("pending-release response violates the node assignment contract")
+	}
+	return result.Releases, nil
+}
+
+func run(configPath string) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil { return err }
+	nodeKey, err := loadNodeKey(cfg.PrivateKeyFile)
+	if err != nil { return fmt.Errorf("load node signing key: %w", err) }
+	signingKey, err := loadSigningKey(cfg.DeploymentSigningPublicKeyFile)
+	if err != nil { return fmt.Errorf("load deployment trust key: %w", err) }
+	for _, dir := range []string{cfg.PublisherRoot, filepath.Join(cfg.PublisherRoot, "accounts"), cfg.ReplayDirectory} {
+		if err := verifyPrivateDirectory(dir); err != nil { return err }
+	}
+	httpClient := &http.Client{Timeout: 2 * time.Minute}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	poll := func() {
+		releases, err := fetchPending(ctx, httpClient, cfg, nodeKey)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pending-release poll:", err)
+			return
+		}
+		for _, release := range releases {
+			if ctx.Err() != nil { return }
+			if !identityPattern.MatchString(release.HostingAccountID) {
+				fmt.Fprintf(os.Stderr, "skip deployment %s: invalid hosting account identifier\n", release.DeploymentID)
+				continue
+			}
+			baseDir := filepath.Join(cfg.PublisherRoot, "accounts", release.HostingAccountID)
+			if err := verifyPrivateDirectory(baseDir); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s: %v\n", release.DeploymentID, err)
+				continue
+			}
+			expected := deployenvelope.Expected{
+				Issuer: cfg.DeploymentEnvelopeIssuer, Audience: cfg.DeploymentEnvelopeAudience,
+				OrganizationID: release.OrganizationID, ProjectID: release.ProjectID,
+				DeploymentID: release.DeploymentID, HostingAccountID: release.HostingAccountID,
+				RepositoryID: release.RepositoryID, CommitSHA: strings.ToLower(release.CommitSHA),
+			}
+			result, publishErr := artifactdelivery.FetchAndPublish(ctx, artifactdelivery.Config{
+				HTTPClient: httpClient,
+				ArtifactClient: artifactclient.Config{
+					ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity,
+					PrivateKey: nodeKey, Purpose: "validate",
+				},
+				Expected: expected,
+				TrustedSigningKeys: map[string]*rsa.PublicKey{cfg.DeploymentSigningKeyID: signingKey},
+				BaseDir: baseDir,
+				ReplayGuard: artifactreceiver.FileReplayGuard{Directory: cfg.ReplayDirectory},
+				ArchiveLimits: deployarchive.Limits{},
+			}, release.DeploymentID)
+			if publishErr != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
+				continue
+			}
+			fmt.Printf("static release activated: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
+				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)
+		}
+	}
+	poll()
+	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done(): return nil
+		case <-ticker.C: poll()
+		}
+	}
+}
