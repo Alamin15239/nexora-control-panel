@@ -34,13 +34,17 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) ([]byte, error) {
 
 func validSpec(t *testing.T) Spec {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "release")
+	root := t.TempDir()
+	dir := filepath.Join(root, "release")
+	dataDir := filepath.Join(root, "data")
 	if err := os.Mkdir(dir, 0700); err != nil { t.Fatal(err) }
+	if err := os.Mkdir(dataDir, 0700); err != nil { t.Fatal(err) }
 	return Spec{
 		WorkloadID: "workload-123",
 		ReleaseID: "release-123",
 		ImageDigest: "registry.example.com/nexora/app@sha256:" + strings.Repeat("a", 64),
 		ReleaseDir: dir,
+		PersistentDataDir: dataDir,
 		HostPort: 18080,
 		ContainerPort: 8080,
 		CPUMillis: 500,
@@ -64,7 +68,7 @@ func TestStartUsesRootlessConstrainedPodman(t *testing.T) {
 		"--memory-swap 512m", "--cpus 0.500", "--network slirp4netns",
 		"--publish 127.0.0.1:18080:8080", "--ipc private", "--pid private",
 		"--log-driver k8s-file", "--log-opt max-size=10mb",
-		"dst=/app,ro=true", spec.ImageDigest,
+		"dst=/app,ro=true", "dst=/var/lib/nexora,rw=true", spec.ImageDigest,
 	} {
 		if !strings.Contains(create, required) { t.Errorf("create command missing %q: %s", required, create) }
 	}
@@ -97,6 +101,8 @@ func TestStartRejectsUnsafeSpecs(t *testing.T) {
 		"invalid CPU": func(s *Spec) { s.CPUMillis = 9000 },
 		"invalid process limit": func(s *Spec) { s.ProcessLimit = 1024 },
 		"path traversal": func(s *Spec) { s.ReleaseDir = "/tmp/../etc" },
+		"missing persistent data directory": func(s *Spec) { s.PersistentDataDir = "" },
+		"persistent data path traversal": func(s *Spec) { s.PersistentDataDir = "/tmp/../etc" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -161,3 +167,21 @@ func TestStartRejectsMalformedContainerIDBeforeStarting(t *testing.T) {
 		t.Fatalf("unexpected lifecycle commands after malformed ID: %+v", runner.calls)
 	}
 }
+
+func TestStartRejectsSymlinkAndWritablePersistentDataDirectories(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0700); err != nil { t.Fatal(err) }
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil { t.Fatal(err) }
+	runner := &fakeRunner{rootless: "true"}
+	spec := validSpec(t)
+	spec.PersistentDataDir = link
+	p := Podman{Runner: runner, AllowedRegistries: []string{"registry.example.com"}}
+	if _, err := p.Start(context.Background(), spec); err == nil { t.Fatal("persistent data symlink accepted") }
+	if err := os.Chmod(real, 0770); err != nil { t.Fatal(err) }
+	spec.PersistentDataDir = real
+	if _, err := p.Start(context.Background(), spec); err == nil { t.Fatal("group-writable persistent data directory accepted") }
+	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for unsafe persistent data directory: %+v", runner.calls) }
+}
+
