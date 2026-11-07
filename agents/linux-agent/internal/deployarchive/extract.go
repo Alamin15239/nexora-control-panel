@@ -2,7 +2,9 @@ package deployarchive
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -19,10 +21,12 @@ import (
 // and must not expose it to untrusted local processes while extraction runs.
 // A separate activation step must publish the completed directory atomically.
 func ExtractGzipTar(input io.ReadSeeker, destination string, limits Limits) (Result, error) {
-	validated, err := ValidateGzipTar(input, limits)
+	validationDigest := sha256.New()
+	validated, err := ValidateGzipTar(io.TeeReader(input, validationDigest), limits)
 	if err != nil {
 		return Result{}, fmt.Errorf("validate archive before extraction: %w", err)
 	}
+	validatedHash := validationDigest.Sum(nil)
 	if _, err := input.Seek(0, io.SeekStart); err != nil {
 		return Result{}, fmt.Errorf("rewind validated archive: %w", err)
 	}
@@ -42,7 +46,8 @@ func ExtractGzipTar(input io.ReadSeeker, destination string, limits Limits) (Res
 		return Result{}, errors.New("staging destination must be empty")
 	}
 
-	gz, err := gzip.NewReader(input)
+	extractionDigest := sha256.New()
+	gz, err := gzip.NewReader(io.TeeReader(input, extractionDigest))
 	if err != nil {
 		return Result{}, fmt.Errorf("open gzip archive for extraction: %w", err)
 	}
@@ -137,6 +142,9 @@ func ExtractGzipTar(input io.ReadSeeker, destination string, limits Limits) (Res
 	}
 	if result != validated {
 		return Result{}, errors.New("archive contents changed between validation and extraction")
+	}
+	if !bytesEqual(validatedHash, extractionDigest.Sum(nil)) {
+		return Result{}, errors.New("archive bytes changed between validation and extraction")
 	}
 	return result, nil
 }
