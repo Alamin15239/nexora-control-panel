@@ -3735,6 +3735,22 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       await c.env.DB.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, identity.organizationId).run();
+      if (applicationReleaseId) {
+        await c.env.DB.batch([
+          c.env.DB.prepare(
+            "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_rejected', " +
+            "failure_message_redacted = 'GitHub workflow dispatch was rejected.', updated_at = datetime('now') " +
+            "WHERE id = ? AND organization_id = ? AND state = 'queued'",
+          ).bind(applicationReleaseId, identity.organizationId),
+          c.env.DB.prepare(
+            "INSERT INTO application_release_events " +
+            "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+            "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_rejected', '{}' " +
+            "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
+            "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_rejected')",
+          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+        ]);
+      }
       return c.json({
         message: dispatch.status === 404
           ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
