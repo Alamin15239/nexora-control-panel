@@ -42,6 +42,7 @@ type Request struct {
 	Limits   deployarchive.Limits
 	Replay      ReplayGuard
 	OnValidated func(context.Context, deployenvelope.Claims, deployarchive.Result) error
+	OnPublished func(context.Context, deployenvelope.Claims) error
 }
 
 type Result struct {
@@ -133,6 +134,11 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		return result, err
 	}
 	if alreadyPublished {
+		if request.OnPublished != nil {
+			if err := request.OnPublished(ctx, claims); err != nil {
+				return result, fmt.Errorf("report existing release activation: %w", err)
+			}
+		}
 		return Result{
 			DeploymentID: claims.DeploymentID,
 			ReleaseID: claims.DeploymentID,
@@ -173,6 +179,11 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		return result, fmt.Errorf("publish immutable release: %w", err)
 	}
 	published = true
+	if request.OnPublished != nil {
+		if err := request.OnPublished(ctx, claims); err != nil {
+			return result, fmt.Errorf("report activated release: %w", err)
+		}
+	}
 	return Result{
 		DeploymentID: claims.DeploymentID,
 		ReleaseID: claims.DeploymentID,
