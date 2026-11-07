@@ -3975,6 +3975,101 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
   });
 });
 
+app.get("/internal/v1/operator/application-node-pools", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) {
+    return c.json({ message: "Node operator authorization required." }, 401);
+  }
+  const rows = await c.env.DB.prepare(
+    "SELECT p.id, p.name, p.environment, p.region, p.runtime_engine AS runtimeEngine, " +
+    "p.isolation_level AS isolationLevel, " +
+    "(SELECT COUNT(*) FROM application_nodes n WHERE n.node_pool_id = p.id AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
+    "FROM application_node_pools p WHERE p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "ORDER BY p.environment, p.region, p.name",
+  ).all<{
+    id: string; name: string; environment: string; region: string;
+    runtimeEngine: string; isolationLevel: string; onlineRuntimeNodes: number;
+  }>();
+  return c.json({
+    pools: (rows.results ?? []).filter((pool) => pool.onlineRuntimeNodes > 0),
+    capacityAllocated: false,
+    executionEnabled: false,
+  });
+});
+
+app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) {
+    return c.json({ message: "Node operator authorization required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Request body must be between 2 and 2048 bytes." }, 413);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "nodePoolId") ||
+      typeof body.nodePoolId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.nodePoolId)) {
+    return c.json({ message: "A valid nodePoolId is required." }, 400);
+  }
+  const projectId = c.req.param("projectId");
+  const assignment = await c.env.DB.prepare(
+    "SELECT s.id AS settingsId, s.node_pool_id AS previousNodePoolId, " +
+    "rp.enabled AS runtimeEnabled, " +
+    "EXISTS (SELECT 1 FROM application_workloads w WHERE w.project_id = s.project_id " +
+    "AND w.organization_id = s.organization_id AND w.status IN ('starting','healthy')) AS hasActiveWorkload " +
+    "FROM application_project_settings s " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE s.project_id = ? LIMIT 1",
+  ).bind(projectId).first<{
+    settingsId: string; previousNodePoolId: string | null;
+    runtimeEnabled: number; hasActiveWorkload: number;
+  }>();
+  if (!assignment) return c.json({ message: "Application project settings not found." }, 404);
+  if (assignment.runtimeEnabled !== 1) {
+    return c.json({ message: "The selected runtime profile is disabled and cannot be assigned for execution." }, 409);
+  }
+  if (assignment.hasActiveWorkload === 1) {
+    return c.json({ message: "Stop or drain the active workload before changing its runtime pool." }, 409);
+  }
+  const pool = await c.env.DB.prepare(
+    "SELECT p.id FROM application_node_pools p " +
+    "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key IS NOT NULL) LIMIT 1",
+  ).bind(body.nodePoolId).first<{ id: string }>();
+  if (!pool) {
+    return c.json({ message: "Runtime pool must be ready, isolated, and contain an enrolled online runtime node." }, 409);
+  }
+  const updated = await c.env.DB.prepare(
+    "UPDATE application_project_settings SET node_pool_id = ?, updated_at = datetime('now') " +
+    "WHERE id = ? AND NOT EXISTS (SELECT 1 FROM application_workloads w WHERE w.project_id = application_project_settings.project_id " +
+    "AND w.organization_id = application_project_settings.organization_id AND w.status IN ('starting','healthy'))",
+  ).bind(pool.id, assignment.settingsId).run();
+  if (Number(updated.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime pool assignment changed concurrently or the project became active." }, 409);
+  }
+  return c.json({
+    assigned: true,
+    projectId,
+    nodePoolId: pool.id,
+    previousNodePoolId: assignment.previousNodePoolId,
+    executionEnabled: false,
+    capacityAllocated: false,
+    message: "Runtime pool assigned as metadata. This does not start an application or allocate physical capacity.",
+  });
+});
+
 app.post("/internal/v1/operator/application-nodes/:nodeId/revoke", async (c) => {
   if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
     return c.json({ message: "Node operator controls are not configured." }, 503);
