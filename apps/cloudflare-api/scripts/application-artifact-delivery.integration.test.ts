@@ -24,6 +24,7 @@ class ArtifactD1 {
     projectId: "project-a",
     deploymentId: "deployment-a",
     nodePoolId: "pool-prod-a",
+    assignedNodeId: "runtime-node-id",
     state: "ready_to_publish",
     releaseArtifactDigest: "",
     releaseArtifactBytes: artifactBytes.byteLength,
@@ -96,8 +97,9 @@ class ArtifactD1 {
               } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
-          const [deploymentId, nodePoolId] = values;
-          if (deploymentId !== db.release.deploymentId || nodePoolId !== db.release.nodePoolId) return null;
+          const [deploymentId, nodePoolId, assignedNodeId] = values;
+          if (deploymentId !== db.release.deploymentId || nodePoolId !== db.release.nodePoolId ||
+              assignedNodeId !== db.node.id) return null;
           if (query.includes("releaseArtifactBytes")) {
             return ({
               releaseId: db.release.releaseId,
@@ -117,13 +119,13 @@ class ArtifactD1 {
           } as T);
         }
         if (query.includes("FROM application_releases r")) {
-          const [deploymentId, nodePoolId] = values;
-          const purpose = values[2];
+          const [deploymentId, nodePoolId, assignedNodeId] = values;
+          const purpose = values[3];
           const stateAllowed = purpose === "validate"
             ? ["artifact_uploaded", "validating", "publishing"].includes(db.release.state)
             : ["ready_to_publish", "publishing"].includes(db.release.state);
-          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId && stateAllowed
-            ? ({ ...db.release } as T) : null;
+          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId &&
+            assignedNodeId === db.node.id && stateAllowed ? ({ ...db.release } as T) : null;
         }
         if (query.includes("SELECT state FROM application_releases")) {
           return ({ state: db.release.state } as T);
