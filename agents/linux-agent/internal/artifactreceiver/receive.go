@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -233,6 +234,10 @@ func reconcilePublishedRelease(baseDir, releaseID, digest string, artifactBytes 
 	decoder.DisallowUnknownFields()
 	var manifest releaseManifest
 	if err := decoder.Decode(&manifest); err != nil { return false, fmt.Errorf("decode existing release manifest: %w", err) }
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return false, errors.New("existing release manifest contains trailing data")
+	}
 	if manifest.Version != 1 || manifest.ReleaseID != releaseID ||
 		manifest.ArtifactSHA256 != digest || manifest.ArtifactBytes != artifactBytes {
 		return false, errors.New("existing release manifest does not match the verified deployment artifact")
