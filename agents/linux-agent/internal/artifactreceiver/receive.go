@@ -14,6 +14,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -44,10 +45,20 @@ type Request struct {
 
 type Result struct {
 	DeploymentID string
-	ReleaseID    string
+	ReleaseID string
 	ArtifactSHA256 string
 	ArtifactBytes int64
-	Archive      deployarchive.Result
+	Archive deployarchive.Result
+	AlreadyPublished bool
+}
+
+const releaseManifestName = ".nexora-release.json"
+
+type releaseManifest struct {
+	Version int `json:"version"`
+	ReleaseID string `json:"releaseId"`
+	ArtifactSHA256 string `json:"artifactSha256"`
+	ArtifactBytes int64 `json:"artifactBytes"`
 }
 
 // Receive verifies a short-lived signed envelope against independently supplied
@@ -114,6 +125,23 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		}
 	}
 
+	alreadyPublished, err := reconcilePublishedRelease(
+		request.BaseDir, claims.DeploymentID, digestHex, claims.ArtifactBytes,
+	)
+	if err != nil {
+		return result, err
+	}
+	if alreadyPublished {
+		return Result{
+			DeploymentID: claims.DeploymentID,
+			ReleaseID: claims.DeploymentID,
+			ArtifactSHA256: digestHex,
+			ArtifactBytes: claims.ArtifactBytes,
+			Archive: archiveResult,
+			AlreadyPublished: true,
+		}, nil
+	}
+
 	stageIDBytes := make([]byte, 16)
 	if _, err := rand.Read(stageIDBytes); err != nil {
 		return result, fmt.Errorf("generate private staging identifier: %w", err)
@@ -137,6 +165,9 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	if extracted != archiveResult {
 		return result, errors.New("archive extraction result differs from pre-publication validation")
 	}
+	if err := writeReleaseManifest(stagePath, claims.DeploymentID, digestHex, claims.ArtifactBytes); err != nil {
+		return result, fmt.Errorf("write publisher release manifest: %w", err)
+	}
 	if err := releasepublisher.Publish(request.BaseDir, stageID, request.Expected.DeploymentID); err != nil {
 		return result, fmt.Errorf("publish immutable release: %w", err)
 	}
@@ -148,4 +179,77 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		ArtifactBytes: claims.ArtifactBytes,
 		Archive: extracted,
 	}, nil
+}
+
+
+func writeReleaseManifest(stagePath, releaseID, digest string, artifactBytes int64) error {
+	manifest := releaseManifest{Version: 1, ReleaseID: releaseID, ArtifactSHA256: digest, ArtifactBytes: artifactBytes}
+	data, err := json.Marshal(manifest)
+	if err != nil { return fmt.Errorf("encode release manifest: %w", err) }
+	path := filepath.Join(stagePath, releaseManifestName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
+	if err != nil { return fmt.Errorf("create release manifest: %w", err) }
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write release manifest: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync release manifest: %w", err)
+	}
+	if err := file.Close(); err != nil { return fmt.Errorf("close release manifest: %w", err) }
+	dir, err := os.Open(stagePath)
+	if err != nil { return fmt.Errorf("open staging release directory: %w", err) }
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil { return fmt.Errorf("sync staging release directory: %w", syncErr) }
+	if closeErr != nil { return fmt.Errorf("close staging release directory: %w", closeErr) }
+	return nil
+}
+
+// reconcilePublishedRelease permits a retry only when the existing immutable
+// release contains a publisher-owned manifest matching the exact verified artifact.
+// If a previous attempt moved the release but failed before activation, retrying
+// completes that activation without overwriting the release contents.
+func reconcilePublishedRelease(baseDir, releaseID, digest string, artifactBytes int64) (bool, error) {
+	releasePath := filepath.Join(baseDir, "releases", releaseID)
+	info, err := os.Lstat(releasePath)
+	if errors.Is(err, os.ErrNotExist) { return false, nil }
+	if err != nil { return false, fmt.Errorf("inspect existing immutable release: %w", err) }
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return false, errors.New("existing release path is not a private real directory")
+	}
+	manifestPath := filepath.Join(releasePath, releaseManifestName)
+	manifestInfo, err := os.Lstat(manifestPath)
+	if err != nil {
+		return false, errors.New("existing release has no trusted publisher manifest; refusing overwrite")
+	}
+	if !manifestInfo.Mode().IsRegular() || manifestInfo.Mode()&os.ModeSymlink != 0 || manifestInfo.Mode().Perm()&0077 != 0 {
+		return false, errors.New("existing release manifest is not a private regular file")
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil { return false, fmt.Errorf("read existing release manifest: %w", err) }
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var manifest releaseManifest
+	if err := decoder.Decode(&manifest); err != nil { return false, fmt.Errorf("decode existing release manifest: %w", err) }
+	if manifest.Version != 1 || manifest.ReleaseID != releaseID ||
+		manifest.ArtifactSHA256 != digest || manifest.ArtifactBytes != artifactBytes {
+		return false, errors.New("existing release manifest does not match the verified deployment artifact")
+	}
+	currentPath := filepath.Join(baseDir, "current")
+	expectedTarget := filepath.Join("releases", releaseID)
+	actualTarget, linkErr := os.Readlink(currentPath)
+	if linkErr == nil && actualTarget == expectedTarget { return true, nil }
+	if linkErr != nil && !errors.Is(linkErr, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect current release link: %w", linkErr)
+	}
+	if err := releasepublisher.Activate(baseDir, releaseID); err != nil {
+		return false, fmt.Errorf("reconcile existing release activation: %w", err)
+	}
+	actualTarget, err = os.Readlink(currentPath)
+	if err != nil || actualTarget != expectedTarget {
+		return false, errors.New("existing release activation could not be confirmed")
+	}
+	return true, nil
 }
