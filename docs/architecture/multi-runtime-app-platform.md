@@ -104,6 +104,16 @@ Node revocation is immediate at the database authorization boundary: set `applic
 
 This protocol authenticates a node but does not itself assign build jobs to nodes. A future dispatch/assignment layer must bind each job to a specific node before any builder is trusted with customer source. This endpoint records metering only; it does not authorize a build, alter deployment status, publish artifacts, or enforce quota at dispatch. Customer execution remains disabled.
 
+## Node operator controls, revocation, and signing-key rotation
+
+Node lifecycle administration is separate from customer workspace roles. The operator endpoints require the dedicated `APPLICATION_NODE_OPERATOR_TOKEN` Worker secret (minimum 32 characters); they fail closed with HTTP 503 when it is not configured and reject missing or invalid bearer credentials with HTTP 401. Do not reuse a customer session token or expose this credential to a node.
+
+- Revoke: `POST /internal/v1/operator/application-nodes/:nodeId/revoke`. Revocation is terminal, invalidates the enrollment-token hash, clears any outstanding rotation challenge, and records an optional bounded reason. The database trigger prevents a revoked node from being reactivated or having its signing key/enrollment hash changed. A replacement must be provisioned as a new node record with a fresh one-time enrollment token.
+- Begin key rotation: `POST /internal/v1/operator/application-nodes/:nodeId/key-rotation-challenge`. The operator receives a one-time random 256-bit challenge; only its SHA-256 digest and a ten-minute expiry are stored. Deliver the challenge to the node through a protected operator channel.
+- Complete key rotation: the node posts `newPublicKey` and `challenge` to `POST /internal/v1/application-nodes/rotate-key`, signed over the exact request body with its current private key and the normal timestamp/nonce headers. The old key proves possession; the challenge is single-use and expires after ten minutes. The D1 batch changes the active key and records old/new key history atomically. Key-history public keys are immutable and retirement can be recorded only once.
+
+The operator credential is not configured by this change. Configure it separately as a Cloudflare Worker secret before using these endpoints; do not put it in source control, D1, logs, or customer-facing settings. No node is revoked or rotated as part of this code change. Node roles now default to `runtime`; a trusted operator must explicitly assign `builder`, and the pool must independently be classified `rootless` or `microvm` before the usage-report gate admits it. These labels are admission controls, not evidence of actual host isolation.
+
 ## Monthly build-minute accounting
 
 Hosting plans carry an explicit monthly application build-minute allowance (default 300 minutes; administrators may configure 0–100,000 minutes). The period is the UTC calendar month. Usage is stored as integer build seconds to avoid rounding each short build upward; API responses expose both seconds and fractional minutes.
