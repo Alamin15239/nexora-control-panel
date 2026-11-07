@@ -275,7 +275,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -3896,15 +3896,18 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
   const row = await c.env.DB.prepare(
     `SELECT p.id, hp.app_build_minutes_month AS buildMinutesLimit,
-            COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed
+            COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed,
+            COALESCE(u.build_minutes_limit, hp.app_build_minutes_month) AS buildMinutesLimit,
+            EXISTS (SELECT 1 FROM application_usage_events e WHERE e.organization_id = p.organization_id
+                    AND e.project_id = p.id AND e.period_start = ?) AS hasUsageEvents
      FROM github_projects p
      JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
      LEFT JOIN application_usage_periods u
        ON u.organization_id = p.organization_id AND u.project_id = p.id AND u.period_start = ?
      WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(periodStart, projectId, identity.organizationId).first<{
-    id: string; buildMinutesLimit: number; buildSecondsUsed: number;
+  ).bind(periodStart, periodStart, projectId, identity.organizationId).first<{
+    id: string; buildMinutesLimit: number; buildSecondsUsed: number; hasUsageEvents: number;
   }>();
   if (!row) return c.json({ message: "GitHub project not found." }, 404);
   const quotaSeconds = row.buildMinutesLimit * 60;
@@ -3915,9 +3918,93 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
     buildMinutesUsed: Math.round((row.buildSecondsUsed / 60) * 100) / 100,
     buildSecondsRemaining: Math.max(0, quotaSeconds - row.buildSecondsUsed),
     quotaExhausted: row.buildSecondsUsed >= quotaSeconds,
-    meteringStatus: "not_connected",
+    meteringStatus: row.hasUsageEvents ? "active" : c.env.APPLICATION_BUILDER_METERING_SECRET ? "configured_no_reports" : "not_connected",
     executionEnabled: false,
-    message: "Usage reporting is available; trusted builder metering and dispatch quota enforcement are not enabled yet.",
+    message: "Usage reports are accepted only from the authenticated isolated builder; build dispatch quota enforcement remains disabled.",
+  });
+});
+
+app.post("/internal/v1/application-build-usage", async (c) => {
+  const secret = c.env.APPLICATION_BUILDER_METERING_SECRET ?? "";
+  if (secret.length < 32) return c.json({ message: "Builder usage ingestion is not configured." }, 503);
+  const timestamp = c.req.header("x-nexora-builder-timestamp") ?? "";
+  const signature = c.req.header("x-nexora-builder-signature") ?? "";
+  const rawBody = await c.req.text();
+  if (rawBody.length > 4096) return c.json({ message: "Request body is too large." }, 413);
+  if (!await verifyBuilderMeteringSignature(secret, timestamp, rawBody, signature)) {
+    return c.json({ message: "Invalid or expired builder signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set(["deploymentId", "buildSeconds", "buildResult"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || body.deploymentId.length < 1 || body.deploymentId.length > 128 ||
+      !Number.isInteger(body.buildSeconds) || Number(body.buildSeconds) < 1 || Number(body.buildSeconds) > 604800 ||
+      !["succeeded", "failed", "cancelled"].includes(String(body.buildResult))) {
+    return c.json({ message: "Invalid builder usage payload." }, 400);
+  }
+  const deploymentId = body.deploymentId;
+  const buildSeconds = Number(body.buildSeconds);
+  const buildResult = String(body.buildResult);
+  const deployment = await c.env.DB.prepare(
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId " +
+    "FROM github_deployments d WHERE d.id = ? AND d.status IN ('cloning', 'installing', 'building') LIMIT 1",
+  ).bind(deploymentId).first<{ id: string; organizationId: string; projectId: string }>();
+  if (!deployment) return c.json({ message: "Deployment is not active or does not exist." }, 409);
+
+  const now = new Date();
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const db = c.env.DB;
+  const results = await db.batch([
+    db.prepare(
+      "INSERT OR IGNORE INTO application_usage_periods " +
+      "(id, organization_id, project_id, period_start, build_seconds_used, build_minutes_limit) " +
+      "SELECT ?, p.organization_id, p.id, ?, 0, hp.app_build_minutes_month " +
+      "FROM github_projects p JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id " +
+      "JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id " +
+      "WHERE p.id = ? AND p.organization_id = ?",
+    ).bind(crypto.randomUUID(), periodStart, deployment.projectId, deployment.organizationId),
+    db.prepare(
+      "INSERT OR IGNORE INTO application_usage_events " +
+      "(id, organization_id, project_id, deployment_id, period_start, build_seconds, source, build_result) " +
+      "SELECT ?, d.organization_id, d.project_id, d.id, ?, ?, 'isolated_builder', ? " +
+      "FROM github_deployments d WHERE d.id = ? AND d.organization_id = ? AND d.project_id = ? " +
+      "AND d.status IN ('cloning', 'installing', 'building') " +
+      "AND EXISTS (SELECT 1 FROM application_usage_periods u WHERE u.organization_id = d.organization_id " +
+      "AND u.project_id = d.project_id AND u.period_start = ?)",
+    ).bind(crypto.randomUUID(), periodStart, buildSeconds, buildResult, deploymentId, deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare(
+      "UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (" +
+      "SELECT COALESCE(SUM(e.build_seconds), 0) FROM application_usage_events e " +
+      "WHERE e.organization_id = ? AND e.project_id = ? AND e.period_start = ? AND e.aggregated_at IS NULL" +
+      "), updated_at = datetime('now') WHERE organization_id = ? AND project_id = ? AND period_start = ?",
+    ).bind(deployment.organizationId, deployment.projectId, periodStart, deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare(
+      "UPDATE application_usage_events SET aggregated_at = datetime('now') " +
+      "WHERE organization_id = ? AND project_id = ? AND period_start = ? AND aggregated_at IS NULL",
+    ).bind(deployment.organizationId, deployment.projectId, periodStart),
+  ]);
+
+  const event = await db.prepare(
+    "SELECT id FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, deploymentId).first<{ id: string }>();
+  if (!event) return c.json({ message: "Usage report could not be associated with an active deployment." }, 409);
+  const usage = await db.prepare(
+    "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
+    "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, periodStart).first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
+  if (!usage) return c.json({ message: "Usage aggregate is unavailable." }, 500);
+  const inserted = Number(results[1]?.meta?.changes ?? 0) > 0;
+  return c.json({
+    accepted: true,
+    duplicate: !inserted,
+    periodStart,
+    buildSecondsUsed: usage.buildSecondsUsed,
+    buildMinutesLimit: usage.buildMinutesLimit,
+    quotaExhausted: usage.buildSecondsUsed >= usage.buildMinutesLimit * 60,
+    quotaEnforcement: "not_enabled",
   });
 });
 
