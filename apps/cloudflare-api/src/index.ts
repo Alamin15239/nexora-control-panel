@@ -3471,10 +3471,17 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     return c.json({ message: "Private artifact storage is not configured; no upload capability was issued." }, 503);
   }
 
+  const applicationRelease = await c.env.DB.prepare(
+    "SELECT id, state FROM application_releases WHERE deployment_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(deployment.id, deployment.organizationId).first<{ id: string; state: string }>();
+  if (applicationRelease && applicationRelease.state !== "queued") {
+    return c.json({ message: "Application release is not waiting for its isolated builder." }, 409);
+  }
+
   const capability = randomHex(32);
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   try {
-    const results = await c.env.DB.batch([
+    const claimStatements = [
       c.env.DB.prepare(
         "INSERT INTO github_deployment_upload_tokens (id, token_hash, organization_id, project_id, deployment_id, repository_id, branch, commit_sha, run_id, run_attempt, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM github_deployments WHERE id = ? AND organization_id = ? AND status = 'queued')",
       ).bind(
@@ -3485,9 +3492,35 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
       c.env.DB.prepare(
         "UPDATE github_deployments SET status = 'building', started_at = datetime('now'), workflow_run_id = ?, workflow_run_attempt = ?, workflow_sha = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(runId, runAttempt, workflowSha, deployment.id, deployment.organizationId),
-    ]);
-    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
-      return c.json({ message: "A runner has already claimed this deployment." }, 409);
+    ];
+    if (applicationRelease) {
+      claimStatements.push(c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'authorized', updated_at = datetime('now') " +
+        "WHERE id = ? AND organization_id = ? AND state = 'queued'",
+      ).bind(applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'queued', 'authorized', 'builder', ?, 'builder_authorized', ? " +
+        "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'authorized'",
+      ).bind(crypto.randomUUID(), runId, JSON.stringify({ workflowSha }), applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'building', started_at = datetime('now'), updated_at = datetime('now') " +
+        "WHERE id = ? AND organization_id = ? AND state = 'authorized'",
+      ).bind(applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'authorized', 'building', 'builder', ?, 'build_started', ? " +
+        "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(crypto.randomUUID(), runId, JSON.stringify({ workflowSha }), applicationRelease.id, deployment.organizationId));
+    }
+    const results = await c.env.DB.batch(claimStatements);
+    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1 ||
+        (applicationRelease && ((results[2]?.meta.changes ?? 0) !== 1 ||
+          (results[3]?.meta.changes ?? 0) !== 1 || (results[4]?.meta.changes ?? 0) !== 1 ||
+          (results[5]?.meta.changes ?? 0) !== 1))) {
+      return c.json({ message: "A runner has already claimed this deployment or the application release could not enter building state." }, 409);
     }
   } catch {
     return c.json({ message: "This deployment already has an upload capability or could not be claimed." }, 409);
