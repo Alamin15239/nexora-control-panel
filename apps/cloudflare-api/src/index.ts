@@ -25,7 +25,6 @@ type Bindings = {
   GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_ISSUER?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE?: string;
-  APPLICATION_BUILDER_METERING_SECRET?: string;
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
 };
@@ -225,20 +224,31 @@ async function issueSession(db: D1Database, userId: string, organizationId: stri
   };
 }
 
-async function verifyBuilderMeteringSignature(secret: string, timestamp: string, rawBody: string, signature: string) {
-  if (secret.length < 32 || !/^\d{10}$/.test(timestamp)) return false;
+function decodeHex(value: string, expectedBytes: number): Uint8Array | null {
+  if (value.length !== expectedBytes * 2 || !/^[a-f0-9]+$/i.test(value)) return null;
+  const bytes = new Uint8Array(expectedBytes);
+  for (let index = 0; index < expectedBytes; index++) {
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+async function verifyNodeSignature(publicKeyHex: string, timestamp: string, nonce: string, rawBody: string, signatureHex: string) {
+  if (!/^\\d{10}$/.test(timestamp) || !/^[a-f0-9]{32,128}$/i.test(nonce)) return false;
   const issuedAt = Number(timestamp);
   if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
-  const match = /^sha256=([a-f0-9]{64})$/i.exec(signature);
-  if (!match) return false;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(timestamp + "." + rawBody)));
-  const expected = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const supplied = match[1].toLowerCase();
-  let difference = 0;
-  for (let index = 0; index < expected.length; index++) difference |= expected.charCodeAt(index) ^ supplied.charCodeAt(index);
-  return difference === 0;
+  const publicKey = decodeHex(publicKeyHex, 32);
+  const signature = decodeHex(signatureHex, 64);
+  if (!publicKey || !signature) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
+    const message = new TextEncoder().encode(timestamp + "." + nonce + "." + rawBody);
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, signature, message);
+  } catch {
+    return false;
+  }
 }
+
 async function bearerIdentity(request: Request, db: D1Database) {
   const authorization = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
@@ -3923,15 +3933,59 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
   });
 });
 
-app.post("/internal/v1/application-build-usage", async (c) => {
-  const secret = c.env.APPLICATION_BUILDER_METERING_SECRET ?? "";
-  if (secret.length < 32) return c.json({ message: "Builder usage ingestion is not configured." }, 503);
-  const timestamp = c.req.header("x-nexora-builder-timestamp") ?? "";
-  const signature = c.req.header("x-nexora-builder-signature") ?? "";
+app.post("/internal/v1/application-nodes/enroll", async (c) => {
   const rawBody = await c.req.text();
   if (rawBody.length > 4096) return c.json({ message: "Request body is too large." }, 413);
-  if (!await verifyBuilderMeteringSignature(secret, timestamp, rawBody, signature)) {
-    return c.json({ message: "Invalid or expired builder signature." }, 401);
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["nodeIdentity", "enrollmentToken", "publicKey", "agentVersion"].includes(key)) ||
+      typeof body.nodeIdentity !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(body.nodeIdentity) ||
+      typeof body.enrollmentToken !== "string" || !/^[a-f0-9]{64}$/i.test(body.enrollmentToken) ||
+      typeof body.publicKey !== "string" || !/^[a-f0-9]{64}$/i.test(body.publicKey) ||
+      typeof body.agentVersion !== "string" || body.agentVersion.length < 1 || body.agentVersion.length > 64 ||
+      /[\u0000-\u001f\u007f]/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid node enrollment payload." }, 400);
+  }
+  const tokenHash = await sha256(body.enrollmentToken);
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET signing_public_key = ?, enrollment_consumed_at = datetime('now'), " +
+    "status = 'online', agent_version = ?, last_heartbeat_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE node_identity = ? AND enrollment_key_hash = ? AND enrollment_consumed_at IS NULL " +
+    "AND signing_public_key IS NULL AND status = 'pending' " +
+    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready')",
+  ).bind(body.publicKey.toLowerCase(), body.agentVersion, body.nodeIdentity, tokenHash).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Enrollment token is invalid, already consumed, or the node pool is not ready." }, 409);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT id, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
+    "FROM application_nodes WHERE node_identity = ? LIMIT 1",
+  ).bind(body.nodeIdentity).first<{ id: string; nodeIdentity: string; status: string; agentVersion: string }>();
+  if (!node) return c.json({ message: "Node enrollment could not be confirmed." }, 500);
+  return c.json({ enrolled: true, node: { id: node.id, identity: node.nodeIdentity, status: node.status, agentVersion: node.agentVersion },
+    credentialModel: "ed25519_per_node", executionEnabled: false });
+});
+
+app.post("/internal/v1/application-build-usage", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
+    return c.json({ message: "Node identity is required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length > 4096) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND p.status = 'ready' " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
   }
   let input: unknown;
   try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
@@ -3947,15 +4001,39 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   const deploymentId = body.deploymentId;
   const buildSeconds = Number(body.buildSeconds);
   const buildResult = String(body.buildResult);
-  const deployment = await c.env.DB.prepare(
+  const db = c.env.DB;
+  const priorEvent = await db.prepare(
+    "SELECT e.id, e.period_start AS periodStart, e.organization_id AS organizationId, e.project_id AS projectId " +
+    "FROM application_usage_events e WHERE e.deployment_id = ? AND e.node_id = ? LIMIT 1",
+  ).bind(deploymentId, node.id).first<{ id: string; periodStart: string; organizationId: string; projectId: string }>();
+
+  if (priorEvent) {
+    const priorUsage = await db.prepare(
+      "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
+      "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
+    ).bind(priorEvent.organizationId, priorEvent.projectId, priorEvent.periodStart)
+      .first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
+    if (!priorUsage) return c.json({ message: "Usage aggregate is unavailable." }, 500);
+    return c.json({ accepted: true, duplicate: true, periodStart: priorEvent.periodStart,
+      buildSecondsUsed: priorUsage.buildSecondsUsed, buildMinutesLimit: priorUsage.buildMinutesLimit,
+      quotaExhausted: priorUsage.buildSecondsUsed >= priorUsage.buildMinutesLimit * 60,
+      quotaEnforcement: "not_enabled" });
+  }
+
+  const deployment = await db.prepare(
     "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId " +
     "FROM github_deployments d WHERE d.id = ? AND d.status IN ('cloning', 'installing', 'building') LIMIT 1",
   ).bind(deploymentId).first<{ id: string; organizationId: string; projectId: string }>();
   if (!deployment) return c.json({ message: "Deployment is not active or does not exist." }, 409);
 
+  const nonceResult = await db.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
-  const db = c.env.DB;
   const results = await db.batch([
     db.prepare(
       "INSERT OR IGNORE INTO application_usage_periods " +
@@ -3967,13 +4045,13 @@ app.post("/internal/v1/application-build-usage", async (c) => {
     ).bind(crypto.randomUUID(), periodStart, deployment.projectId, deployment.organizationId),
     db.prepare(
       "INSERT OR IGNORE INTO application_usage_events " +
-      "(id, organization_id, project_id, deployment_id, period_start, build_seconds, source, build_result) " +
-      "SELECT ?, d.organization_id, d.project_id, d.id, ?, ?, 'isolated_builder', ? " +
+      "(id, organization_id, project_id, deployment_id, period_start, build_seconds, source, build_result, node_id) " +
+      "SELECT ?, d.organization_id, d.project_id, d.id, ?, ?, 'isolated_builder', ?, ? " +
       "FROM github_deployments d WHERE d.id = ? AND d.organization_id = ? AND d.project_id = ? " +
       "AND d.status IN ('cloning', 'installing', 'building') " +
       "AND EXISTS (SELECT 1 FROM application_usage_periods u WHERE u.organization_id = d.organization_id " +
       "AND u.project_id = d.project_id AND u.period_start = ?)",
-    ).bind(crypto.randomUUID(), periodStart, buildSeconds, buildResult, deploymentId, deployment.organizationId, deployment.projectId, periodStart),
+    ).bind(crypto.randomUUID(), periodStart, buildSeconds, buildResult, node.id, deploymentId, deployment.organizationId, deployment.projectId, periodStart),
     db.prepare(
       "UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (" +
       "SELECT COALESCE(SUM(e.build_seconds), 0) FROM application_usage_events e " +
@@ -3984,11 +4062,12 @@ app.post("/internal/v1/application-build-usage", async (c) => {
       "UPDATE application_usage_events SET aggregated_at = datetime('now') " +
       "WHERE organization_id = ? AND project_id = ? AND period_start = ? AND aggregated_at IS NULL",
     ).bind(deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare("UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").bind(node.id),
   ]);
 
   const event = await db.prepare(
-    "SELECT id, period_start AS periodStart FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? LIMIT 1",
-  ).bind(deployment.organizationId, deployment.projectId, deploymentId).first<{ id: string; periodStart: string }>();
+    "SELECT id, period_start AS periodStart FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? AND node_id = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, deploymentId, node.id).first<{ id: string; periodStart: string }>();
   if (!event) return c.json({ message: "Usage report could not be associated with an active deployment." }, 409);
   const usage = await db.prepare(
     "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
