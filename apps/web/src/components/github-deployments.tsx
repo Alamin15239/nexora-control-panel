@@ -10,7 +10,8 @@ type Account = { id: string; username: string; primary_domain: string | null; st
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
 
 type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
-type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number };
+type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
+type RuntimeUsage = { periodStart: string; buildMinutesLimit: number; buildMinutesUsed: number; buildSecondsRemaining: number; quotaExhausted: boolean; meteringStatus: string; executionEnabled: boolean };
 
 function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -27,7 +28,7 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [memoryMiB, setMemoryMiB] = useState("512");
   const [diskMiB, setDiskMiB] = useState("2048");
   const [processLimit, setProcessLimit] = useState("128");
-  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);
+  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);\n  const [usage, setUsage] = useState<RuntimeUsage | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -39,15 +40,15 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
     if (!next || profiles.length) return;
     setLoading(true); setError("");
     try {
-      const [profileResponse, settingsResponse] = await Promise.all([
+      const [profileResponse, settingsResponse, usageResponse] = await Promise.all([
         fetch("/api/control/applications/runtime-profiles", { cache: "no-store" }),
-        fetch(`/api/control/applications/projects/${projectId}/settings`, { cache: "no-store" }),
+        fetch(`/api/control/applications/projects/${projectId}/settings`, { cache: "no-store" }),\n        fetch(`/api/control/applications/projects/${projectId}/usage`, { cache: "no-store" }),
       ]);
-      const [profileData, settingsData] = await Promise.all([profileResponse.json(), settingsResponse.json()]);
+      const [profileData, settingsData, usageData] = await Promise.all([profileResponse.json(), settingsResponse.json(), usageResponse.json()]);
       if (!profileResponse.ok) throw new Error(profileData.message ?? "Unable to load runtime catalog.");
-      if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");
+      if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");\n      if (!usageResponse.ok) throw new Error(usageData.message ?? "Unable to load monthly build usage.");
       setProfiles(profileData.profiles ?? []);
-      setPlanLimits(settingsData.planLimits ?? null);
+      setPlanLimits(settingsData.planLimits ?? null);\n      setUsage(usageData);
       const current = settingsData.settings;
       if (current) {
         setRuntimeProfileId(current.runtimeProfileId ?? "");
@@ -107,6 +108,16 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
     {expanded && <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
       {error && <p role="alert" className="mb-3 text-xs text-rose-700">{error}</p>}
       {notice && <p role="status" className="mb-3 text-xs text-emerald-700">{notice}</p>}
+      {usage && <div className="mb-3 rounded-lg border border-slate-200 bg-white p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-slate-700">Monthly build allowance · {usage.periodStart}</p>
+          <span className="text-[11px] text-slate-500">{usage.buildMinutesUsed.toLocaleString()} / {usage.buildMinutesLimit.toLocaleString()} minutes</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-blue-600" style={{ width: `${usage.buildMinutesLimit > 0 ? Math.min(100, (usage.buildMinutesUsed / usage.buildMinutesLimit) * 100) : usage.quotaExhausted ? 100 : 0}%` }}/>
+        </div>
+        <p className="mt-2 text-[11px] text-amber-700">{usage.meteringStatus === "not_connected" ? "Metering is not connected yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted." : "Usage is measured by the isolated builder."}</p>
+      </div>}
       {loading ? <p className="text-xs text-slate-500">Loading runtime catalog…</p> : <form onSubmit={save} className="grid gap-3 md:grid-cols-2">
         <label className="space-y-1 text-xs font-medium text-slate-700 md:col-span-2">Runtime profile
           <select required value={runtimeProfileId} onChange={event => {
