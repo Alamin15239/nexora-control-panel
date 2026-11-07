@@ -155,6 +155,7 @@ func TestUpsertManyIsAtomicAndRejectsDuplicateIDs(t *testing.T) {
 		t.Fatal("invalid batch was accepted")
 	}
 	duplicate := second
+	duplicate.WorkloadID = first.WorkloadID
 	if err := store.UpsertMany([]WorkloadState{first, duplicate}); err == nil {
 		t.Fatal("duplicate workload ID was accepted")
 	}
