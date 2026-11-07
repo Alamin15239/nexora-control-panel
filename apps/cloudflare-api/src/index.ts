@@ -234,7 +234,7 @@ function decodeHex(value: string, expectedBytes: number): Uint8Array | null {
 }
 
 async function verifyNodeSignature(publicKeyHex: string, timestamp: string, nonce: string, rawBody: string, signatureHex: string) {
-  if (!/^\\d{10}$/.test(timestamp) || !/^[a-f0-9]{32,128}$/i.test(nonce)) return false;
+  if (!/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32,128}$/i.test(nonce)) return false;
   const issuedAt = Number(timestamp);
   if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
   const publicKey = decodeHex(publicKeyHex, 32);
