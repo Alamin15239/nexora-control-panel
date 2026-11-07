@@ -24,6 +24,7 @@ type Spec struct {
 	ReleaseID string
 	ImageDigest string
 	ReleaseDir string
+	PersistentDataDir string
 	HostPort int
 	ContainerPort int
 	CPUMillis int
@@ -59,6 +60,17 @@ func (p Podman) runner() Runner {
 	return OSRunner{}
 }
 
+func validatePersistentDataDir(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("persistent data directory must be an absolute clean path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return errors.New("persistent data directory must be a real directory not writable by group or others")
+	}
+	return nil
+}
+
 func validateSpec(spec Spec) error {
 	if !idPattern.MatchString(spec.WorkloadID) || !idPattern.MatchString(spec.ReleaseID) {
 		return errors.New("workload and release IDs must be opaque platform identifiers")
@@ -73,6 +85,7 @@ func validateSpec(spec Spec) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
 		return errors.New("release directory must be a real directory not writable by group or others")
 	}
+	if err := validatePersistentDataDir(spec.PersistentDataDir); err != nil { return err }
 	if spec.HostPort < 1024 || spec.HostPort > 65535 || spec.ContainerPort < 1 || spec.ContainerPort > 65535 {
 		return errors.New("assigned host and container ports are outside permitted ranges")
 	}
@@ -135,6 +148,7 @@ func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
 		"--pid", "private",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m",
 		"--mount", "type=bind,src=" + spec.ReleaseDir + ",dst=/app,ro=true",
+		"--mount", "type=bind,src=" + spec.PersistentDataDir + ",dst=/var/lib/nexora,rw=true",
 		"--workdir", "/app",
 		spec.ImageDigest,
 	}
