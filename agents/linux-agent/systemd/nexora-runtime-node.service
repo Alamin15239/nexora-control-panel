@@ -1,0 +1,43 @@
+[Unit]
+Description=Nexora Isolated Application Runtime Node Control Client
+Documentation=https://github.com/Alamin15239/nexora-control-panel
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nexora-runtime
+Group=nexora-runtime
+ExecStart=/usr/local/bin/nexora-runtime-node --config /etc/nexora-runtime/node.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+UMask=0077
+
+# The polling client is read-only and must not be able to administer the host.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+StateDirectory=nexora-runtime
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/nexora-runtime
+ReadOnlyPaths=/etc/nexora-runtime
+
+[Install]
+WantedBy=multi-user.target
