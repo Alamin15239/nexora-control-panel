@@ -122,3 +122,26 @@ func TestPollRequiresHTTPSOutsideLoopback(t *testing.T) {
 		t.Fatal("non-loopback HTTP control-plane URL was accepted")
 	}
 }
+
+func TestPollProofVerifiesAgainstNodePublicKey(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil { t.Fatal(err) }
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proof := appnodeauth.Proof{
+			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
+			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
+			Signature: r.Header.Get("X-Nexora-Node-Signature"),
+		}
+		if err := appnodeauth.Verify(public, "runtime-a", http.MethodGet, desiredStatePath, nil, proof, now); err != nil {
+			t.Errorf("request signature verification failed: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(testSnapshot())
+	}))
+	defer server.Close()
+	client := &Client{
+		BaseURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: private,
+		HTTPClient: server.Client(), Now: func() time.Time { return now },
+	}
+	if _, err := client.Poll(context.Background()); err != nil { t.Fatal(err) }
+}
