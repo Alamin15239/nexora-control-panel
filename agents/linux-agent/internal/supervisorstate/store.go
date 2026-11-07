@@ -79,6 +79,22 @@ func (s *Store) Load() ([]WorkloadState, error) {
 	return out, nil
 }
 
+// Get returns one persisted workload snapshot without exposing the internal map.
+func (s *Store) Get(workloadID string) (WorkloadState, bool, error) {
+	if !opaqueID.MatchString(workloadID) {
+		return WorkloadState{}, false, errors.New("invalid workload identifier")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := s.readLocked()
+	if err != nil {
+		if os.IsNotExist(err) { return WorkloadState{}, false, nil }
+		return WorkloadState{}, false, err
+	}
+	item, ok := current.Workloads[workloadID]
+	return item, ok, nil
+}
+
 func (s *Store) Upsert(item WorkloadState) error {
 	if err := validate(item); err != nil {
 		return err
