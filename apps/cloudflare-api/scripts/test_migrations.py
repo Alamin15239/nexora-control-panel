@@ -50,6 +50,27 @@ VALUES ('project-a','org-a','account-a','connection-a','repo-1','owner/repo')"""
 db.execute("""INSERT INTO github_deployments
 (id,organization_id,project_id,commit_sha,branch,trigger_type)
 VALUES ('deployment-a','org-a','project-a',?,'main','manual')""", ("a" * 40,))
+db.execute("""INSERT INTO application_node_pools
+(id,name,environment,region,runtime_engine,status)
+VALUES ('pool-a','Test builder pool','staging','test-region','containerd','ready')""")
+db.execute("""INSERT INTO application_nodes
+(id,node_pool_id,node_identity,enrollment_key_hash,status)
+VALUES ('node-a','pool-a','builder-a',?,'pending')""", ("b" * 64,))
+must_reject(
+    "invalid Ed25519 public key encoding",
+    "UPDATE application_nodes SET signing_public_key='not-a-public-key' WHERE id='node-a'",
+    (),
+)
+db.execute("UPDATE application_nodes SET signing_public_key=? WHERE id='node-a'", ("c" * 64,))
+db.execute("""INSERT INTO application_node_request_nonces(node_id,nonce,expires_at)
+VALUES ('node-a',?,'2026-11-07 00:10:00')""", ("d" * 32,))
+must_reject(
+    "duplicate per-node request nonce",
+    """INSERT INTO application_node_request_nonces(node_id,nonce,expires_at)
+    VALUES ('node-a',?,'2026-11-07 00:10:00')""",
+    ("d" * 32,),
+)
+
 
 def must_reject(label, sql, args):
     try:
@@ -99,8 +120,8 @@ db.execute("""INSERT INTO application_usage_periods
 (id,organization_id,project_id,period_start,build_seconds_used,build_minutes_limit)
 VALUES ('usage-a','org-a','project-a','2026-11-01',0,300)""")
 db.execute("""INSERT INTO application_usage_events
-(id,organization_id,project_id,deployment_id,period_start,build_seconds,source)
-VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder')""")
+(id,organization_id,project_id,deployment_id,period_start,build_seconds,source,node_id)
+VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder','node-a')""")
 db.execute("""UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (
   SELECT COALESCE(SUM(build_seconds),0) FROM application_usage_events
   WHERE organization_id='org-a' AND project_id='project-a'
@@ -132,6 +153,11 @@ must_reject(
     (),
 )
 must_reject(
+    "usage event node attribution is immutable",
+    "UPDATE application_usage_events SET node_id=NULL WHERE id='usage-event-a'",
+    (),
+)
+must_reject(
     "aggregated usage event payload mutation",
     "UPDATE application_usage_events SET build_seconds=999 WHERE id='usage-event-a'",
     (),
@@ -150,4 +176,4 @@ must_reject(
 )
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, usage ledger idempotency/tenant guards/immutable aggregation, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, release transitions, and foreign keys verified.")
