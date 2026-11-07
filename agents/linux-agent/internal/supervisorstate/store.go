@@ -69,6 +69,9 @@ func (s *Store) Load() ([]WorkloadState, error) {
 	defer s.mu.Unlock()
 	data, err := s.readLocked()
 	if err != nil {
+		if os.IsNotExist(err) {
+			return []WorkloadState{}, nil
+		}
 		return nil, err
 	}
 	out := make([]WorkloadState, 0, len(data.Workloads))
