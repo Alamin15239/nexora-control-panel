@@ -33,11 +33,16 @@ class ArtifactD1 {
     artifactSha256: "",
     hostingAccountId: "hosting-a",
     repositoryId: "123456789",
+    healthCheckPath: "/ready",
+    previousActiveReleaseId: "previous-release",
+    previousDeploymentId: "previous-deployment",
   };
   nonces = new Set<string>();
   lastSignatureUpdated = false;
   validationEventDetails: string | null = null;
   activationEventDetails: string | null = null;
+  healthEventDetails: string | null = null;
+  workloadStatus: string | null = null;
 
   async batch(statements: Array<{ run: () => Promise<{ success: boolean; meta: { changes: number } }> }>) {
     const results = [];
@@ -70,7 +75,25 @@ class ArtifactD1 {
           if (query.includes("release_files_activated")) {
             return db.activationEventDetails === details ? ({ id: "activation-event" } as T) : null;
           }
+          if (query.includes("health_check_succeeded") || query.includes("health_check_failed")) {
+            return db.healthEventDetails === details ? ({ id: "health-event" } as T) : null;
+          }
           return db.validationEventDetails === details ? ({ id: "validation-event" } as T) : null;
+        }
+        if (query.includes("FROM application_releases r") && query.includes("healthCheckPath")) {
+          const [deploymentId, nodePoolId] = values;
+          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId
+            ? ({
+                releaseRowId: db.release.releaseId,
+                state: db.release.state,
+                artifactDigest: db.release.releaseArtifactDigest,
+                deploymentArtifactDigest: db.release.artifactSha256,
+                projectId: db.release.projectId,
+                organizationId: db.release.organizationId,
+                healthCheckPath: db.release.healthCheckPath,
+                previousActiveReleaseId: db.release.previousActiveReleaseId,
+                previousDeploymentId: db.release.previousDeploymentId,
+              } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
           const [deploymentId, nodePoolId] = values;
@@ -133,6 +156,23 @@ class ArtifactD1 {
           if (db.release.state !== "publishing") return { success: true, meta: { changes: 0 } };
           db.release.state = "health_checking";
           return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE application_releases SET state = 'succeeded'")) {
+          if (db.release.state !== "health_checking") return { success: true, meta: { changes: 0 } };
+          db.release.state = "succeeded";
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE application_releases SET state = 'failed'")) {
+          if (db.release.state !== "health_checking") return { success: true, meta: { changes: 0 } };
+          db.release.state = "failed";
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("INSERT INTO application_release_events") &&
+            (query.includes("health_check_succeeded") || query.includes("health_check_failed"))) {
+          db.healthEventDetails = String(values[2]);
+        }
+        if (query.includes("INSERT INTO application_workloads")) {
+          db.workloadStatus = query.includes("'healthy'") ? "healthy" : "unhealthy";
         }
         if (query.includes("INSERT INTO application_release_events") && query.includes("archive_validated_for_publish")) {
           db.validationEventDetails = String(values[2]);
@@ -237,6 +277,38 @@ async function signedActivationRequest(
   nodeIdentity = "runtime-a",
 ) {
   const path = "/internal/v1/application-nodes/releases/activated";
+  const rawBody = JSON.stringify(report);
+  const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
+  const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const message = [
+    "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, "POST", path, bodyHashHex,
+  ].join("\n");
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(message)));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": nodeIdentity,
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+    body: rawBody,
+  });
+}
+
+async function signedHealthCheckRequest(
+  privateKey: CryptoKey,
+  report: {
+    deploymentId: string; artifactSha256: string; probePath: string;
+    healthStatus: "healthy" | "unhealthy"; httpStatus: number; durationMs: number; failureCode?: string;
+  },
+  nonce = "7".repeat(32),
+  nodeIdentity = "runtime-a",
+) {
+  const path = "/internal/v1/application-nodes/releases/health-check";
   const rawBody = JSON.stringify(report);
   const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
   const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -554,4 +626,95 @@ test("release activation rejects digest mismatch, unassigned node, and replayed 
     deploymentId: "deployment-a", releaseId: "deployment-a", artifactSha256: await artifactDigestPromise,
   }, nonce), env, {} as ExecutionContext);
   assert.equal(replay.status, 409);
+});
+
+
+test("signed successful health check marks the release succeeded and workload healthy", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "healthy" as const, httpStatus: 200, durationMs: 37,
+  };
+  const response = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { accepted: boolean; releaseState: string; workloadHealth: string };
+  assert.equal(body.accepted, true);
+  assert.equal(body.releaseState, "succeeded");
+  assert.equal(body.workloadHealth, "healthy");
+  assert.equal(db.release.state, "succeeded");
+  assert.equal(db.workloadStatus, "healthy");
+  assert.ok(db.healthEventDetails);
+});
+
+test("signed failed health check records failure and returns the prior rollback target", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "unhealthy" as const, httpStatus: 503,
+    durationMs: 30000, failureCode: "http_5xx",
+  };
+  const response = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    releaseState: string; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+  };
+  assert.equal(body.releaseState, "failed");
+  assert.equal(body.rollbackRequired, true);
+  assert.equal(body.rollbackTargetDeploymentId, "previous-deployment");
+  assert.equal(db.release.state, "failed");
+  assert.equal(db.workloadStatus, "unhealthy");
+});
+
+test("health-check report rejects mismatched configured path and digest", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const env = { DB: db as unknown as D1Database };
+  const wrongPath = await worker.fetch(await signedHealthCheckRequest(node.privateKey, {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/wrong", healthStatus: "healthy", httpStatus: 200, durationMs: 1,
+  }), env, {} as ExecutionContext);
+  assert.equal(wrongPath.status, 409);
+  const wrongDigest = await worker.fetch(await signedHealthCheckRequest(node.privateKey, {
+    deploymentId: "deployment-a", artifactSha256: "f".repeat(64),
+    probePath: "/ready", healthStatus: "healthy", httpStatus: 200, durationMs: 1,
+  }, "6".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(wrongDigest.status, 409);
+  assert.equal(db.release.state, "health_checking");
+});
+
+test("successful health-check report is idempotent only for an exact duplicate", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "healthy" as const, httpStatus: 200, durationMs: 37,
+  };
+  const env = { DB: db as unknown as D1Database };
+  const first = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "1".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const duplicate = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "2".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(duplicate.status, 200);
+  const body = await duplicate.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(body.duplicate, true);
+  assert.equal(body.releaseState, "succeeded");
 });
