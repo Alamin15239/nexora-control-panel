@@ -75,7 +75,7 @@ class ArtifactD1 {
           if (query.includes("release_files_activated")) {
             return db.activationEventDetails === details ? ({ id: "activation-event" } as T) : null;
           }
-          if (query.includes("health_check_succeeded") || query.includes("health_check_failed")) {
+          if (values[1] === "health_check_succeeded" || values[1] === "health_check_failed") {
             return db.healthEventDetails === details ? ({ id: "health-event" } as T) : null;
           }
           return db.validationEventDetails === details ? ({ id: "validation-event" } as T) : null;
