@@ -632,8 +632,9 @@ test("node operator controls fail closed when the operator secret is not configu
 
 test("node revocation requires operator authorization and is terminal", async () => {
   const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
   db.node.status = "online";
-  db.node.signingPublicKey = "a".repeat(64);
+  db.node.signingPublicKey = pair.publicKeyHex;
   const denied = await worker.fetch(operatorRequest("/internal/v1/operator/application-nodes/node-a/revoke", "wrong-token"),
     environment(db, operatorToken), {} as ExecutionContext);
   assert.equal(denied.status, 401);
@@ -641,7 +642,7 @@ test("node revocation requires operator authorization and is terminal", async ()
     { reason: "operator security test" }), environment(db, operatorToken), {} as ExecutionContext);
   assert.equal(revoked.status, 200);
   assert.equal(db.node.status, "revoked");
-  const heartbeat = await worker.fetch(await signedNodeRequest({ agentVersion: "0.3.0" }, await createNodeKeyPair().then(x => x.privateKey),
+  const heartbeat = await worker.fetch(await signedNodeRequest({ agentVersion: "0.3.0" }, pair.privateKey,
     "1".repeat(32), String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
     environment(db, operatorToken), {} as ExecutionContext);
   assert.equal(heartbeat.status, 401);
