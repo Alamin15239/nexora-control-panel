@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Activity, ArrowUpRight, CheckCircle2, ChevronDown, Cloud, Database,
+  Activity, CheckCircle2, ChevronDown, Cloud, Database,
   FolderOpen, Globe2, HardDrive, LockKeyhole, Mail, Network, RefreshCw,
   Server, ShieldCheck, Users,
 } from "lucide-react";
@@ -23,6 +23,8 @@ type HostingAccount = {
   account_role: string;
 };
 type AccountOverview = HostingAccount & { websites: number; databases: number };
+type CustomerDomain = { id: string; name: string; document_root: string; is_primary: number; job_status: string | null; created_at: string };
+type CustomerDatabase = { id: string; name: string; engine: string; status: string; active_users: number; created_at: string };
 
 const modules = [
   { label: "Websites & Domains", description: "Manage domains and website settings", icon: Globe2 },
@@ -102,6 +104,37 @@ export default function CustomerCpanelPage() {
     return () => { active = false; };
   }, [selectedId, router]);
 
+  useEffect(() => {
+    if (!selectedId) {
+      setDomains([]);
+      setDatabases([]);
+      return;
+    }
+    let active = true;
+    setResourcesLoading(true);
+    Promise.all([
+      fetch("/api/control/customer/hosting-accounts/" + encodeURIComponent(selectedId) + "/domains", { cache: "no-store" }),
+      fetch("/api/control/customer/hosting-accounts/" + encodeURIComponent(selectedId) + "/databases", { cache: "no-store" }),
+    ]).then(async ([domainResponse, databaseResponse]) => {
+      const [domainData, databaseData] = await Promise.all([domainResponse.json(), databaseResponse.json()]);
+      if (domainResponse.status === 401 || databaseResponse.status === 401) {
+        router.replace("/login");
+        throw new Error("Your session has expired.");
+      }
+      if (!domainResponse.ok) throw new Error(domainData.message || "Unable to load website inventory.");
+      if (!databaseResponse.ok) throw new Error(databaseData.message || "Unable to load database inventory.");
+      if (active) {
+        setDomains(domainData.domains ?? []);
+        setDatabases(databaseData.databases ?? []);
+      }
+    }).catch(caught => {
+      if (active) setError(caught instanceof Error ? caught.message : "Unable to load account resources.");
+    }).finally(() => {
+      if (active) setResourcesLoading(false);
+    });
+    return () => { active = false; };
+  }, [selectedId, router]);
+
   async function signOut() {
     await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
@@ -178,7 +211,17 @@ export default function CustomerCpanelPage() {
               <div className="mt-4 space-y-3">{modules.map(module => <div key={module.label} className="flex items-center gap-3 rounded-xl border border-slate-100 px-3 py-3"><span className="grid h-8 w-8 place-items-center rounded-lg bg-slate-50 text-slate-500"><module.icon size={16} /></span><div className="min-w-0 flex-1"><p className="text-xs font-semibold text-slate-700">{module.label}</p><p className="mt-0.5 text-[10px] text-slate-400">Access integration pending</p></div><LockKeyhole size={14} className="text-slate-300" /></div>)}</div>
             </div>
           </div>
-          <p className="mt-5 flex items-start gap-2 text-[11px] leading-5 text-slate-400"><Users size={14} className="mt-0.5 shrink-0" /> Account access is granted by your hosting administrator. The customer portal does not expose WHM administration or unscoped hosting operations.</p>
+          <div className="mt-6 grid gap-5 xl:grid-cols-2">
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold text-slate-900">Websites & domains</h2><p className="mt-1 text-xs text-slate-500">Domains assigned to this hosting account</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{domains.length}</span></div>
+              {resourcesLoading ? <p className="p-5 text-xs text-slate-400">Loading websites…</p> : domains.length === 0 ? <p className="p-5 text-xs text-slate-400">No domains are registered to this account.</p> : <div className="divide-y divide-slate-100">{domains.map(domain => <div key={domain.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5"><div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{domain.name}{domain.is_primary ? <span className="ml-2 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">Primary</span> : null}</p><p className="mt-1 break-all text-[11px] text-slate-400">{domain.document_root}</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{domain.job_status || "Registered"}</span></div>)}</div>}
+            </section>
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold text-slate-900">Databases</h2><p className="mt-1 text-xs text-slate-500">Database inventory · credentials are not displayed</p></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{databases.length}</span></div>
+              {resourcesLoading ? <p className="p-5 text-xs text-slate-400">Loading databases…</p> : databases.length === 0 ? <p className="p-5 text-xs text-slate-400">No databases are registered to this account.</p> : <div className="divide-y divide-slate-100">{databases.map(database => <div key={database.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5"><div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{database.name}</p><p className="mt-1 text-[11px] text-slate-400">{database.engine} · {database.active_users} active users</p></div><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold "+(database.status==="ACTIVE"?"bg-emerald-50 text-emerald-700":"bg-amber-50 text-amber-700")}>{database.status}</span></div>)}</div>}
+            </section>
+          </div>
+          <p className="mt-5 flex items-start gap-2 text-[11px] leading-5 text-slate-400"><Users size={14} className="mt-0.5 shrink-0" /> Website and database inventory is read-only at this stage. Creating, deleting, editing or restoring resources remains unavailable until the matching customer permission checks and agent operations are implemented.</p>
         </>}
       </section>
     </div>
