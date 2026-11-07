@@ -141,7 +141,9 @@ func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
 	created, err := p.runner().Run(ctx, args...)
 	if err != nil { return "", fmt.Errorf("create constrained workload: %w", err) }
 	containerID := strings.TrimSpace(string(created))
-	if containerID == "" { return "", errors.New("Podman returned an empty container identifier") }
+	if !containerIDPattern.MatchString(containerID) {
+		return "", errors.New("Podman returned an invalid container identifier; refusing follow-up commands")
+	}
 	if _, err := p.runner().Run(ctx, "start", containerID); err != nil {
 		_, _ = p.runner().Run(context.Background(), "rm", "--force", containerID)
 		return "", fmt.Errorf("start constrained workload: %w", err)
