@@ -79,6 +79,33 @@ db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,node_role,status,signing_public_key,enrollment_consumed_at)
 VALUES ('runtime-a','pool-runtime','runtime-a','hash-runtime','runtime','online',?,datetime('now'))""", ("c" * 64,))
 
+# Project runtime pool assignment is restricted to online runtime nodes in isolated ready pools.
+must_reject(
+    "builder-only pool cannot host runtime projects",
+    """INSERT INTO application_project_settings
+    (id,organization_id,project_id,runtime_profile_id,node_pool_id)
+    VALUES ('settings-builder','org-a','project-a','runtime-nodejs-v1','pool-a')""",
+    (),
+)
+must_reject(
+    "untrusted pool cannot host runtime projects",
+    """INSERT INTO application_project_settings
+    (id,organization_id,project_id,runtime_profile_id,node_pool_id)
+    VALUES ('settings-untrusted','org-a','project-a','runtime-nodejs-v1','pool-untrusted')""",
+    (),
+)
+db.execute("""INSERT INTO application_project_settings
+(id,organization_id,project_id,runtime_profile_id,node_pool_id)
+VALUES ('settings-runtime','org-a','project-a','runtime-nodejs-v1','pool-runtime')""")
+assert db.execute(
+    "SELECT node_pool_id FROM application_project_settings WHERE id='settings-runtime'"
+).fetchone()[0] == "pool-runtime"
+must_reject(
+    "project runtime pool reassignment to builder-only pool",
+    "UPDATE application_project_settings SET node_pool_id='pool-a' WHERE id='settings-runtime'",
+    (),
+)
+
 db.execute("""INSERT INTO application_usage_periods
 (id,organization_id,project_id,period_start,build_minutes_limit)
 VALUES ('usage-a','org-a','project-a','2026-11-01',300)""")
