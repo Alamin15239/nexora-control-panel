@@ -35,8 +35,6 @@ type Request struct {
 	Artifact []byte
 	Expected deployenvelope.Expected
 	Keys     map[string]*rsa.PublicKey
-	Issuer   string
-	Audience string
 	BaseDir  string
 	Now      time.Time
 	Limits   deployarchive.Limits
@@ -88,9 +86,6 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("validate deployment archive: %w", err)
 	}
-	if err := request.Replay.Consume(ctx, claims.JWTID, time.Unix(claims.ExpiresAt, 0)); err != nil {
-		return result, fmt.Errorf("consume deployment authorization: %w", err)
-	}
 
 	if !filepath.IsAbs(request.BaseDir) {
 		return result, errors.New("publisher base directory must be absolute")
@@ -108,6 +103,10 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	releasesInfo, err := os.Lstat(releasesRoot)
 	if err != nil || !releasesInfo.IsDir() || releasesInfo.Mode()&os.ModeSymlink != 0 || releasesInfo.Mode().Perm()&0022 != 0 {
 		return result, errors.New("publisher releases directory must be a real, non-writable-by-others directory")
+	}
+
+	if err := request.Replay.Consume(ctx, claims.JWTID, time.Unix(claims.ExpiresAt, 0)); err != nil {
+		return result, fmt.Errorf("consume deployment authorization: %w", err)
 	}
 
 	stageIDBytes := make([]byte, 16)
