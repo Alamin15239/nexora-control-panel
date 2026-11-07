@@ -1,6 +1,7 @@
 package runtimepoller
 
 import (
+	"regexp"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -18,6 +19,28 @@ import (
 
 const desiredStatePath = "/internal/v1/application-nodes/desired-state"
 const maxResponseBytes = 1 << 20
+
+var immutableOCIImagePattern = regexp.MustCompile(`^[a-z0-9.-]+(?::[0-9]{1,5})?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}package runtimepoller
+
+import (
+	"regexp"
+	"context"
+	"crypto/ed25519"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
+)
+
+const desiredStatePath = "/internal/v1/application-nodes/desired-state"
+)
 
 type Workload struct {
 	WorkloadID string `json:"workloadId"`
@@ -112,13 +135,26 @@ func (c *Client) Poll(ctx context.Context) (Snapshot, error) {
 		if workload.WorkloadID == "" || workload.ReleaseID == "" ||
 			workload.ReleaseState != "succeeded" ||
 			(workload.DesiredState != "running" && workload.DesiredState != "stopped") ||
-			workload.DesiredReplicas < 0 || workload.DesiredReplicas > 100 ||
-			workload.ObservedReplicas < 0 || workload.ObservedReplicas > 100 ||
+			workload.DesiredReplicas < 0 || workload.DesiredReplicas > 1 ||
+			workload.ObservedReplicas < 0 || workload.ObservedReplicas > 1 ||
 			workload.CPUMillis < 100 || workload.CPUMillis > 8000 ||
 			workload.MemoryMiB < 128 || workload.MemoryMiB > 16384 ||
 			workload.DiskMiB < 128 || workload.DiskMiB > 65536 ||
 			workload.ProcessLimit < 16 || workload.ProcessLimit > 512 {
 			return empty, errors.New("desired-state workload metadata is outside permitted bounds")
+		}
+		// The first executable profile is deliberately narrow: one web replica
+		// running a prebuilt Node.js OCI image. No commands or source archives
+		// are accepted from the control plane or executed on this node.
+		if workload.RuntimeProfileKey != "nodejs-v1" ||
+			workload.RuntimeFamily != "nodejs" ||
+			workload.ExecutionKind != "oci" ||
+			workload.WorkloadKind != "web" ||
+			workload.ListenPort == nil || *workload.ListenPort != 3000 ||
+			workload.ImageDigest == nil || !immutableOCIImagePattern.MatchString(*workload.ImageDigest) ||
+			workload.ReleaseSpecVersion < 1 || workload.SettingsSpecVersion < 1 ||
+			workload.DesiredReplicas > 1 {
+			return empty, errors.New("workload does not satisfy the nodejs-v1 immutable web-image contract")
 		}
 		if _, exists := seen[workload.WorkloadID]; exists {
 			return empty, errors.New("desired-state response contains duplicate workload identifiers")
