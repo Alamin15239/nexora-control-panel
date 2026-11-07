@@ -18,7 +18,6 @@ var (
 	idPattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_-]{2,63}$")
 	imagePattern = regexp.MustCompile("^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$")
 	secretNamePattern = regexp.MustCompile("^[A-Z][A-Z0-9_]{0,63}$")
-	containerIDPattern = regexp.MustCompile("^[a-f0-9]{12,64}$")
 )
 
 type Spec struct {
