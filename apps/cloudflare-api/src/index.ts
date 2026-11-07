@@ -4043,6 +4043,12 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   const buildSeconds = Number(body.buildSeconds);
   const buildResult = String(body.buildResult);
   const db = c.env.DB;
+  const nonceResult = await db.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+
   const priorEvent = await db.prepare(
     "SELECT e.id, e.period_start AS periodStart, e.organization_id AS organizationId, e.project_id AS projectId, " +
     "e.build_seconds AS buildSeconds, e.build_result AS buildResult " +
@@ -4071,11 +4077,7 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   ).bind(deploymentId).first<{ id: string; organizationId: string; projectId: string }>();
   if (!deployment) return c.json({ message: "Deployment is not active or does not exist." }, 409);
 
-  const nonceResult = await db.prepare(
-    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
-    "VALUES (?, ?, datetime('now', '+10 minutes'))",
-  ).bind(node.id, nonce).run();
-  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+
 
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
