@@ -76,3 +76,19 @@ func TestPublishRejectsUnsafeIdentifiersAndWritableStaging(t *testing.T) {
 	if err := os.Chmod(filepath.Join(base, "staging", "stage-1"), 0770); err != nil { t.Fatal(err) }
 	if err := Publish(base, "stage-1", "release-1"); err == nil { t.Fatal("group-writable staging directory was accepted") }
 }
+
+func TestActivateRejectsWritableReleaseDirectory(t *testing.T) {
+	for _, mode := range []os.FileMode{0770, 0707} {
+		t.Run(mode.String(), func(t *testing.T) {
+			base := testLayout(t)
+			release := filepath.Join(base, "releases", "release-unsafe")
+			if err := os.Mkdir(release, mode); err != nil { t.Fatal(err) }
+			if err := Activate(base, "release-unsafe"); err == nil {
+				t.Fatal("group/world-writable release directory was activated")
+			}
+			if _, err := os.Lstat(filepath.Join(base, "current")); !os.IsNotExist(err) {
+				t.Fatal("unsafe release unexpectedly changed active symlink")
+			}
+		})
+	}
+}
