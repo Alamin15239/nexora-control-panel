@@ -164,6 +164,39 @@ async function environment(db: ArtifactD1, privateKeyPEM: string, includeArtifac
   };
 }
 
+test("artifact delivery rejects non-JSON content types before database access", async () => {
+  const db = new ArtifactD1();
+  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/artifact", {
+    method: "POST",
+    headers: {
+      "content-type": "text/plain",
+      "x-nexora-node-identity": "runtime-a",
+      "x-nexora-node-timestamp": String(Math.floor(Date.now() / 1000)),
+      "x-nexora-node-nonce": "f".repeat(32),
+      "x-nexora-node-signature": "0".repeat(128),
+    },
+    body: "{}",
+  }), { DB: db as unknown as D1Database, ARTIFACTS: {} as R2Bucket }, {} as ExecutionContext);
+  assert.equal(response.status, 415);
+});
+
+test("artifact delivery enforces the request body limit while streaming", async () => {
+  const db = new ArtifactD1();
+  const body = "{\\"deploymentId\\":\\"" + "x".repeat(1100) + "\\"}";
+  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/artifact", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": "runtime-a",
+      "x-nexora-node-timestamp": String(Math.floor(Date.now() / 1000)),
+      "x-nexora-node-nonce": "a".repeat(32),
+      "x-nexora-node-signature": "0".repeat(128),
+    },
+    body,
+  }), { DB: db as unknown as D1Database, ARTIFACTS: {} as R2Bucket }, {} as ExecutionContext);
+  assert.equal(response.status, 413);
+});
+
 test("runtime node receives a signed artifact for a release assigned to its pool", async () => {
   const db = new ArtifactD1();
   const node = await keyPair("Ed25519");
