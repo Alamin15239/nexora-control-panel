@@ -4030,8 +4030,9 @@ app.post("/internal/v1/application-nodes/rotate-key", async (c) => {
       "AND key_rotation_challenge_expires_at > datetime('now') AND status IN ('online','draining') AND revoked_at IS NULL",
     ).bind(body.newPublicKey.toLowerCase(), node.id, nodeIdentity, node.signingPublicKey, node.challengeHash),
     c.env.DB.prepare(
-      "INSERT OR IGNORE INTO application_node_signing_key_history (id,node_id,public_key,retired_at) VALUES (?,?,?,datetime('now'))",
-    ).bind(crypto.randomUUID(), node.id, node.signingPublicKey),
+      "UPDATE application_node_signing_key_history SET retired_at = datetime('now') " +
+      "WHERE node_id = ? AND public_key = ? AND retired_at IS NULL",
+    ).bind(node.id, node.signingPublicKey),
     c.env.DB.prepare(
       "INSERT INTO application_node_signing_key_history (id,node_id,public_key) VALUES (?,?,?)",
     ).bind(crypto.randomUUID(), node.id, body.newPublicKey.toLowerCase()),
