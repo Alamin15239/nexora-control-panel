@@ -3679,6 +3679,9 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   } catch {
     return c.json({ message: "Request body must be valid JSON." }, 400);
   }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ message: "Request body must be a JSON object." }, 400);
+  }
 
   const allowed = new Set([
     "runtimeProfileId", "buildMethod", "buildContext", "buildCommand",
@@ -3812,8 +3815,9 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
     runtimeProfileId,
     runtimeEnabled: profile.enabled === 1,
     executionEnabled: false,
-    resourceBounds: { cpuMillis: [100, 8000], memoryMiB: [128, 16384], diskMiB: [128, 65536], processLimit: [16, 512] },
-    message: "Configuration saved as metadata only. Customer builds and runtime execution remain disabled.",
+    platformResourceBounds: { cpuMillis: [100, 8000], memoryMiB: [128, 16384], diskMiB: [128, 65536], processLimit: [16, 512] },
+    planQuotasEnforced: false,
+    message: "Configuration saved as metadata only. These are platform hard bounds, not plan quotas. Customer builds and runtime execution remain disabled.",
   });
 });
 
