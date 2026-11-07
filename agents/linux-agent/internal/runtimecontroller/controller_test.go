@@ -159,3 +159,12 @@ func TestRecoverFailsClosedWhenContainerCannotBeInspected(t *testing.T) {
 		t.Fatal("recovery accepted an uninspectable persisted container")
 	}
 }
+
+func TestRecoverAcceptsEmptyFirstBootSnapshot(t *testing.T) {
+	store := &fakeStore{items: map[string]supervisorstate.WorkloadState{}}
+	report, err := (Controller{Backend: &fakeBackend{}, State: store}).Recover(context.Background())
+	if err != nil { t.Fatal(err) }
+	if report.Checked != 0 || report.Reconciled != 0 || len(report.Workloads) != 0 {
+		t.Fatalf("unexpected empty first-boot recovery report: %+v", report)
+	}
+}
