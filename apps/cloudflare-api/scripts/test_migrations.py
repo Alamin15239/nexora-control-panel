@@ -96,7 +96,7 @@ for node_id in ("builder-untrusted", "runtime-a"):
     assert rejected, f"Untrusted or runtime node was allowed to report builder usage: {node_id}"
 db.execute("""INSERT INTO application_nodes
 (id,node_pool_id,node_identity,enrollment_key_hash,status)
-VALUES ('node-a','pool-a','builder-a',?,'pending')""", ("b" * 64,))
+VALUES ('node-a','pool-a','node-a',?,'pending')""", ("b" * 64,))
 must_reject(
     "invalid Ed25519 public key encoding",
     "UPDATE application_nodes SET signing_public_key='not-a-public-key' WHERE id='node-a'",
