@@ -454,6 +454,9 @@ app.post("/v1/auth/login", async (c) => {
 
   await c.env.DB.prepare("DELETE FROM login_attempts WHERE bucket_key = ?").bind(bucketKey).run();
   const role = membership.role as Role;
+  const customerAccess = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(user.id).first<{ active: number }>();
   const session = await issueSession(c.env.DB, user.id, membership.organizationId, role);
   await c.env.DB.prepare(
     "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, source_ip) VALUES (?, ?, ?, 'auth.login', 'user', ?, ?)",
@@ -461,6 +464,7 @@ app.post("/v1/auth/login", async (c) => {
 
   return c.json({
     user: { id: user.id, email: user.email, displayName: user.displayName },
+    customerAccess: Boolean(customerAccess),
     ...session,
   });
 });
