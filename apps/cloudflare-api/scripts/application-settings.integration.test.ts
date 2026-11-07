@@ -223,7 +223,24 @@ class TestD1 {
       const query = statement.query;
       const values = statement.getValues();
       let changes = 0;
-      if (query.includes("UPDATE application_nodes SET signing_public_key = ?, key_rotation_challenge_hash")) {
+      if (query.includes("UPDATE application_nodes SET signing_public_key = ?, enrollment_consumed_at")) {
+        const [publicKey, agentVersion, nodeIdentity, tokenHash] = values as string[];
+        if (nodeIdentity === this.node.nodeIdentity && tokenHash === this.node.enrollmentKeyHash &&
+            this.node.status === "pending" && this.node.poolReady && !this.node.signingPublicKey) {
+          this.node.signingPublicKey = publicKey;
+          this.node.agentVersion = agentVersion;
+          this.node.status = "online";
+          changes = 1;
+        }
+      } else if (query.includes("INSERT INTO application_node_signing_key_history") &&
+          query.includes("enrollment_consumed_at IS NOT NULL")) {
+        const [keyId, nodeIdentity, publicKey] = values as string[];
+        if (nodeIdentity === this.node.nodeIdentity && this.node.signingPublicKey === publicKey &&
+            this.node.status === "online" && !this.keyHistory.includes(publicKey)) {
+          this.keyHistory.push(publicKey);
+          changes = 1;
+        }
+      } else if (query.includes("UPDATE application_nodes SET signing_public_key = ?, key_rotation_challenge_hash")) {
         const [newKey, nodeId, nodeIdentity, oldKey, challengeHash] = values as string[];
         if (nodeId === this.node.id && nodeIdentity === this.node.nodeIdentity &&
             oldKey === this.node.signingPublicKey && challengeHash === this.node.challengeHash &&
