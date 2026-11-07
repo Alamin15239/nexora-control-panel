@@ -4814,8 +4814,8 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.id = ? AND r.node_pool_id = ? LIMIT 1",
-  ).bind(body.deploymentId, body.releaseId, node.nodePoolId).first<{
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; nodePoolId: string;
   }>();
