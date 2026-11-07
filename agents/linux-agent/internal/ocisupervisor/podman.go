@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{2,63}$`)
-	imagePattern = regexp.MustCompile(`^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$`)
-	secretNamePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+	idPattern = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_-]{2,63}$")
+	imagePattern = regexp.MustCompile("^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$")
+	secretNamePattern = regexp.MustCompile("^[A-Z][A-Z0-9_]{0,63}$")
+	containerIDPattern = regexp.MustCompile("^[a-f0-9]{12,64}$")
 )
 
 type Spec struct {
@@ -35,7 +36,6 @@ type Spec struct {
 }
 
 type Runner interface { Run(context.Context, ...string) ([]byte, error) }
-
 type OSRunner struct { Binary string }
 
 func (r OSRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
@@ -50,10 +50,7 @@ func (r OSRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	return output, nil
 }
 
-type Podman struct {
-	Runner Runner
-	AllowedRegistries []string
-}
+type Podman struct { Runner Runner; AllowedRegistries []string }
 
 func (p Podman) runner() Runner {
 	if p.Runner != nil { return p.Runner }
@@ -130,8 +127,6 @@ func (p Podman) EnsureRootless(ctx context.Context) error {
 	return nil
 }
 
-// Start creates and starts a constrained container. Customer input cannot
-// supply a command, environment, mount list, or network mode.
 func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
 	if err := validateSpec(spec); err != nil { return "", err }
 	registry := strings.SplitN(spec.ImageDigest, "/", 2)[0]
