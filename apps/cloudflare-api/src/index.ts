@@ -3895,8 +3895,7 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
   const row = await c.env.DB.prepare(
-    `SELECT p.id, hp.app_build_minutes_month AS buildMinutesLimit,
-            COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed,
+    `SELECT p.id, COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed,
             COALESCE(u.build_minutes_limit, hp.app_build_minutes_month) AS buildMinutesLimit,
             EXISTS (SELECT 1 FROM application_usage_events e WHERE e.organization_id = p.organization_id
                     AND e.project_id = p.id AND e.period_start = ?) AS hasUsageEvents
