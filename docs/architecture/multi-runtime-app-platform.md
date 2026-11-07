@@ -207,3 +207,10 @@ This is a probe primitive only. It does not start a process, select a port, prov
 ## Per-release runtime node binding
 
 Migration `0029_application_release_node_assignment.sql` adds `application_releases.assigned_node_id`. A runtime release with a runtime profile cannot be created without an enrolled, online, non-revoked runtime node that belongs to the assigned isolated pool and has an Ed25519 signing key. Manual GitHub deployment dispatch selects one eligible node from the operator-assigned pool and stores that exact node ID with the release. The artifact-download, archive-validation, activation, and health-check routes all require the authenticated node ID to match `assigned_node_id`; knowing a deployment ID or belonging to the same pool is not sufficient. If the assigned node becomes unavailable, delivery fails closed until an explicit rescheduler/reassignment workflow is implemented.
+
+
+## Rootless OCI supervisor backend foundation
+
+The Linux agent now contains an isolated `internal/ocisupervisor` Podman backend. It refuses to start unless Podman reports `Host.Security.Rootless=true`, accepts only immutable SHA-256 image references, validates operator-owned release directories, binds the published application port to host loopback only, and applies read-only root filesystem, dropped Linux capabilities, no-new-privileges, non-root container UID, private PID/IPC namespaces, CPU/memory/PID ceilings, and a bounded temporary filesystem. It never accepts a customer shell command, arbitrary mount list, privileged mode, or host-network mode.
+
+This is a backend primitive with fake-runner tests; it is **not yet connected to the application-node polling loop, workload database reconciliation, domain proxy, health-check lifecycle, secret delivery, persistent writable data volumes, log retention, storage quota enforcement, or production node service**. Rootless Podman networking currently uses `slirp4netns`; outbound egress policy still requires a separate network policy layer. Do not enable customer workloads until those controls and the complete lifecycle are implemented and reviewed.
