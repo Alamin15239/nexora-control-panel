@@ -128,6 +128,12 @@ The control plane now stores application CPU (millicores), memory (MiB), storage
 
 These are admission-control limits for configuration metadata. They do not reserve physical capacity or enforce cgroups at runtime. Runtime execution remains disabled until the isolated compute plane can enforce the same limits and report measured usage.
 
+## Atomic release activation primitive
+
+The Linux agent repository now contains a standalone `internal/releasepublisher` filesystem primitive. It accepts only operator-prepared private staging directories, moves a release into a non-overwritable release store, and atomically switches a `current` symlink. The same activation operation can point back to a previous immutable release for rollback. It rejects unsafe identifiers, symlinked release directories, writable staging roots, and a non-symlink active path. Directory metadata is synced after the rename operations.
+
+This primitive does not download from R2, authenticate a deployment envelope, authorize a project/account, verify an artifact digest, run a health check, or expose a network receiver. It is not wired to the legacy privileged provisioner or customer-facing deployment API. Its parent directories must be operator-owned and inaccessible to untrusted local users. Until a separate least-privilege receiver integrates signature verification, archive validation/extraction, release ownership checks, health checks, and rollback policy, it must not be treated as a deployable publisher. Customer publishing remains disabled.
+
 ## Current constraints
 
 - The API Worker, D1 and private R2 bucket are a control-plane foundation, not a general-purpose application runtime.
