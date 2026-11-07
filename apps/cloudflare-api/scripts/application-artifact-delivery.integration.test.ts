@@ -139,8 +139,7 @@ async function signedArtifactRequest(
 
 async function environment(db: ArtifactD1, privateKeyPEM: string, includeArtifacts = true) {
   const artifactDigest = await artifactDigestPromise;
-  db.node.signingPublicKey = (await keyPair("Ed25519")).publicKey;
-  db.release.artifactDigest = artifactDigest;
+  db.release.releaseArtifactDigest = artifactDigest;
   db.release.artifactSha256 = artifactDigest;
   const artifacts = includeArtifacts ? {
     get: async (key: string) => key === db.release.artifactKey ? ({
