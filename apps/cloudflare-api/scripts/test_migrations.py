@@ -112,6 +112,12 @@ must_reject(
     "UPDATE application_node_signing_key_history SET public_key=? WHERE id='key-history-runtime'",
     ("d" * 64,),
 )
+db.execute("UPDATE application_node_signing_key_history SET retired_at=datetime('now') WHERE id='key-history-runtime'")
+must_reject(
+    "signing key retirement cannot be changed twice",
+    "UPDATE application_node_signing_key_history SET retired_at=datetime('now','+1 minute') WHERE id='key-history-runtime'",
+    (),
+)
 db.execute("UPDATE application_nodes SET status='revoked', revoked_at=datetime('now') WHERE id='runtime-a'")
 must_reject(
     "revoked node reactivation",
