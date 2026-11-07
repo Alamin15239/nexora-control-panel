@@ -1,5 +1,8 @@
 PRAGMA foreign_keys = ON;
 
+CREATE UNIQUE INDEX hosting_accounts_id_org_unique
+  ON hosting_accounts(id, organization_id);
+
 CREATE TABLE hosting_account_memberships (
   id TEXT PRIMARY KEY NOT NULL,
   hosting_account_id TEXT NOT NULL REFERENCES hosting_accounts(id) ON DELETE CASCADE,
