@@ -22,6 +22,7 @@ import (
 
 const (
 	ArtifactRequestPath = "/internal/v1/application-nodes/artifact"
+	ArtifactValidationReportPath = "/internal/v1/application-nodes/releases/validated"
 	DefaultMaxArtifactBytes int64 = 100 << 20
 	maxEnvelopeBytes = 8 << 10
 )
@@ -31,6 +32,7 @@ type Config struct {
 	NodeIdentity string
 	PrivateKey ed25519.PrivateKey
 	MaxArtifactBytes int64
+	Purpose string
 }
 
 type Download struct {
@@ -63,9 +65,13 @@ func Fetch(ctx context.Context, client *http.Client, cfg Config, deploymentID st
 		return result, errors.New("configured artifact size limit exceeds the platform maximum")
 	}
 
+	if cfg.Purpose != "" && cfg.Purpose != "validate" && cfg.Purpose != "publish" {
+		return result, errors.New("artifact request purpose must be validate or publish")
+	}
 	body, err := json.Marshal(struct {
 		DeploymentID string `json:"deploymentId"`
-	}{DeploymentID: deploymentID})
+		Purpose string `json:"purpose,omitempty"`
+	}{DeploymentID: deploymentID, Purpose: cfg.Purpose})
 	if err != nil {
 		return result, fmt.Errorf("encode artifact request: %w", err)
 	}
@@ -152,4 +158,87 @@ func Fetch(ctx context.Context, client *http.Client, cfg Config, deploymentID st
 	}
 	result = Download{Envelope: envelope, Artifact: artifact, SHA256: actualDigest}
 	return result, nil
+}
+
+
+type ValidationReport struct {
+	DeploymentID string
+	ArtifactSHA256 string
+	ArchiveEntries int
+	ArchiveFiles int
+	ArchiveBytes int64
+}
+
+// ReportValidated sends a signed, replay-protected report after the local receiver
+// has independently validated the envelope, artifact digest, and archive.
+func ReportValidated(ctx context.Context, client *http.Client, cfg Config, report ValidationReport) error {
+	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
+		return errors.New("application-node Ed25519 private key is invalid")
+	}
+	if cfg.NodeIdentity == "" || report.DeploymentID == "" ||
+		len(report.DeploymentID) > 128 ||
+		len(report.ArtifactSHA256) != 64 ||
+		strings.ToLower(report.ArtifactSHA256) != report.ArtifactSHA256 ||
+		report.ArchiveEntries < 1 || report.ArchiveEntries > 10000 ||
+		report.ArchiveFiles < 0 || report.ArchiveFiles > report.ArchiveEntries ||
+		report.ArchiveBytes < 0 || report.ArchiveBytes > 500<<20 {
+		return errors.New("deployment archive validation report is outside permitted bounds")
+	}
+	if _, err := hex.DecodeString(report.ArtifactSHA256); err != nil {
+		return errors.New("deployment archive validation digest is malformed")
+	}
+	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
+		return errors.New("control plane URL must be an HTTPS origin without a path")
+	}
+	body, err := json.Marshal(struct {
+		DeploymentID string `json:"deploymentId"`
+		ArtifactSHA256 string `json:"artifactSha256"`
+		ArchiveEntries int `json:"archiveEntries"`
+		ArchiveFiles int `json:"archiveFiles"`
+		ArchiveBytes int64 `json:"archiveBytes"`
+	}{
+		DeploymentID: report.DeploymentID,
+		ArtifactSHA256: report.ArtifactSHA256,
+		ArchiveEntries: report.ArchiveEntries,
+		ArchiveFiles: report.ArchiveFiles,
+		ArchiveBytes: report.ArchiveBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("encode archive validation report: %w", err)
+	}
+	proof, err := appnodeauth.Sign(cfg.PrivateKey, cfg.NodeIdentity, http.MethodPost,
+		ArtifactValidationReportPath, body, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("sign archive validation report: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.String()+ArtifactValidationReportPath, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create archive validation report request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if err := proof.Apply(request, cfg.NodeIdentity); err != nil {
+		return fmt.Errorf("apply node request proof: %w", err)
+	}
+	activeClient := client
+	if activeClient == nil {
+		activeClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *activeClient
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := safeClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("submit archive validation report: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("archive validation endpoint returned %s: %s", response.Status,
+			strings.TrimSpace(string(message)))
+	}
+	return nil
 }
