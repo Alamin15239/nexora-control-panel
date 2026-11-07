@@ -175,3 +175,46 @@ func TestReportHealthCheckRejectsInconsistentOrUntrustedResults(t *testing.T) {
 		}
 	}
 }
+
+
+func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T) {
+	_, privateKey := testIdentity(t)
+	digest := sha256.Sum256([]byte("artifact"))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\"}"))
+	}))
+	defer server.Close()
+	ack, err := ReportHealthCheck(context.Background(), server.Client(), Config{
+		ControlPlaneURL:server.URL, NodeIdentity:"runtime-a", PrivateKey:privateKey,
+	}, HealthCheckReport{
+		DeploymentID:"deployment-a",
+		ArtifactSHA256:hex.EncodeToString(digest[:]),
+		ProbePath:"/ready",
+		HealthStatus:"unhealthy",
+		HTTPStatus:503,
+		DurationMs:100,
+		FailureCode:"http_5xx",
+	})
+	if err != nil { t.Fatal(err) }
+	if !ack.RollbackRequired || ack.RollbackTargetDeploymentID == nil ||
+		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.ReleaseState != "failed" {
+		t.Fatalf("unexpected rollback acknowledgement: %+v", ack)
+	}
+}
+
+func TestReportHealthCheckRejectsContradictoryAcknowledgement(t *testing.T) {
+	_, privateKey := testIdentity(t)
+	digest := sha256.Sum256([]byte("artifact"))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"succeeded\",\"workloadHealth\":\"healthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\"}"))
+	}))
+	defer server.Close()
+	_, err := ReportHealthCheck(context.Background(), server.Client(), Config{
+		ControlPlaneURL:server.URL, NodeIdentity:"runtime-a", PrivateKey:privateKey,
+	}, HealthCheckReport{
+		DeploymentID:"deployment-a", ArtifactSHA256:hex.EncodeToString(digest[:]),
+		ProbePath:"/ready", HealthStatus:"healthy", HTTPStatus:200, DurationMs:1,
+	})
+	if err == nil { t.Fatal("expected contradictory acknowledgement to be rejected") }
+}
