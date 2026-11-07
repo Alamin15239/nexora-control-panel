@@ -24,32 +24,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/supervisorstate"
 )
 
-var runtimeNodeIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}package main
-
-import (
-	"context"
-	"crypto/ed25519"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"net/url"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strings"
-	"syscall"
-	"time"
-
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/ocisupervisor"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimecontroller"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimepoller"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/supervisorstate"
-)
-
-)
+var runtimeNodeIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$`)
 
 type Config struct {
 	ControlPlaneURL string `json:"control_plane_url"`
@@ -90,9 +65,7 @@ func loadConfig(path string) (Config, error) {
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return cfg, errors.New("control_plane_url must be an HTTPS origin without credentials, path, query or fragment")
 	}
-	if !runtimeNodeIdentityPattern.MatchString(cfg.NodeIdentity) {
-		return cfg, errors.New("node_identity is invalid")
-	}
+	if !runtimeNodeIdentityPattern.MatchString(cfg.NodeIdentity) { return cfg, errors.New("node_identity is invalid") }
 	if !filepath.IsAbs(cfg.PrivateKeyFile) || filepath.Clean(cfg.PrivateKeyFile) != cfg.PrivateKeyFile {
 		return cfg, errors.New("private_key_file must be an absolute clean path")
 	}
@@ -102,9 +75,7 @@ func loadConfig(path string) (Config, error) {
 	if cfg.PollIntervalSeconds < 15 || cfg.PollIntervalSeconds > 600 {
 		return cfg, errors.New("poll_interval_seconds must be between 15 and 600")
 	}
-	if len(cfg.AllowedRegistries) == 0 {
-		return cfg, errors.New("at least one operator-approved OCI registry is required")
-	}
+	if len(cfg.AllowedRegistries) == 0 { return cfg, errors.New("at least one operator-approved OCI registry is required") }
 	for _, registry := range cfg.AllowedRegistries {
 		if strings.ContainsAny(registry, "/:@ \t\r\n") || registry == "" {
 			return cfg, errors.New("allowed registry entries must be hostnames only")
@@ -122,8 +93,7 @@ func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil { return nil, err }
-	encoded := strings.TrimSpace(string(raw))
-	decoded, err := hex.DecodeString(encoded)
+	decoded, err := hex.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil || len(decoded) != ed25519.PrivateKeySize {
 		return nil, errors.New("private key file must contain a 64-byte Ed25519 private key in hex")
 	}
@@ -137,9 +107,6 @@ func run(configPath string) error {
 	if err != nil { return fmt.Errorf("load node signing key: %w", err) }
 	store, err := supervisorstate.Open(cfg.StateFile)
 	if err != nil { return fmt.Errorf("open durable supervisor state: %w", err) }
-
-	// Startup recovery verifies every previously recorded container before the
-	// polling loop is allowed to start. No workload is started or changed.
 	podman := ocisupervisor.Podman{AllowedRegistries: cfg.AllowedRegistries}
 	recovery, err := (runtimecontroller.Controller{Backend: podman, State: store}).Recover(context.Background())
 	if err != nil { return fmt.Errorf("fail-closed runtime startup recovery: %w", err) }
@@ -151,7 +118,6 @@ func run(configPath string) error {
 	poll := func() error {
 		snapshot, err := client.Poll(ctx)
 		if err != nil { return err }
-		// Execution is deliberately disabled in the control-plane contract.
 		if snapshot.ExecutionEnabled || snapshot.CommandsIncluded || snapshot.SecretsIncluded {
 			return errors.New("control plane attempted to enable workload execution or deliver commands/secrets")
 		}
@@ -163,12 +129,9 @@ func run(configPath string) error {
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			return nil
+		case <-ctx.Done(): return nil
 		case <-ticker.C:
-			if err := poll(); err != nil && ctx.Err() == nil {
-				fmt.Fprintln(os.Stderr, "desired-state poll:", err)
-			}
+			if err := poll(); err != nil && ctx.Err() == nil { fmt.Fprintln(os.Stderr, "desired-state poll:", err) }
 		}
 	}
 }
