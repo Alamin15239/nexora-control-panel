@@ -4022,7 +4022,8 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   const node = await c.env.DB.prepare(
     "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
     "JOIN application_node_pools p ON p.id = n.node_pool_id " +
-    "WHERE n.node_identity = ? AND n.status = 'online' AND p.status = 'ready' " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'builder' " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
   if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
