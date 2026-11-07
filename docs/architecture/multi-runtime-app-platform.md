@@ -90,6 +90,12 @@ Error paths: FAILED, CANCELLED and ROLLED_BACK. Transitions must be conditional 
 - Enable only after all prior gates, runbooks, alerts, incident response, backups, restore drills, usage enforcement and support processes are ready.
 - Start with an allowlisted pilot and expand only against measured capacity.
 
+## Hosting-plan runtime ceilings
+
+The control plane now stores application CPU (millicores), memory (MiB), storage (MiB) and process ceilings on each hosting plan. Project runtime settings are checked against the plan attached to the project's hosting account. Effective application storage is the lower of the app storage ceiling and the account's existing disk quota. The API exposes the effective limits to the dashboard and rejects settings that exceed them.
+
+These are admission-control limits for configuration metadata. They do not reserve physical capacity or enforce cgroups at runtime. Runtime execution remains disabled until the isolated compute plane can enforce the same limits and report measured usage.
+
 ## Current constraints
 
 - The API Worker, D1 and private R2 bucket are a control-plane foundation, not a general-purpose application runtime.
