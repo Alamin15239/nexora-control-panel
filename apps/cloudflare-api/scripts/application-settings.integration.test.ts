@@ -28,6 +28,9 @@ class TestD1 {
   writes = 0;
   audits = 0;
   usageRow: { id: string; buildMinutesLimit: number; buildSecondsUsed: number } | null = null;
+  deploymentRow = { id: "deployment-a", organizationId: "org-a", projectId: "project-a", status: "building" };
+  usagePeriod: { organizationId: string; projectId: string; periodStart: string; buildSecondsUsed: number; buildMinutesLimit: number } | null = null;
+  usageEvents = new Map<string, { id: string; organizationId: string; projectId: string; deploymentId: string; periodStart: string; buildSeconds: number; buildResult: string; aggregatedAt: string | null }>();
 
   constructor(identity: TestIdentity | null) { this.identity = identity; }
 
@@ -35,12 +38,29 @@ class TestD1 {
     const db = this;
     let values: unknown[] = [];
     const statement = {
+      query,
+      getValues() { return values; },
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
         if (query.includes("LEFT JOIN application_usage_periods")) {
           const [periodStart, eventPeriodStart, projectId, organizationId] = values;
           if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
           return (db.usageRow ?? { id: "project-a", buildMinutesLimit: 300, buildSecondsUsed: 0 }) as T;
+        }
+        if (query.includes("FROM github_deployments d")) {
+          const [deploymentId] = values;
+          return deploymentId === db.deploymentRow.id && ["cloning", "installing", "building"].includes(db.deploymentRow.status)
+            ? ({ ...db.deploymentRow } as T) : null;
+        }
+        if (query.includes("FROM application_usage_events")) {
+          const [organizationId, projectId, deploymentId] = values;
+          const event = db.usageEvents.get(String(deploymentId));
+          return event && event.organizationId === organizationId && event.projectId === projectId
+            ? ({ id: event.id, periodStart: event.periodStart } as T) : null;
+        }
+        if (query.includes("FROM application_usage_periods")) {
+          return db.usagePeriod ? ({ buildSecondsUsed: db.usagePeriod.buildSecondsUsed,
+            buildMinutesLimit: db.usagePeriod.buildMinutesLimit } as T) : null;
         }
         if (query.includes("FROM auth_sessions s")) return db.identity as T | null;
         if (query.includes("FROM github_projects p") && query.includes("JOIN hosting_accounts h") && !query.includes("LEFT JOIN application_project_settings")) {
@@ -123,6 +143,49 @@ class TestD1 {
       },
     };
     return statement;
+  }
+
+  async batch(statements: unknown[]) {
+    const results: Array<{ success: boolean; meta: { changes: number } }> = [];
+    for (const raw of statements) {
+      const statement = raw as { query: string; getValues(): unknown[] };
+      const query = statement.query;
+      const values = statement.getValues();
+      let changes = 0;
+      if (query.includes("INSERT OR IGNORE INTO application_usage_periods")) {
+        const [id, periodStart, projectId, organizationId] = values as [string, string, string, string];
+        if (projectId === this.deploymentRow.projectId && organizationId === this.deploymentRow.organizationId &&
+            organizationId === this.projectOrganizationId && !this.usagePeriod) {
+          this.usagePeriod = { organizationId, projectId, periodStart, buildSecondsUsed: 0, buildMinutesLimit: 300 };
+          changes = 1;
+        }
+      } else if (query.includes("INSERT OR IGNORE INTO application_usage_events")) {
+        const [id, periodStart, buildSeconds, buildResult, deploymentId, organizationId, projectId] =
+          values as [string, string, number, string, string, string, string];
+        if (!this.usageEvents.has(deploymentId) && this.deploymentRow.id === deploymentId &&
+            this.deploymentRow.status !== "queued" && organizationId === this.deploymentRow.organizationId &&
+            projectId === this.deploymentRow.projectId && this.usagePeriod?.periodStart === periodStart) {
+          this.usageEvents.set(deploymentId, { id, organizationId, projectId, deploymentId, periodStart,
+            buildSeconds, buildResult, aggregatedAt: null });
+          changes = 1;
+        }
+      } else if (query.includes("UPDATE application_usage_periods")) {
+        if (this.usagePeriod) {
+          const pending = [...this.usageEvents.values()].filter((event) =>
+            event.organizationId === this.usagePeriod?.organizationId &&
+            event.projectId === this.usagePeriod?.projectId &&
+            event.periodStart === this.usagePeriod?.periodStart && event.aggregatedAt === null);
+          this.usagePeriod.buildSecondsUsed += pending.reduce((sum, event) => sum + event.buildSeconds, 0);
+          changes = 1;
+        }
+      } else if (query.includes("UPDATE application_usage_events SET aggregated_at")) {
+        for (const event of this.usageEvents.values()) {
+          if (event.aggregatedAt === null) { event.aggregatedAt = "2026-11-07 00:00:00"; changes++; }
+        }
+      }
+      results.push({ success: true, meta: { changes } });
+    }
+    return results;
   }
 }
 
@@ -351,4 +414,39 @@ test("builder usage ingestion rejects stale signed reports", async () => {
     {} as ExecutionContext,
   );
   assert.equal(response.status, 401);
+});
+
+
+test("authenticated builder usage report is recorded once and replay is idempotent", async () => {
+  const db = new TestD1(null);
+  const secret = "s".repeat(48);
+  const body = { deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" };
+  const first = await worker.fetch(await signedBuilderRequest(body, secret), environment(db, secret), {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const firstResult = await first.json() as { accepted: boolean; duplicate: boolean; buildSecondsUsed: number; buildMinutesLimit: number };
+  assert.equal(firstResult.accepted, true);
+  assert.equal(firstResult.duplicate, false);
+  assert.equal(firstResult.buildSecondsUsed, 90);
+  assert.equal(firstResult.buildMinutesLimit, 300);
+
+  const replay = await worker.fetch(await signedBuilderRequest(body, secret), environment(db, secret), {} as ExecutionContext);
+  assert.equal(replay.status, 200);
+  const replayResult = await replay.json() as { accepted: boolean; duplicate: boolean; buildSecondsUsed: number };
+  assert.equal(replayResult.accepted, true);
+  assert.equal(replayResult.duplicate, true);
+  assert.equal(replayResult.buildSecondsUsed, 90);
+  assert.equal(db.usageEvents.size, 1);
+});
+
+test("builder usage report cannot be submitted for a queued deployment", async () => {
+  const db = new TestD1(null);
+  db.deploymentRow.status = "queued";
+  const secret = "s".repeat(48);
+  const response = await worker.fetch(
+    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" }, secret),
+    environment(db, secret),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 409);
+  assert.equal(db.usageEvents.size, 0);
 });
