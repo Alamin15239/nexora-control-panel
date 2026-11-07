@@ -3957,7 +3957,7 @@ app.post("/internal/v1/operator/application-nodes/:nodeId/revoke", async (c) => 
   const body = input as Record<string, unknown>;
   if (Object.keys(body).some((key) => key !== "reason") ||
       (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 500 ||
-        /[\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]/.test(body.reason)))) {
+        /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(body.reason)))) {
     return c.json({ message: "Invalid revocation payload." }, 400);
   }
   const result = await c.env.DB.prepare(
