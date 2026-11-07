@@ -676,6 +676,32 @@ test("operator challenge and old-key proof rotate a node signing key exactly onc
   assert.equal(replay.status, 401);
 });
 
+test("revoked nodes cannot request or complete signing-key rotation", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  const replacement = await createNodeKeyPair();
+  db.node.status = "revoked";
+  db.node.revokedAt = "2026-11-07 00:00:00";
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.challengeHash = "a".repeat(64);
+  db.node.challengeExpiresAt = "2026-11-07 00:10:00";
+
+  const challenge = await worker.fetch(
+    operatorRequest("/internal/v1/operator/application-nodes/node-a/key-rotation-challenge"),
+    environment(db, operatorToken), {} as ExecutionContext,
+  );
+  assert.equal(challenge.status, 404);
+
+  const rotation = await worker.fetch(
+    await signedNodeRequest({ newPublicKey: replacement.publicKeyHex, challenge: "a".repeat(64) },
+      pair.privateKey, "5".repeat(32), String(Math.floor(Date.now() / 1000)),
+      "/internal/v1/application-nodes/rotate-key"),
+    environment(db, operatorToken), {} as ExecutionContext,
+  );
+  assert.equal(rotation.status, 401);
+  assert.equal(db.node.signingPublicKey, pair.publicKeyHex);
+});
+
 test("revoked nodes cannot submit signed builder usage reports", async () => {
   const db = new TestD1(null);
   const pair = await createNodeKeyPair();
