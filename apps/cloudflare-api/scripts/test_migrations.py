@@ -153,7 +153,7 @@ violations = list(db.execute("PRAGMA foreign_key_check"))
 # Usage periods are tenant-bound; aggregation and event marking are idempotent.
 db.execute("""INSERT INTO application_usage_events
 (id,organization_id,project_id,deployment_id,period_start,build_seconds,source,node_id)
-VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder','node-a')""")
+VALUES ('usage-event-a','org-a','project-a','deployment-a','2026-11-01',120,'isolated_builder','builder-a')""")
 db.execute("""UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (
   SELECT COALESCE(SUM(build_seconds),0) FROM application_usage_events
   WHERE organization_id='org-a' AND project_id='project-a'
