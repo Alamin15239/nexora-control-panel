@@ -4,7 +4,7 @@ ALTER TABLE application_node_pools
   CHECK (isolation_level IN ('untrusted','rootless','microvm'));
 
 ALTER TABLE application_nodes
-  ADD COLUMN node_role TEXT NOT NULL DEFAULT 'builder'
+  ADD COLUMN node_role TEXT NOT NULL DEFAULT 'runtime'
   CHECK (node_role IN ('builder','runtime'));
 
 CREATE INDEX IF NOT EXISTS idx_application_nodes_role_status
