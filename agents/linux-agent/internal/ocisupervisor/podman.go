@@ -254,7 +254,7 @@ func (p Podman) Start(ctx context.Context, spec Spec) (string, error) {
 		spec.ImageDigest,
 	}
 	if spec.SecretDir != "" {
-		args = append(args[:len(args)-2], append([]string{"--mount", "type=bind,src=" + spec.SecretDir + ",dst=/run/secrets,ro=true"}, args[len(args)-2:]...)...)
+		insertAt := len(args) - 3 // before --workdir /app and the image reference\n\t\targs = append(args[:insertAt], append([]string{"--mount", "type=bind,src=" + spec.SecretDir + ",dst=/run/secrets,ro=true"}, args[insertAt:]...)...)
 	}
 	created, err := p.runner().Run(ctx, args...)
 	if err != nil { return "", fmt.Errorf("create constrained workload: %w", err) }
