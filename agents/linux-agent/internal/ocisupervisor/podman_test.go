@@ -49,7 +49,7 @@ func validSpec(t *testing.T) Spec {
 
 func TestStartUsesRootlessConstrainedPodman(t *testing.T) {
 	runner := &fakeRunner{rootless:"true"}
-	podman := Podman{Runner:runner}
+	podman := Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}
 	spec := validSpec(t)
 	id, err := podman.Start(context.Background(), spec)
 	if err != nil { t.Fatal(err) }
@@ -73,14 +73,14 @@ func TestStartUsesRootlessConstrainedPodman(t *testing.T) {
 
 func TestStartRefusesRootfulPodman(t *testing.T) {
 	runner := &fakeRunner{rootless:"false"}
-	_, err := (Podman{Runner:runner}).Start(context.Background(), validSpec(t))
+	_, err := (Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}).Start(context.Background(), validSpec(t))
 	if err == nil { t.Fatal("expected rootful Podman to be rejected") }
 	if len(runner.calls) != 1 { t.Fatalf("container command ran despite rootful mode: %+v", runner.calls) }
 }
 
 func TestStartCleansUpIfContainerFailsToStart(t *testing.T) {
 	runner := &fakeRunner{rootless:"true", failStart:true}
-	_, err := (Podman{Runner:runner}).Start(context.Background(), validSpec(t))
+	_, err := (Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}).Start(context.Background(), validSpec(t))
 	if err == nil { t.Fatal("expected synthetic start failure") }
 	if len(runner.calls) != 4 || runner.calls[3][0] != "rm" {
 		t.Fatalf("expected failed container cleanup, got %+v", runner.calls)
@@ -101,7 +101,7 @@ func TestStartRejectsUnsafeSpecs(t *testing.T) {
 			runner := &fakeRunner{rootless:"true"}
 			spec := validSpec(t)
 			mutate(&spec)
-			if _, err := (Podman{Runner:runner}).Start(context.Background(), spec); err == nil {
+			if _, err := (Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}).Start(context.Background(), spec); err == nil {
 				t.Fatal("expected invalid workload specification to be rejected")
 			}
 			if len(runner.calls) != 0 { t.Fatalf("Podman invoked for invalid spec: %+v", runner.calls) }
@@ -118,12 +118,12 @@ func TestStartRejectsSymlinkAndWritableReleaseDirectories(t *testing.T) {
 	runner := &fakeRunner{rootless:"true"}
 	spec := validSpec(t)
 	spec.ReleaseDir = link
-	if _, err := (Podman{Runner:runner}).Start(context.Background(), spec); err == nil {
+	if _, err := (Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}).Start(context.Background(), spec); err == nil {
 		t.Fatal("expected release symlink rejection")
 	}
 	if err := os.Chmod(real, 0770); err != nil { t.Fatal(err) }
 	spec.ReleaseDir = real
-	if _, err := (Podman{Runner:runner}).Start(context.Background(), spec); err == nil {
+	if _, err := (Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}).Start(context.Background(), spec); err == nil {
 		t.Fatal("expected group-writable release directory rejection")
 	}
 	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for unsafe release directory: %+v", runner.calls) }
@@ -131,8 +131,20 @@ func TestStartRejectsSymlinkAndWritableReleaseDirectories(t *testing.T) {
 
 func TestStopAndRemoveRequireOpaqueContainerIDs(t *testing.T) {
 	runner := &fakeRunner{}
-	p := Podman{Runner:runner}
+	p := Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}
 	if err := p.Stop(context.Background(), "not-a-container"); err == nil { t.Fatal("expected invalid ID rejection") }
 	if err := p.Remove(context.Background(), "not-a-container"); err == nil { t.Fatal("expected invalid ID rejection") }
 	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for invalid ID: %+v", runner.calls) }
+}
+
+
+func TestStartRejectsNonAllowlistedRegistryBeforePodmanInvocation(t *testing.T) {
+	runner := &fakeRunner{rootless:"true"}
+	spec := validSpec(t)
+	spec.ImageDigest = "untrusted.example.net/nexora/app@sha256:" + strings.Repeat("b", 64)
+	p := Podman{Runner:runner, AllowedRegistries:[]string{"registry.example.com"}}
+	if _, err := p.Start(context.Background(), spec); err == nil {
+		t.Fatal("expected non-allowlisted image registry rejection")
+	}
+	if len(runner.calls) != 0 { t.Fatalf("Podman invoked for untrusted image registry: %+v", runner.calls) }
 }
