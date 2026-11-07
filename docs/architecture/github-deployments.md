@@ -52,6 +52,12 @@ Required workflow contract:
 - Do not allow arbitrary install/build shell commands from API input in the first release. Use a fixed command profile per supported framework, with customer settings limited to validated root/output directories and documented build options.
 - Do not enable automatic push deployments until signed webhook verification, replay protection, queue idempotency, and end-to-end tests are complete.
 
+## Static archive validation and extraction library
+
+The Linux agent now contains a standalone `internal/deployarchive` package with a gzip-tar validator and constrained extractor. The extractor validates the complete archive before writing, rejects links and special files, requires an empty private staging directory, creates files with normalized owner-only permissions, and compares SHA-256 digests across validation and extraction to detect input mutation between passes.
+
+This package is not yet invoked by the agent's artifact-download path and is not a publisher. It does not change ownership to a hosting account, create release metadata, switch a live document root, update Nginx, perform health checks, or roll back. A caller must discard the entire staging directory if extraction returns an error. The existing hosting VM remains a development node, not an approved multi-tenant publication target.
+
 ## Deployment state machine
 
 `queued -> dispatched -> building -> artifact_received -> validating -> publishing -> succeeded`
