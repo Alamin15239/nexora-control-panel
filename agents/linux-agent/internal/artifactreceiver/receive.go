@@ -219,7 +219,7 @@ func prepareStaticTree(root string) error {
 		}
 		return os.Chmod(path, 0644)
 	}); err != nil { return err }
-	return os.Chmod(root, 0750)
+	return os.Chmod(root, 02750)
 }
 
 func writeReleaseManifest(stagePath, releaseID, digest string, artifactBytes int64) error {
