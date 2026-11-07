@@ -3927,7 +3927,7 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
     buildMinutesUsed: Math.round((row.buildSecondsUsed / 60) * 100) / 100,
     buildSecondsRemaining: Math.max(0, quotaSeconds - row.buildSecondsUsed),
     quotaExhausted: row.buildSecondsUsed >= quotaSeconds,
-    meteringStatus: row.hasUsageEvents ? "active" : c.env.APPLICATION_BUILDER_METERING_SECRET ? "configured_no_reports" : "not_connected",
+    meteringStatus: row.hasUsageEvents ? "active" : "not_connected",
     executionEnabled: false,
     message: "Usage reports are accepted only from the authenticated isolated builder; build dispatch quota enforcement remains disabled.",
   });
