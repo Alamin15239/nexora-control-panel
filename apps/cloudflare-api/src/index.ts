@@ -5063,6 +5063,11 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "desired_replicas = 1, observed_replicas = 1, updated_at = datetime('now')",
     ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id),
     c.env.DB.prepare(
+      "UPDATE github_deployments SET status = 'succeeded', finished_at = datetime('now'), " +
+      "log_excerpt = 'Application health check succeeded.' " +
+      "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
+    ).bind(body.deploymentId, release.organizationId, release.projectId),
+    c.env.DB.prepare(
       "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
@@ -5087,6 +5092,11 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "status = 'unhealthy', observed_replicas = 0, updated_at = datetime('now')",
     ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
       release.previousActiveReleaseId, node.id),
+    c.env.DB.prepare(
+      "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), " +
+      "log_excerpt = 'Application health check failed.' " +
+      "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
+    ).bind(body.deploymentId, release.organizationId, release.projectId),
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
