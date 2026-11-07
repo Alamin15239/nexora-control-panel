@@ -91,10 +91,11 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	}
 	artifact := releaseArchive(t)
 	token := envelopeFor(t, signingKey, expected, artifact, now)
+	activationReported := false
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost ||
-			(r.URL.Path != artifactclient.ArtifactRequestPath && r.URL.Path != artifactclient.ArtifactValidationReportPath) {
+			(r.URL.Path != artifactclient.ArtifactRequestPath && r.URL.Path != artifactclient.ArtifactValidationReportPath && r.URL.Path != artifactclient.ArtifactActivationReportPath) {
 			t.Errorf("unexpected request target: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -112,6 +113,25 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 			r.Method, r.URL.Path, body, proof, time.Unix(issuedAt, 0)); verifyErr != nil {
 			t.Errorf("verify node proof: %v", verifyErr)
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == artifactclient.ArtifactActivationReportPath {
+			var report artifactclient.ActivationReport
+			if err := json.Unmarshal(body, &report); err != nil {
+				t.Errorf("decode activation report: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			digest := sha256.Sum256(artifact)
+			if report.DeploymentID != expected.DeploymentID || report.ReleaseID != expected.DeploymentID ||
+				report.ArtifactSHA256 != hex.EncodeToString(digest[:]) {
+				t.Errorf("unexpected activation report: %+v", report)
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			activationReported = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("{\"accepted\":true,\"releaseState\":\"health_checking\",\"workloadHealth\":\"pending\"}"))
 			return
 		}
 		if r.URL.Path == artifactclient.ArtifactValidationReportPath {
@@ -157,6 +177,7 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	}
 	result, err := FetchAndPublish(context.Background(), config, expected.DeploymentID)
 	if err != nil { t.Fatal(err) }
+	if !activationReported { t.Fatal("release activation acknowledgement was not submitted") }
 	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) {
 		t.Fatalf("unexpected publication result: %+v", result)
 	}
