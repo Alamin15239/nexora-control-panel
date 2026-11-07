@@ -30,7 +30,10 @@ class TestD1 {
   usageRow: { id: string; buildMinutesLimit: number; buildSecondsUsed: number } | null = null;
   deploymentRow = { id: "deployment-a", organizationId: "org-a", projectId: "project-a", status: "building" };
   usagePeriod: { organizationId: string; projectId: string; periodStart: string; buildSecondsUsed: number; buildMinutesLimit: number } | null = null;
-  usageEvents = new Map<string, { id: string; organizationId: string; projectId: string; deploymentId: string; periodStart: string; buildSeconds: number; buildResult: string; aggregatedAt: string | null }>();
+  usageEvents = new Map<string, { id: string; organizationId: string; projectId: string; deploymentId: string; periodStart: string; buildSeconds: number; buildResult: string; aggregatedAt: string | null; nodeId: string }>();
+  node = { id: "node-a", nodeIdentity: "builder-a", enrollmentKeyHash: "", signingPublicKey: null as string | null,
+    status: "pending", poolReady: true, agentVersion: null as string | null };
+  nodeNonces = new Set<string>();
 
   constructor(identity: TestIdentity | null) { this.identity = identity; }
 
@@ -47,15 +50,30 @@ class TestD1 {
           if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
           return (db.usageRow ?? { id: "project-a", buildMinutesLimit: 300, buildSecondsUsed: 0 }) as T;
         }
+        if (query.includes("FROM application_nodes n")) {
+          const [nodeIdentity] = values;
+          return nodeIdentity === db.node.nodeIdentity && db.node.status === "online" && db.node.poolReady && db.node.signingPublicKey
+            ? ({ id: db.node.id, signingPublicKey: db.node.signingPublicKey } as T) : null;
+        }
+        if (query.includes("FROM application_nodes WHERE node_identity")) {
+          return values[0] === db.node.nodeIdentity
+            ? ({ id: db.node.id, nodeIdentity: db.node.nodeIdentity, status: db.node.status, agentVersion: db.node.agentVersion } as T) : null;
+        }
         if (query.includes("FROM github_deployments d")) {
           const [deploymentId] = values;
           return deploymentId === db.deploymentRow.id && ["cloning", "installing", "building"].includes(db.deploymentRow.status)
             ? ({ ...db.deploymentRow } as T) : null;
         }
-        if (query.includes("FROM application_usage_events")) {
-          const [organizationId, projectId, deploymentId] = values;
+        if (query.includes("FROM application_usage_events e")) {
+          const [deploymentId, nodeId] = values;
           const event = db.usageEvents.get(String(deploymentId));
-          return event && event.organizationId === organizationId && event.projectId === projectId
+          return event && event.nodeId === nodeId
+            ? ({ id: event.id, periodStart: event.periodStart, organizationId: event.organizationId, projectId: event.projectId } as T) : null;
+        }
+        if (query.includes("FROM application_usage_events")) {
+          const [organizationId, projectId, deploymentId, nodeId] = values;
+          const event = db.usageEvents.get(String(deploymentId));
+          return event && event.organizationId === organizationId && event.projectId === projectId && event.nodeId === nodeId
             ? ({ id: event.id, periodStart: event.periodStart } as T) : null;
         }
         if (query.includes("FROM application_usage_periods")) {
@@ -122,6 +140,23 @@ class TestD1 {
       },
       async all<T>() { return { results: [] as T[] }; },
       async run() {
+        if (query.includes("UPDATE application_nodes SET signing_public_key")) {
+          const [publicKey, agentVersion, nodeIdentity, tokenHash] = values;
+          if (nodeIdentity === db.node.nodeIdentity && tokenHash === db.node.enrollmentKeyHash &&
+              db.node.status === "pending" && db.node.poolReady && !db.node.signingPublicKey) {
+            db.node.signingPublicKey = String(publicKey);
+            db.node.agentVersion = String(agentVersion);
+            db.node.status = "online";
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (query.includes("INSERT OR IGNORE INTO application_node_request_nonces")) {
+          const nonce = String(values[1]);
+          if (db.nodeNonces.has(nonce)) return { success: true, meta: { changes: 0 } };
+          db.nodeNonces.add(nonce);
+          return { success: true, meta: { changes: 1 } };
+        }
         if (query.includes("INSERT INTO application_project_settings")) {
           db.writes++;
           const [id, organizationId, projectId, runtimeProfileId, buildMethod, buildContext,
@@ -166,7 +201,7 @@ class TestD1 {
             this.deploymentRow.status !== "queued" && organizationId === this.deploymentRow.organizationId &&
             projectId === this.deploymentRow.projectId && this.usagePeriod?.periodStart === periodStart) {
           this.usageEvents.set(deploymentId, { id, organizationId, projectId, deploymentId, periodStart,
-            buildSeconds, buildResult, aggregatedAt: null });
+            buildSeconds, buildResult, aggregatedAt: null, nodeId });
           changes = 1;
         }
       } else if (query.includes("UPDATE application_usage_periods")) {
@@ -199,23 +234,31 @@ const identity = (role: TestIdentity["role"], organizationId = "org-a"): TestIde
   role,
 });
 
-function environment(db: TestD1, meteringSecret?: string) {
-  return { DB: db as unknown as D1Database, APPLICATION_BUILDER_METERING_SECRET: meteringSecret };
+function environment(db: TestD1) {
+  return { DB: db as unknown as D1Database };
 }
 
-async function signedBuilderRequest(body: unknown, secret: string, timestamp = String(Math.floor(Date.now() / 1000))) {
+async function createNodeKeyPair() {
+  const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const publicKey = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+  const privateKey = pair.privateKey;
+  const publicKeyHex = Array.from(publicKey, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { publicKeyHex, privateKey };
+}
+
+async function signedNodeRequest(body: unknown, privateKey: CryptoKey, nonce = "a".repeat(32), timestamp = String(Math.floor(Date.now() / 1000))) {
   const rawBody = JSON.stringify(body);
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key,
-    new TextEncoder().encode(timestamp + "." + rawBody)));
-  const signature = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const message = new TextEncoder().encode(timestamp + "." + nonce + "." + rawBody);
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, message));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return new Request("https://api.test/internal/v1/application-build-usage", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-nexora-builder-timestamp": timestamp,
-      "x-nexora-builder-signature": "sha256=" + signature,
+      "x-nexora-node-identity": "builder-a",
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
     },
     body: rawBody,
   });
@@ -370,58 +413,48 @@ test("project usage GET does not expose another organization's project", async (
 });
 
 
-test("builder usage ingestion is disabled when the signing secret is not configured", async () => {
+
+test("node enrollment consumes a one-time token and stores the Ed25519 public key", async () => {
   const db = new TestD1(null);
-  const response = await worker.fetch(
-    request("POST", "/internal/v1/application-build-usage", { deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" }),
-    environment(db),
-    {} as ExecutionContext,
-  );
-  assert.equal(response.status, 503);
+  const pair = await createNodeKeyPair();
+  const enrollmentToken = "e".repeat(64);
+  db.node.enrollmentKeyHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(enrollmentToken))),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/enroll", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nodeIdentity: "builder-a", enrollmentToken, publicKey: pair.publicKeyHex, agentVersion: "0.1.0" }),
+  }), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  assert.equal(db.node.status, "online");
+  assert.equal(db.node.signingPublicKey, pair.publicKeyHex);
+  const replay = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/enroll", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nodeIdentity: "builder-a", enrollmentToken, publicKey: pair.publicKeyHex, agentVersion: "0.1.0" }),
+  }), environment(db), {} as ExecutionContext);
+  assert.equal(replay.status, 409);
 });
 
-test("builder usage ingestion rejects an invalid HMAC signature", async () => {
+test("node enrollment rejects enrollment while its pool is not ready", async () => {
   const db = new TestD1(null);
-  const body = { deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" };
-  const rawBody = JSON.stringify(body);
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-build-usage", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-nexora-builder-timestamp": timestamp, "x-nexora-builder-signature": "sha256=" + "0".repeat(64) },
-    body: rawBody,
-  }), environment(db, "s".repeat(48)), {} as ExecutionContext);
-  assert.equal(response.status, 401);
+  db.node.poolReady = false;
+  const pair = await createNodeKeyPair();
+  const token = "e".repeat(64);
+  db.node.enrollmentKeyHash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))),
+    (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const response = await worker.fetch(new Request("https://api.test/internal/v1/application-nodes/enroll", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ nodeIdentity: "builder-a", enrollmentToken: token, publicKey: pair.publicKeyHex, agentVersion: "0.1.0" }),
+  }), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 409);
 });
 
-test("builder usage ingestion verifies HMAC before validating payload", async () => {
+test("per-node Ed25519 usage reports are accepted once and duplicate delivery is idempotent", async () => {
   const db = new TestD1(null);
-  const secret = "s".repeat(48);
-  const response = await worker.fetch(
-    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 0, buildResult: "succeeded" }, secret),
-    environment(db, secret),
-    {} as ExecutionContext,
-  );
-  assert.equal(response.status, 400);
-});
-
-test("builder usage ingestion rejects stale signed reports", async () => {
-  const db = new TestD1(null);
-  const secret = "s".repeat(48);
-  const staleTimestamp = String(Math.floor(Date.now() / 1000) - 600);
-  const response = await worker.fetch(
-    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 60, buildResult: "succeeded" }, secret, staleTimestamp),
-    environment(db, secret),
-    {} as ExecutionContext,
-  );
-  assert.equal(response.status, 401);
-});
-
-
-test("authenticated builder usage report is recorded once and replay is idempotent", async () => {
-  const db = new TestD1(null);
-  const secret = "s".repeat(48);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
   const body = { deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" };
-  const first = await worker.fetch(await signedBuilderRequest(body, secret), environment(db, secret), {} as ExecutionContext);
+  const first = await worker.fetch(await signedNodeRequest(body, pair.privateKey), environment(db), {} as ExecutionContext);
   assert.equal(first.status, 200);
   const firstResult = await first.json() as { accepted: boolean; duplicate: boolean; buildSecondsUsed: number; buildMinutesLimit: number };
   assert.equal(firstResult.accepted, true);
@@ -429,7 +462,7 @@ test("authenticated builder usage report is recorded once and replay is idempote
   assert.equal(firstResult.buildSecondsUsed, 90);
   assert.equal(firstResult.buildMinutesLimit, 300);
 
-  const replay = await worker.fetch(await signedBuilderRequest(body, secret), environment(db, secret), {} as ExecutionContext);
+  const replay = await worker.fetch(await signedNodeRequest(body, pair.privateKey), environment(db), {} as ExecutionContext);
   assert.equal(replay.status, 200);
   const replayResult = await replay.json() as { accepted: boolean; duplicate: boolean; buildSecondsUsed: number };
   assert.equal(replayResult.accepted, true);
@@ -438,15 +471,47 @@ test("authenticated builder usage report is recorded once and replay is idempote
   assert.equal(db.usageEvents.size, 1);
 });
 
-test("builder usage report cannot be submitted for a queued deployment", async () => {
+test("per-node usage authentication rejects invalid signatures and stale timestamps", async () => {
   const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
+  const bad = new Request("https://api.test/internal/v1/application-build-usage", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-nexora-node-identity": "builder-a",
+      "x-nexora-node-timestamp": String(Math.floor(Date.now() / 1000)), "x-nexora-node-nonce": "b".repeat(32),
+      "x-nexora-node-signature": "0".repeat(128) },
+    body: JSON.stringify({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" }),
+  });
+  const invalid = await worker.fetch(bad, environment(db), {} as ExecutionContext);
+  assert.equal(invalid.status, 401);
+  const stale = await worker.fetch(await signedNodeRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" },
+    pair.privateKey, "c".repeat(32), String(Math.floor(Date.now() / 1000) - 600)), environment(db), {} as ExecutionContext);
+  assert.equal(stale.status, 401);
+});
+
+test("per-node usage authentication rejects a revoked node and duplicate request nonce", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
+  db.nodeNonces.add("d".repeat(32));
+  const duplicateNonce = await worker.fetch(await signedNodeRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" },
+    pair.privateKey, "d".repeat(32)), environment(db), {} as ExecutionContext);
+  assert.equal(duplicateNonce.status, 409);
+  db.node.status = "revoked";
+  const revoked = await worker.fetch(await signedNodeRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" },
+    pair.privateKey, "f".repeat(32)), environment(db), {} as ExecutionContext);
+  assert.equal(revoked.status, 401);
+});
+
+test("per-node usage report rejects queued deployments", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
   db.deploymentRow.status = "queued";
-  const secret = "s".repeat(48);
-  const response = await worker.fetch(
-    await signedBuilderRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" }, secret),
-    environment(db, secret),
-    {} as ExecutionContext,
-  );
+  const response = await worker.fetch(await signedNodeRequest({ deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" },
+    pair.privateKey), environment(db), {} as ExecutionContext);
   assert.equal(response.status, 409);
-  assert.equal(db.usageEvents.size, 0);
 });
