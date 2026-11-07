@@ -79,7 +79,7 @@ func TestFetchRejectsDigestMismatch(t *testing.T) {
 		_, _ = w.Write([]byte("tampered"))
 	}))
 	defer server.Close()
-	_, err := Fetch(t.Context(), server.Client(), Config{
+	_, err := Fetch(context.Background(), server.Client(), Config{
 		ControlPlaneURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: privateKey,
 	}, "deployment-a")
 	if err == nil { t.Fatal("expected SHA-256 mismatch") }
@@ -96,7 +96,7 @@ func TestFetchDoesNotFollowRedirects(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	_, err := Fetch(t.Context(), server.Client(), Config{
+	_, err := Fetch(context.Background(), server.Client(), Config{
 		ControlPlaneURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: privateKey,
 	}, "deployment-a")
 	if err == nil { t.Fatal("expected redirect response to be rejected") }
