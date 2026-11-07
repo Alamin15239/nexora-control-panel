@@ -422,7 +422,6 @@ app.post("/v1/auth/forgot-password", async (c) => {
 
   const now = new Date();
   const nowIso = now.toISOString();
-  const throttleKey = await sha256("password-reset|" + user.id);
   const recent = await c.env.DB.prepare(
     "SELECT created_at AS createdAt FROM password_reset_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
   ).bind(user.id).first<{ createdAt: string }>();
