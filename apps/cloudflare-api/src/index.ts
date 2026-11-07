@@ -4998,6 +4998,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
+    previousActiveNodeId: string | null;
   }>();
   if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
   if (release.artifactDigest !== body.artifactSha256 ||
