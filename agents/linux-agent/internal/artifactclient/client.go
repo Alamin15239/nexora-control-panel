@@ -362,8 +362,14 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 		(report.HTTPStatus < 200 || report.HTTPStatus > 299 || report.FailureCode != "") {
 		return errors.New("healthy report requires a successful HTTP status and no failure code")
 	}
-	if report.HealthStatus == "unhealthy" && report.FailureCode == "" {
-		return errors.New("unhealthy report requires a failure code")
+	if report.HealthStatus == "unhealthy" {
+		allowedFailures := map[string]bool{
+			"connection_refused": true, "timeout": true, "http_4xx": true,
+			"http_5xx": true, "invalid_response": true, "process_exit": true, "probe_error": true,
+		}
+		if !allowedFailures[report.FailureCode] || (report.HTTPStatus >= 200 && report.HTTPStatus <= 299) {
+			return errors.New("unhealthy report requires a permitted failure code and a non-success HTTP status")
+		}
 	}
 	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
 	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
