@@ -37,7 +37,7 @@ class TestD1 {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
         if (query.includes("FROM auth_sessions s")) return db.identity as T | null;
-        if (query.includes("FROM github_projects p") && query.includes("JOIN hosting_accounts h")) {
+        if (query.includes("FROM github_projects p") && query.includes("JOIN hosting_accounts h") && !query.includes("LEFT JOIN application_project_settings")) {
           const [projectId, organizationId] = values;
           return projectId === "project-a" && organizationId === db.projectOrganizationId
             ? ({
