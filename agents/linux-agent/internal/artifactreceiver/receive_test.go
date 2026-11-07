@@ -19,7 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"strings"
+
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
 )
 
 type memoryReplayGuard struct {
@@ -164,4 +167,46 @@ func TestReceiveRejectsReplayedEnvelope(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(f.request.BaseDir,"staging"))
 	if err != nil { t.Fatal(err) }
 	if len(entries) != 0 { t.Fatalf("unexpected staging entries: %v", entries) }
+}
+
+
+func TestReceiveRetryRecognizesPreviouslyPublishedReleaseWithoutOverwrite(t *testing.T) {
+	f := newFixture(t)
+	first, err := Receive(context.Background(), f.request)
+	if err != nil { t.Fatal(err) }
+	if first.AlreadyPublished { t.Fatal("first publication was incorrectly marked as a retry") }
+
+	otherRelease := filepath.Join(f.request.BaseDir, "releases", "previous-release")
+	if err := os.Mkdir(otherRelease, 0700); err != nil { t.Fatal(err) }
+	if err := releasepublisher.Activate(f.request.BaseDir, "previous-release"); err != nil { t.Fatal(err) }
+
+	retry := f.request
+	retry.Token = signEnvelope(t, f.privateKey, f.request.Now, f.request.Expected, f.request.Artifact,
+		"11112222333344445555666677778888")
+	result, err := Receive(context.Background(), retry)
+	if err != nil { t.Fatal(err) }
+	if !result.AlreadyPublished { t.Fatal("retry was not recognized as already published") }
+	target, err := os.Readlink(filepath.Join(f.request.BaseDir, "current"))
+	if err != nil { t.Fatal(err) }
+	if target != filepath.Join("releases", f.request.Expected.DeploymentID) {
+		t.Fatalf("retry did not reconcile active release: %q", target)
+	}
+	entries, err := os.ReadDir(filepath.Join(f.request.BaseDir, "staging"))
+	if err != nil { t.Fatal(err) }
+	if len(entries) != 0 { t.Fatalf("retry unexpectedly extracted another staging release: %v", entries) }
+}
+
+func TestReceiveRefusesExistingReleaseWithMismatchedManifest(t *testing.T) {
+	f := newFixture(t)
+	if _, err := Receive(context.Background(), f.request); err != nil { t.Fatal(err) }
+	manifestPath := filepath.Join(f.request.BaseDir, "releases", f.request.Expected.DeploymentID, releaseManifestName)
+	if err := os.Chmod(manifestPath, 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(manifestPath, []byte("{\"version\":1,\"releaseId\":\"deploy_test_001\",\"artifactSha256\":\""+strings.Repeat("f",64)+"\",\"artifactBytes\":1}"), 0600); err != nil { t.Fatal(err) }
+
+	retry := f.request
+	retry.Token = signEnvelope(t, f.privateKey, f.request.Now, f.request.Expected, f.request.Artifact,
+		"99992222333344445555666677778888")
+	if _, err := Receive(context.Background(), retry); err == nil {
+		t.Fatal("mismatched existing release manifest was accepted")
+	}
 }
