@@ -9,20 +9,18 @@ ALTER TABLE application_usage_events
 DROP TRIGGER IF EXISTS application_usage_event_immutable_update;
 
 CREATE TRIGGER application_usage_event_immutable_update
-BEFORE UPDATE ON application_usage_events
-WHEN OLD.aggregated_at IS NOT NULL
-  OR NEW.aggregated_at IS NULL
-  OR NEW.id != OLD.id
-  OR NEW.organization_id != OLD.organization_id
-  OR NEW.project_id != OLD.project_id
-  OR NEW.deployment_id != OLD.deployment_id
-  OR NEW.period_start != OLD.period_start
-  OR NEW.build_seconds != OLD.build_seconds
-  OR NEW.source != OLD.source
-  OR NEW.build_result != OLD.build_result
-  OR NEW.recorded_at != OLD.recorded_at
+BEFORE UPDATE OF id, organization_id, project_id, deployment_id, period_start,
+                 build_seconds, source, build_result, recorded_at
+ON application_usage_events
 BEGIN
   SELECT RAISE(ABORT, 'application usage events are immutable');
+END;
+
+CREATE TRIGGER application_usage_event_aggregate_marker_once
+BEFORE UPDATE OF aggregated_at ON application_usage_events
+WHEN OLD.aggregated_at IS NOT NULL OR NEW.aggregated_at IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'application usage event aggregate marker is immutable');
 END;
 
 CREATE INDEX application_usage_events_pending_idx
