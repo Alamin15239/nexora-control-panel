@@ -64,7 +64,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     })).filter(group => group.items.length > 0);
   }, [search]);
 
-  if (pathname === "/login") return <>{children}</>;
+  if (pathname === "/login" || pathname === "/customer" || pathname.startsWith("/customer/")) return <>{children}</>;
 
   const isActive = (href: string) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
   const activeLabel = navigation.flatMap(group => group.items).find(item => isActive(item.href))?.label ?? "Workspace";
