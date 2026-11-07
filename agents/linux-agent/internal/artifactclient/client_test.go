@@ -198,7 +198,8 @@ func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T)
 	})
 	if err != nil { t.Fatal(err) }
 	if !ack.RollbackRequired || ack.RollbackTargetDeploymentID == nil ||
-		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.ReleaseState != "failed" {
+		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.RollbackTargetNodeID == nil ||
+             *ack.RollbackTargetNodeID != "previous-runtime-node" || ack.ReleaseState != "failed" {
 		t.Fatalf("unexpected rollback acknowledgement: %+v", ack)
 	}
 }
