@@ -136,11 +136,11 @@ func TestReportHealthCheckSignsNodeBoundReport(t *testing.T) {
 			t.Fatalf("unexpected health report: %+v", report)
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{\"accepted\":true}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"succeeded\",\"workloadHealth\":\"healthy\",\"rollbackRequired\":false,\"rollbackTargetDeploymentId\":null}"))
 	}))
 	defer server.Close()
 
-	err := ReportHealthCheck(context.Background(), server.Client(), Config{
+	ack, err := ReportHealthCheck(context.Background(), server.Client(), Config{
 		ControlPlaneURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: privateKey,
 	}, HealthCheckReport{
 		DeploymentID: "deployment-a",
@@ -151,6 +151,9 @@ func TestReportHealthCheckSignsNodeBoundReport(t *testing.T) {
 		DurationMs: 19,
 	})
 	if err != nil { t.Fatal(err) }
+	if !ack.Accepted || ack.ReleaseState != "succeeded" || ack.WorkloadHealth != "healthy" || ack.RollbackRequired {
+		t.Fatalf("unexpected health acknowledgement: %+v", ack)
+	}
 }
 
 func TestReportHealthCheckRejectsInconsistentOrUntrustedResults(t *testing.T) {
@@ -167,7 +170,7 @@ func TestReportHealthCheckRejectsInconsistentOrUntrustedResults(t *testing.T) {
 		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready",HealthStatus:"unhealthy",HTTPStatus:204,FailureCode:"timeout"},
 		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready?token=secret",HealthStatus:"healthy",HTTPStatus:200},
 	} {
-		if err := ReportHealthCheck(context.Background(), nil, config, report); err == nil {
+		if _, err := ReportHealthCheck(context.Background(), nil, config, report); err == nil {
 			t.Fatalf("expected invalid health report rejection: %+v", report)
 		}
 	}
