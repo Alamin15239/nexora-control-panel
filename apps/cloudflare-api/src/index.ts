@@ -3638,12 +3638,41 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
     return c.json({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
   }
+  const runtimeAssignment = await c.env.DB.prepare(
+    "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
+    "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, p.status AS poolStatus, " +
+    "p.isolation_level AS isolationLevel, " +
+    "EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key IS NOT NULL) AS hasOnlineRuntime " +
+    "FROM application_project_settings s " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
+    "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
+  ).bind(project.id, identity.organizationId).first<{
+    runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
+    runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
+    hasOnlineRuntime: number;
+  }>();
+  if (runtimeAssignment && (
+    runtimeAssignment.runtimeEnabled !== 1 ||
+    !runtimeAssignment.nodePoolId ||
+    runtimeAssignment.poolStatus !== "ready" ||
+    !["rootless", "microvm"].includes(runtimeAssignment.isolationLevel ?? "") ||
+    runtimeAssignment.hasOnlineRuntime !== 1
+  )) {
+    return c.json({
+      message: "Application deployment is not admitted: the runtime must be enabled and assigned to a ready isolated pool with an online runtime node.",
+    }, 409);
+  }
+
   const active = await c.env.DB.prepare(
     "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
   ).bind(project.id).first<{ id: string }>();
   if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
+  const applicationReleaseId = runtimeAssignment ? crypto.randomUUID() : null;
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
@@ -3658,11 +3687,32 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
     if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
 
-    await c.env.DB.prepare(
-      `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
-       VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
-    ).bind(deploymentId, identity.organizationId, project.id, commitData.sha, project.productionBranch,
-      (commitData.commit?.message ?? "").slice(0, 500)).run();
+    const creationStatements = [
+      c.env.DB.prepare(
+        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
+         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
+      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha.toLowerCase(), project.productionBranch,
+        (commitData.commit?.message ?? "").slice(0, 500)),
+    ];
+    if (runtimeAssignment && applicationReleaseId) {
+      creationStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_releases " +
+        "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, spec_version, state, source_commit_sha) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+      ).bind(applicationReleaseId, identity.organizationId, project.id, deploymentId,
+        runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
+      creationStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "VALUES (?, ?, ?, NULL, 'queued', 'user', ?, 'deployment_queued', ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, applicationReleaseId, identity.id,
+        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId })));
+    }
+    const created = await c.env.DB.batch(creationStatements);
+    if (Number(created[0]?.meta?.changes ?? 0) !== 1 ||
+        (runtimeAssignment && Number(created[1]?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("Unable to create the deployment and its application release atomically");
+    }
     deploymentCreated = true;
 
     const workflowPath = ".github/workflows/nexora-deploy.yml";
@@ -3703,7 +3753,13 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     ]);
     return c.json({
       deployment: { id: deploymentId, commitSha: commitData.sha, branch: project.productionBranch, status: "queued" },
-      message: "GitHub Actions accepted the workflow dispatch. Build execution is not complete until the isolated runner reports a verified artifact.",
+      applicationRelease: applicationReleaseId ? {
+        id: applicationReleaseId,
+        deploymentId,
+        nodePoolId: runtimeAssignment?.nodePoolId,
+        state: "queued",
+      } : null,
+      message: "GitHub Actions accepted the workflow dispatch. Application releases remain gated until the isolated runtime validates and publishes the artifact.",
     }, 202);
   } catch (error) {
     if (deploymentCreated && !dispatchAccepted) {
