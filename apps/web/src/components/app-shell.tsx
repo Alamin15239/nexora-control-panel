@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, ChevronDown, Cloud,
   Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole,
@@ -46,6 +46,8 @@ const navigation = [
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const [accessChecking, setAccessChecking] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -56,6 +58,32 @@ export default function AppShell({ children }: { children: ReactNode }) {
     Configuration: true,
   });
 
+  useEffect(() => {
+    if (pathname === "/login" || pathname === "/customer" || pathname.startsWith("/customer/")) {
+      setAccessChecking(false);
+      return;
+    }
+    let active = true;
+    setAccessChecking(true);
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then(async response => {
+        if (!response.ok) throw new Error("Not authenticated");
+        return response.json();
+      })
+      .then(user => {
+        if (!active) return;
+        if (user.role === "MEMBER" || user.customerAccess) {
+          router.replace("/customer");
+          return;
+        }
+        setAccessChecking(false);
+      })
+      .catch(() => {
+        if (active) router.replace("/login");
+      });
+    return () => { active = false; };
+  }, [pathname, router]);
+
   const filteredNavigation = useMemo(() => {
     const query = search.trim().toLowerCase();
     return navigation.map(group => ({
@@ -65,6 +93,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   }, [search]);
 
   if (pathname === "/login" || pathname === "/customer" || pathname.startsWith("/customer/")) return <>{children}</>;
+  if (accessChecking) return <main className="grid min-h-screen place-items-center bg-slate-50"><p className="text-sm text-slate-500">Checking workspace access…</p></main>;
 
   const isActive = (href: string) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
   const activeLabel = navigation.flatMap(group => group.items).find(item => isActive(item.href))?.label ?? "Workspace";
