@@ -10,6 +10,7 @@ type Account = { id: string; username: string; primary_domain: string | null; st
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
 
 type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
+type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number };
 
 function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -22,6 +23,11 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [startCommand, setStartCommand] = useState("");
   const [listenPort, setListenPort] = useState("");
   const [healthCheckPath, setHealthCheckPath] = useState("/");
+  const [cpuMillis, setCpuMillis] = useState("500");
+  const [memoryMiB, setMemoryMiB] = useState("512");
+  const [diskMiB, setDiskMiB] = useState("2048");
+  const [processLimit, setProcessLimit] = useState("128");
+  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -41,6 +47,7 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
       if (!profileResponse.ok) throw new Error(profileData.message ?? "Unable to load runtime catalog.");
       if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");
       setProfiles(profileData.profiles ?? []);
+      setPlanLimits(settingsData.planLimits ?? null);
       const current = settingsData.settings;
       if (current) {
         setRuntimeProfileId(current.runtimeProfileId ?? "");
@@ -51,6 +58,15 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
         setStartCommand(current.startCommand ?? "");
         setListenPort(current.listenPort ? String(current.listenPort) : "");
         setHealthCheckPath(current.healthCheckPath ?? "/");
+        setCpuMillis(String(current.resources?.cpuMillis ?? settingsData.planLimits?.cpuMillis ?? 500));
+        setMemoryMiB(String(current.resources?.memoryMiB ?? settingsData.planLimits?.memoryMiB ?? 512));
+        setDiskMiB(String(current.resources?.diskMiB ?? settingsData.planLimits?.diskMiB ?? 2048));
+        setProcessLimit(String(current.resources?.processLimit ?? settingsData.planLimits?.processLimit ?? 128));
+      } else if (settingsData.planLimits) {
+        setCpuMillis(String(Math.min(500, settingsData.planLimits.cpuMillis)));
+        setMemoryMiB(String(Math.min(512, settingsData.planLimits.memoryMiB)));
+        setDiskMiB(String(Math.min(2048, settingsData.planLimits.diskMiB)));
+        setProcessLimit(String(Math.min(128, settingsData.planLimits.processLimit)));
       }
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load runtime settings."); }
     finally { setLoading(false); }
@@ -71,6 +87,10 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
           outputDirectory: outputDirectory || null, startCommand: startCommand || null,
           listenPort: listenPort ? Number(listenPort) : null,
           healthCheckPath: healthCheckPath || null,
+          cpuMillis: Number(cpuMillis),
+          memoryMiB: Number(memoryMiB),
+          diskMiB: Number(diskMiB),
+          processLimit: Number(processLimit),
         }),
       });
       const data = await response.json();
@@ -123,6 +143,24 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
         <label className="space-y-1 text-xs font-medium text-slate-700">Health check path
           <input value={healthCheckPath} onChange={event => setHealthCheckPath(event.target.value)} maxLength={200} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="/health"/>
         </label>
+        <div className="md:col-span-2 rounded-lg border border-slate-200 bg-white p-3">
+          <p className="mb-3 text-xs font-semibold text-slate-700">Requested runtime resources</p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="space-y-1 text-xs text-slate-600">CPU (millicores)
+              <input type="number" min="100" max={planLimits?.cpuMillis ?? 8000} value={cpuMillis} onChange={event => setCpuMillis(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Memory (MiB)
+              <input type="number" min="128" max={planLimits?.memoryMiB ?? 16384} value={memoryMiB} onChange={event => setMemoryMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Storage (MiB)
+              <input type="number" min="128" max={planLimits?.diskMiB ?? 65536} value={diskMiB} onChange={event => setDiskMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Process limit
+              <input type="number" min="16" max={planLimits?.processLimit ?? 512} value={processLimit} onChange={event => setProcessLimit(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+          </div>
+          {planLimits && <p className="mt-2 text-[11px] text-slate-500">Hosting plan ceilings: {planLimits.cpuMillis} mCPU · {planLimits.memoryMiB} MiB RAM · {planLimits.diskMiB} MiB storage · {planLimits.processLimit} processes.</p>}
+        </div>
         <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-amber-700">{selectedProfile?.enabled ? "Runtime profile enabled; deployment still gated." : "Catalog only: execution is disabled. Settings are saved as metadata."}</p>
           <button type="submit" disabled={saving || !runtimeProfileId} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{saving ? "Saving…" : "Save runtime settings"}</button>
