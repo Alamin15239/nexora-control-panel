@@ -66,7 +66,7 @@ type OverviewData = {
 
 export default function Home() {
   const router = useRouter();
-  const [identity, setIdentity] = useState<{ displayName: string | null; email: string } | null>(null);
+  const [identity, setIdentity] = useState<{ displayName: string | null; email: string; role?: string; customerAccess?: boolean } | null>(null);
   const [checking, setChecking] = useState(true);
   const [overview, setOverview] = useState<OverviewData | null>(null);
   const [overviewError, setOverviewError] = useState("");
@@ -82,7 +82,14 @@ export default function Home() {
         if (!response.ok) throw new Error("Not signed in");
         return response.json();
       })
-      .then((user) => { if (active) setIdentity(user); })
+      .then((user) => {
+        if (!active) return;
+        if (user.role === "MEMBER" || user.customerAccess) {
+          router.replace("/customer");
+          return;
+        }
+        setIdentity(user);
+      })
       .catch(() => { if (active) router.replace("/login"); })
       .finally(() => { if (active) setChecking(false); });
     return () => { active = false; };
