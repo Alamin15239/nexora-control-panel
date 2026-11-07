@@ -188,8 +188,21 @@ must_reject(
 )
 
 db.execute("""INSERT INTO application_releases
-(id,organization_id,project_id,deployment_id,spec_version,source_commit_sha)
-VALUES ('release-a','org-a','project-a','deployment-a',1,?)""", ("a" * 40,))
+(id,organization_id,project_id,deployment_id,node_pool_id,runtime_profile_id,assigned_node_id,spec_version,source_commit_sha)
+VALUES ('release-a','org-a','project-a','deployment-a','pool-runtime','runtime-nodejs-v1','runtime-a',1,?)""", ("a" * 40,))
+assert db.execute(
+    "SELECT assigned_node_id FROM application_releases WHERE id='release-a'"
+).fetchone()[0] == "runtime-a"
+must_reject(
+    "release cannot be assigned to a builder node",
+    "UPDATE application_releases SET assigned_node_id='builder-a' WHERE id='release-a'",
+    (),
+)
+must_reject(
+    "release cannot lose its individual runtime node assignment",
+    "UPDATE application_releases SET assigned_node_id=NULL WHERE id='release-a'",
+    (),
+)
 must_reject(
     "invalid release state jump",
     "UPDATE application_releases SET state='succeeded' WHERE id='release-a'",
