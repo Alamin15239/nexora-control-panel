@@ -4183,9 +4183,48 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
       !/^[a-f0-9]{128}$/.test(signature)) {
     return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
   }
-  const rawBody = await c.req.text();
-  if (rawBody.length < 2 || rawBody.length > 1024) {
-    return c.json({ message: "Artifact request body is empty or too large." }, 413);
+  if (!/^application\\/json(?:;\\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Artifact requests must use application/json." }, 415);
+  }
+  const declaredLength = c.req.header("content-length");
+  if (declaredLength !== undefined) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 2 || parsedLength > 1024) {
+      return c.json({ message: "Artifact request body is empty or exceeds 1024 bytes." }, 413);
+    }
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Artifact request body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 1024) {
+        await reader.cancel();
+        return c.json({ message: "Artifact request body exceeds 1024 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read artifact request body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Artifact request body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    rawBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let rawBody: string;
+  try {
+    rawBody = new TextDecoder("utf-8", { fatal: true }).decode(rawBytes);
+  } catch {
+    return c.json({ message: "Artifact request body must be valid UTF-8." }, 400);
   }
   const node = await c.env.DB.prepare(
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
