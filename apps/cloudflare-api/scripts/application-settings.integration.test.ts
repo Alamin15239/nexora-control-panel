@@ -483,6 +483,20 @@ test("per-node Ed25519 usage reports are accepted once and duplicate delivery is
   assert.equal(conflict.status, 409);
 });
 
+test("a previously accepted node request nonce cannot be replayed even for an idempotent usage report", async () => {
+  const db = new TestD1(null);
+  const pair = await createNodeKeyPair();
+  db.node.signingPublicKey = pair.publicKeyHex;
+  db.node.status = "online";
+  const body = { deploymentId: "deployment-a", buildSeconds: 90, buildResult: "succeeded" };
+  const nonce = "a".repeat(32);
+  const first = await worker.fetch(await signedNodeRequest(body, pair.privateKey, nonce), environment(db), {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const replay = await worker.fetch(await signedNodeRequest(body, pair.privateKey, nonce), environment(db), {} as ExecutionContext);
+  assert.equal(replay.status, 409);
+  assert.equal(db.usageEvents.size, 1);
+});
+
 test("per-node usage authentication rejects invalid signatures and stale timestamps", async () => {
   const db = new TestD1(null);
   const pair = await createNodeKeyPair();
