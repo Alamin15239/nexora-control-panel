@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -61,7 +62,7 @@ func validatePersistentDataDir(path string) error {
 		return errors.New("persistent data directory must be an absolute clean path")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 || !ownedByCurrentUser(info) {
 		return errors.New("persistent data directory must be a real directory not writable by group or others")
 	}
 	return nil
@@ -73,7 +74,7 @@ func validateSecretDir(path string) error {
 		return errors.New("secret directory must be an absolute clean path")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || !ownedByCurrentUser(info) {
 		return errors.New("secret directory must be a real owner-only directory")
 	}
 	entries, err := os.ReadDir(path)
@@ -84,11 +85,16 @@ func validateSecretDir(path string) error {
 			return errors.New("secret directory contains an unsafe entry")
 		}
 		fileInfo, err := entry.Info()
-		if err != nil || fileInfo.Mode().Perm() != 0400 || fileInfo.Size() == 0 || fileInfo.Size() > 64<<10 {
+		if err != nil || fileInfo.Mode().Perm() != 0400 || !ownedByCurrentUser(fileInfo) || fileInfo.Size() == 0 || fileInfo.Size() > 64<<10 {
 			return errors.New("secret file must be a non-empty owner-read-only regular file within size limits")
 		}
 	}
 	return nil
+}
+
+func ownedByCurrentUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
 }
 
 func validateSpec(spec Spec) error {
@@ -102,7 +108,7 @@ func validateSpec(spec Spec) error {
 		return errors.New("release directory must be an absolute clean path")
 	}
 	info, err := os.Lstat(spec.ReleaseDir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 || !ownedByCurrentUser(info) {
 		return errors.New("release directory must be a real directory not writable by group or others")
 	}
 	if err := validatePersistentDataDir(spec.PersistentDataDir); err != nil { return err }
