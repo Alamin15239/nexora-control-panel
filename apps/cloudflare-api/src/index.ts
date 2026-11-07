@@ -3630,6 +3630,14 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
         "UPDATE application_releases SET artifact_digest = ?, artifact_bytes = ?, state = 'artifact_uploaded', updated_at = datetime('now') " +
         "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
       ).bind(artifactSHA256, receivedBytes, token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'building', 'artifact_uploaded', 'builder', NULL, 'artifact_uploaded', ? " +
+        "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'artifact_uploaded' " +
+        "AND artifact_digest = ? AND artifact_bytes = ?",
+      ).bind(crypto.randomUUID(), JSON.stringify({ bytes: receivedBytes }), token.deploymentId,
+        token.organizationId, artifactSHA256, receivedBytes),
     ]);
     if (Number(updates[0]?.meta?.changes ?? 0) !== 1) {
       await c.env.ARTIFACTS.delete(objectKey);
@@ -3640,6 +3648,7 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
       deploymentId: token.deploymentId,
       bytes: receivedBytes,
       applicationReleaseUpdated: Number(updates[1]?.meta?.changes ?? 0) === 1,
+      applicationReleaseEventRecorded: Number(updates[2]?.meta?.changes ?? 0) === 1,
     }, 202);
   } catch (error) {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
