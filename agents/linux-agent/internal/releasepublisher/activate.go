@@ -38,7 +38,7 @@ func validateName(name string) error {
 // Publish moves a private staging directory into the immutable releases
 // directory, then atomically switches the active symlink. Staging and releases
 // must be on the same filesystem. Existing release identifiers are never
-// overwritten. The staging directory is retained if activation fails.
+// overwritten. If activation fails, the immutable release remains stored but inactive.
 func Publish(baseDir, stagingID, releaseID string) error {
 	if err := validateBase(baseDir); err != nil { return err }
 	if err := validateName(stagingID); err != nil { return fmt.Errorf("invalid staging identifier: %w", err) }
@@ -83,8 +83,8 @@ func Activate(baseDir, releaseID string) error {
 	releasePath := filepath.Join(releasesRoot, releaseID)
 	info, err := os.Lstat(releasePath)
 	if err != nil { return fmt.Errorf("inspect target release: %w", err) }
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("target release must be a real directory")
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return errors.New("target release must be a real directory not writable by group or others")
 	}
 
 	active := filepath.Join(baseDir, "current")
