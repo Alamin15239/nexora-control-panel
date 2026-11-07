@@ -4413,6 +4413,83 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
   return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
 });
 
+app.get("/internal/v1/application-nodes/desired-state", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (c.req.raw.body !== null) {
+    return c.json({ message: "Desired-state polling does not accept a request body." }, 400);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "GET", path, "", signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to poll desired state." }, 401);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  // Return only node-assigned workload and successful release metadata.
+  // Customer commands, environment values, secrets and arbitrary spec_json
+  // are deliberately excluded. This endpoint cannot authorize execution.
+  const rows = await c.env.DB.prepare(
+    "SELECT w.id AS workloadId, w.project_id AS projectId, w.workload_kind AS workloadKind, " +
+    "w.status AS workloadStatus, w.desired_replicas AS desiredReplicas, " +
+    "w.observed_replicas AS observedReplicas, r.id AS releaseId, r.state AS releaseState, " +
+    "r.spec_version AS releaseSpecVersion, r.image_digest AS imageDigest, " +
+    "r.artifact_digest AS artifactDigest, s.spec_version AS settingsSpecVersion, " +
+    "s.runtime_profile_id AS runtimeProfileId, rp.profile_key AS runtimeProfileKey, " +
+    "rp.runtime_family AS runtimeFamily, rp.execution_kind AS executionKind, " +
+    "COALESCE(s.listen_port, rp.default_port) AS listenPort, " +
+    "s.cpu_millis AS cpuMillis, s.memory_mib AS memoryMiB, " +
+    "s.disk_mib AS diskMiB, s.process_limit AS processLimit " +
+    "FROM application_workloads w " +
+    "JOIN application_releases r ON r.id = w.active_release_id " +
+    "AND r.project_id = w.project_id AND r.organization_id = w.organization_id " +
+    "AND r.assigned_node_id = w.node_id AND r.state = 'succeeded' " +
+    "JOIN application_project_settings s ON s.project_id = w.project_id " +
+    "AND s.organization_id = w.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE w.node_id = ? ORDER BY w.updated_at DESC LIMIT 100",
+  ).bind(node.id).all<{
+    workloadId: string; projectId: string; workloadKind: string; workloadStatus: string;
+    desiredReplicas: number; observedReplicas: number; releaseId: string; releaseState: string;
+    releaseSpecVersion: number; imageDigest: string | null; artifactDigest: string | null;
+    settingsSpecVersion: number; runtimeProfileId: string; runtimeProfileKey: string;
+    runtimeFamily: string; executionKind: string; listenPort: number | null;
+    cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number;
+  }>();
+  return c.json({
+    nodeIdentity,
+    polledAt: new Date().toISOString(),
+    executionEnabled: false,
+    workloads: (rows.results ?? []).map((row) => ({
+      ...row,
+      desiredState: row.desiredReplicas > 0 ? "running" : "stopped",
+    })),
+    commandsIncluded: false,
+    secretsIncluded: false,
+  }, 200, { "cache-control": "no-store" });
+});
+
 app.post("/internal/v1/application-nodes/artifact", async (c) => {
   if (!c.env.ARTIFACTS) return c.json({ message: "Private application artifact storage is unavailable." }, 503);
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
