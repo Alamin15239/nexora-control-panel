@@ -2,6 +2,8 @@ package supervisorstate
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +54,7 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("inspect state directory: %w", err)
 	}
-	if !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0022 != 0 {
+	if !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("state directory must be a real directory not writable by group or others")
 	}
 	s := &Store{path: path}
@@ -172,7 +174,10 @@ func (s *Store) writeLocked(current snapshot) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	tmp, err := os.OpenFile(s.path+".tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil { return fmt.Errorf("generate state temp name: %w", err) }
+	tmpPath := s.path + ".tmp-" + hex.EncodeToString(nonce)
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil { return fmt.Errorf("create runtime state temp file: %w", err) }
 	tmpName := tmp.Name()
 	ok := false
