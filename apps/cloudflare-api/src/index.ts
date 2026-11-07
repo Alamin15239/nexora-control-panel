@@ -4580,6 +4580,151 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
   });
 });
 
+app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Validation reports must use application/json." }, 415);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Validation report body is empty or exceeds 2048 bytes." }, 413);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report archive validation." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid validation report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set(["deploymentId", "artifactSha256", "archiveEntries", "archiveFiles", "archiveBytes"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
+      !Number.isSafeInteger(body.archiveEntries) || Number(body.archiveEntries) < 1 || Number(body.archiveEntries) > 10000 ||
+      !Number.isSafeInteger(body.archiveFiles) || Number(body.archiveFiles) < 0 ||
+      Number(body.archiveFiles) > Number(body.archiveEntries) ||
+      !Number.isSafeInteger(body.archiveBytes) || Number(body.archiveBytes) < 0 || Number(body.archiveBytes) > 500 * 1024 * 1024) {
+    return c.json({ message: "Archive validation report is outside permitted bounds." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.state, r.artifact_digest AS artifactDigest, " +
+    "r.artifact_bytes AS releaseArtifactBytes, d.artifact_sha256 AS deploymentArtifactDigest, " +
+    "d.artifact_bytes AS deploymentArtifactBytes " +
+    "FROM application_releases r JOIN github_deployments d " +
+    "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId).first<{
+    releaseId: string; state: string; artifactDigest: string | null;
+    releaseArtifactBytes: number | null; deploymentArtifactDigest: string | null;
+    deploymentArtifactBytes: number | null;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256 ||
+      !Number.isSafeInteger(release.releaseArtifactBytes) ||
+      release.releaseArtifactBytes !== release.deploymentArtifactBytes) {
+    return c.json({ message: "Archive validation report does not match the assigned artifact metadata." }, 409);
+  }
+  const details = JSON.stringify({
+    artifactSha256: body.artifactSha256,
+    archiveEntries: body.archiveEntries,
+    archiveFiles: body.archiveFiles,
+    archiveBytes: body.archiveBytes,
+  });
+  if (release.state === "publishing") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? " +
+      "AND event_code = 'archive_validated_for_publish' AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseId, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Release is publishing without a matching validation record." }, 409);
+    return c.json({ accepted: true, duplicate: true, deploymentId: body.deploymentId, releaseState: "publishing" });
+  }
+  if (release.state !== "artifact_uploaded") {
+    return c.json({ message: "Application release is not awaiting archive validation." }, 409);
+  }
+
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'artifact_uploaded'",
+    ).bind(release.releaseId),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'artifact_uploaded', 'validating', 'node', ?, 'archive_validation_started', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'validating'",
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'ready_to_publish', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'validating'",
+    ).bind(release.releaseId),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'validating', 'ready_to_publish', 'node', ?, 'archive_validation_succeeded', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'ready_to_publish'",
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'ready_to_publish'",
+    ).bind(release.releaseId),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'ready_to_publish', 'publishing', 'node', ?, 'archive_validated_for_publish', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'publishing'",
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND status = 'online' AND revoked_at IS NULL",
+    ).bind(node.id),
+  ]);
+  if ([0, 2, 4, 6].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1) ||
+      [1, 3, 5].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Archive validation state transition could not be committed atomically." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: "publishing",
+    archive: {
+      entries: body.archiveEntries,
+      files: body.archiveFiles,
+      bytes: body.archiveBytes,
+    },
+  });
+});
+
 app.post("/internal/v1/application-build-usage", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
