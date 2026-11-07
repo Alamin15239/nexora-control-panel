@@ -4220,12 +4220,13 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     rawBytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  let rawBody: string;
-  try {
-    rawBody = new TextDecoder("utf-8", { fatal: true }).decode(rawBytes);
-  } catch {
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
     return c.json({ message: "Artifact request body must be valid UTF-8." }, 400);
   }
+  const rawBody = decodedBody;
   const node = await c.env.DB.prepare(
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
