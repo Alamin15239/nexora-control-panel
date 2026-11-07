@@ -2,6 +2,8 @@ package supervisorstate
 
 import (
 	"os"
+	"fmt"
+	"sync"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,4 +96,30 @@ func TestStateFileDoesNotPersistSecretFields(t *testing.T) {
 			t.Fatalf("runtime state unexpectedly contains forbidden field %q", forbidden)
 		}
 	}
+}
+
+func TestConcurrentUpsertsRemainConsistent(t *testing.T) {
+	store, _ := newStore(t)
+	const count = 24
+	var wg sync.WaitGroup
+	errors := make(chan error, count)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			item := WorkloadState{
+				WorkloadID: fmt.Sprintf("workload-%03d", index),
+				ReleaseID: fmt.Sprintf("release-%03d", index),
+				ContainerID: fmt.Sprintf("%032x", index+1),
+				State: "running",
+			}
+			if err := store.Upsert(item); err != nil { errors <- err }
+		}(i)
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors { t.Error(err) }
+	items, err := store.Load()
+	if err != nil { t.Fatal(err) }
+	if len(items) != count { t.Fatalf("persisted %d workloads, want %d", len(items), count) }
 }
