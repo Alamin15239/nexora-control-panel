@@ -48,7 +48,8 @@ func TestExtractGzipTarRejectsUnsafeOrNonEmptyDestinations(t *testing.T) {
 	})
 	t.Run("group-writable", func(t *testing.T) {
 		stage := filepath.Join(t.TempDir(), "stage")
-		if err := os.Mkdir(stage, 0770); err != nil { t.Fatal(err) }
+		if err := os.Mkdir(stage, 0700); err != nil { t.Fatal(err) }
+		if err := os.Chmod(stage, 0770); err != nil { t.Fatal(err) }
 		if _, err := ExtractGzipTar(bytes.NewReader(archive), stage, Limits{}); err == nil { t.Fatal("group-writable stage was accepted") }
 	})
 }
