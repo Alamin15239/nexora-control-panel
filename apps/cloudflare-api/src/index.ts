@@ -4730,6 +4730,154 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
   });
 });
 
+app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Activation reports must use application/json." }, 415);
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Activation report body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 1024) {
+        await reader.cancel();
+        return c.json({ message: "Activation report exceeds 1024 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read activation report body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Activation report body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) { rawBytes.set(chunk, offset); offset += chunk.byteLength; }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Activation report must be valid UTF-8." }, 400);
+  }
+
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, decodedBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report release activation." }, 401);
+  }
+
+  let input: unknown;
+  try { input = JSON.parse(decodedBody); } catch { return c.json({ message: "Invalid activation report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["deploymentId", "releaseId", "artifactSha256"].includes(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.releaseId !== "string" || body.releaseId !== body.deploymentId ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256)) {
+    return c.json({ message: "Release activation report is outside permitted bounds." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.state, r.artifact_digest AS artifactDigest, " +
+    "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
+    "FROM application_releases r JOIN github_deployments d " +
+    "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "WHERE r.deployment_id = ? AND r.id = ? AND r.node_pool_id = ? LIMIT 1",
+  ).bind(body.deploymentId, body.releaseId, node.nodePoolId).first<{
+    releaseId: string; state: string; artifactDigest: string | null;
+    deploymentArtifactDigest: string | null; nodePoolId: string;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256) {
+    return c.json({ message: "Activation report digest does not match the assigned release artifact." }, 409);
+  }
+
+  const details = JSON.stringify({
+    releaseId: body.releaseId,
+    artifactSha256: body.artifactSha256,
+  });
+  if (release.state === "health_checking") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? " +
+      "AND event_code = 'release_files_activated' AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseId, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Release is health_checking without a matching activation event." }, 409);
+    return c.json({
+      accepted: true, duplicate: true, deploymentId: body.deploymentId,
+      releaseState: "health_checking", workloadHealth: "pending",
+    });
+  }
+  if (release.state !== "publishing") {
+    return c.json({ message: "Application release is not awaiting filesystem activation." }, 409);
+  }
+
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'health_checking', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'publishing' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(release.releaseId, body.artifactSha256, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'publishing', 'health_checking', 'node', ?, 'release_files_activated', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, body.artifactSha256,
+      node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ]);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Release activation acknowledgement could not be committed safely." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: "health_checking",
+    workloadHealth: "pending",
+  });
+});
+
 app.post("/internal/v1/application-build-usage", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
