@@ -306,12 +306,16 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
       clearSessionCookie(response);
       return response;
     }
+    const customerAccess = await db.prepare(
+      "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+    ).bind(identity.id).first<{ active: number }>();
     return NextResponse.json({
       id: identity.id,
       email: identity.email,
       displayName: identity.displayName,
       organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
       role: identity.role,
+      customerAccess: Boolean(customerAccess),
     });
   } catch (error) {
     console.error("[Nexora auth] Session lookup failed:", error);
