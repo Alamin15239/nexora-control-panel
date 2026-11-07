@@ -245,3 +245,14 @@ The Linux runtime controller now composes the existing desired-state reconciliat
 The controller performs one lifecycle convergence, re-inspects the backend-owned container, verifies the observed container/workload/release identities, and only then persists the observed metadata snapshot. When a workload is no longer desired and no container remains, its stale metadata entry is deleted. Backend inspection or persistence errors are returned and are not silently treated as success.
 
 This remains a single-process local state foundation. It does not implement the authenticated control-plane polling loop, inter-process locking, container discovery after agent restart, service startup recovery, or customer workload authorization. It does not enable customer execution. Runtime execution remains disabled until the full node service, isolation, storage, egress, ingress, secret delivery, recovery, and end-to-end acceptance gates are complete.
+
+
+### Authenticated desired-state polling contract
+
+Runtime nodes may poll `GET /internal/v1/application-nodes/desired-state` using the established Ed25519 canonical request proof. The proof binds node identity, timestamp, one-time nonce, HTTP method, exact path, and SHA-256 of the empty request body. The API rejects stale proofs, reused nonces, revoked/offline nodes, builder-role nodes, non-ready pools, and pools that are not classified as rootless or microVM isolated.
+
+The query is constrained to workloads whose `node_id` equals the authenticated node and whose active release belongs to the same project and organization, is assigned to that exact node, and is in the successful state. The response is capped at 100 workload records and uses `Cache-Control: no-store`. It contains only workload/release identity, desired replica count, runtime profile metadata, and bounded resource metadata. Build/start commands, arbitrary `spec_json`, environment variables, and secrets are never returned.
+
+The endpoint always returns `executionEnabled: false`, `commandsIncluded: false`, and `secretsIncluded: false`. It is a read-only protocol foundation, not authorization to start customer workloads.
+
+The Linux runtime polling client signs GET requests with the node's Ed25519 key, requires HTTPS except for loopback tests, bounds response size, rejects unknown fields, duplicate workload IDs, invalid release states and out-of-range resource values, and fails closed if the API ever indicates execution or secret/command delivery is enabled. The client does not invoke the OCI supervisor.
