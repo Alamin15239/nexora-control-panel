@@ -195,8 +195,8 @@ class TestD1 {
           changes = 1;
         }
       } else if (query.includes("INSERT OR IGNORE INTO application_usage_events")) {
-        const [id, periodStart, buildSeconds, buildResult, deploymentId, organizationId, projectId] =
-          values as [string, string, number, string, string, string, string];
+        const [id, periodStart, buildSeconds, buildResult, nodeId, deploymentId, organizationId, projectId] =
+          values as [string, string, number, string, string, string, string, string];
         if (!this.usageEvents.has(deploymentId) && this.deploymentRow.id === deploymentId &&
             this.deploymentRow.status !== "queued" && organizationId === this.deploymentRow.organizationId &&
             projectId === this.deploymentRow.projectId && this.usagePeriod?.periodStart === periodStart) {
