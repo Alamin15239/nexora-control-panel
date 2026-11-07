@@ -71,14 +71,13 @@ class ArtifactD1 {
           } as T) : null;
         }
         if (query.includes("SELECT id FROM application_release_events")) {
-          const [, details] = values;
           if (query.includes("release_files_activated")) {
-            return db.activationEventDetails === details ? ({ id: "activation-event" } as T) : null;
+            return db.activationEventDetails === values[1] ? ({ id: "activation-event" } as T) : null;
           }
           if (values[1] === "health_check_succeeded" || values[1] === "health_check_failed") {
-            return db.healthEventDetails === details ? ({ id: "health-event" } as T) : null;
+            return db.healthEventDetails === values[2] ? ({ id: "health-event" } as T) : null;
           }
-          return db.validationEventDetails === details ? ({ id: "validation-event" } as T) : null;
+          return db.validationEventDetails === values[1] ? ({ id: "validation-event" } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("healthCheckPath")) {
           const [deploymentId, nodePoolId] = values;
