@@ -226,7 +226,7 @@ async function issueSession(db: D1Database, userId: string, organizationId: stri
 }
 
 async function verifyBuilderMeteringSignature(secret: string, timestamp: string, rawBody: string, signature: string) {
-  if (secret.length < 32 || !/^\\d{10}$/.test(timestamp)) return false;
+  if (secret.length < 32 || !/^\d{10}$/.test(timestamp)) return false;
   const issuedAt = Number(timestamp);
   if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
   const match = /^sha256=([a-f0-9]{64})$/i.exec(signature);
@@ -3988,19 +3988,19 @@ app.post("/internal/v1/application-build-usage", async (c) => {
   ]);
 
   const event = await db.prepare(
-    "SELECT id FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? LIMIT 1",
-  ).bind(deployment.organizationId, deployment.projectId, deploymentId).first<{ id: string }>();
+    "SELECT id, period_start AS periodStart FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, deploymentId).first<{ id: string; periodStart: string }>();
   if (!event) return c.json({ message: "Usage report could not be associated with an active deployment." }, 409);
   const usage = await db.prepare(
     "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
     "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
-  ).bind(deployment.organizationId, deployment.projectId, periodStart).first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
+  ).bind(deployment.organizationId, deployment.projectId, event.periodStart).first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
   if (!usage) return c.json({ message: "Usage aggregate is unavailable." }, 500);
   const inserted = Number(results[1]?.meta?.changes ?? 0) > 0;
   return c.json({
     accepted: true,
     duplicate: !inserted,
-    periodStart,
+    periodStart: event.periodStart,
     buildSecondsUsed: usage.buildSecondsUsed,
     buildMinutesLimit: usage.buildMinutesLimit,
     quotaExhausted: usage.buildSecondsUsed >= usage.buildMinutesLimit * 60,
