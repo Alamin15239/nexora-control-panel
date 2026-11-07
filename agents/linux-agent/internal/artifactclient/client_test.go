@@ -109,3 +109,66 @@ func nowFromTimestamp(t *testing.T, value string) time.Time {
 	if err != nil { t.Fatal(err) }
 	return time.Unix(seconds, 0)
 }
+
+
+func TestReportHealthCheckSignsNodeBoundReport(t *testing.T) {
+	publicKey, privateKey := testIdentity(t)
+	digest := sha256.Sum256([]byte("artifact"))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != ArtifactHealthCheckReportPath {
+			t.Fatalf("unexpected health report target: %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil { t.Fatal(err) }
+		proof := appnodeauth.Proof{
+			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
+			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
+			Signature: r.Header.Get("X-Nexora-Node-Signature"),
+		}
+		if err := appnodeauth.Verify(publicKey, r.Header.Get("X-Nexora-Node-Identity"),
+			r.Method, r.URL.Path, body, proof, nowFromTimestamp(t, proof.Timestamp)); err != nil {
+			t.Fatalf("health report signature invalid: %v", err)
+		}
+		var report map[string]any
+		if err := json.Unmarshal(body, &report); err != nil { t.Fatal(err) }
+		if report["deploymentId"] != "deployment-a" || report["probePath"] != "/ready" ||
+			report["healthStatus"] != "healthy" || report["httpStatus"] != float64(204) {
+			t.Fatalf("unexpected health report: %+v", report)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"accepted\":true}"))
+	}))
+	defer server.Close()
+
+	err := ReportHealthCheck(context.Background(), server.Client(), Config{
+		ControlPlaneURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: privateKey,
+	}, HealthCheckReport{
+		DeploymentID: "deployment-a",
+		ArtifactSHA256: hex.EncodeToString(digest[:]),
+		ProbePath: "/ready",
+		HealthStatus: "healthy",
+		HTTPStatus: 204,
+		DurationMs: 19,
+	})
+	if err != nil { t.Fatal(err) }
+}
+
+func TestReportHealthCheckRejectsInconsistentOrUntrustedResults(t *testing.T) {
+	_, privateKey := testIdentity(t)
+	config := Config{
+		ControlPlaneURL: "https://api.example.test",
+		NodeIdentity: "runtime-a",
+		PrivateKey: privateKey,
+	}
+	digest := hex.EncodeToString(make([]byte, 32))
+	for _, report := range []HealthCheckReport{
+		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready",HealthStatus:"healthy",HTTPStatus:503},
+		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready",HealthStatus:"unhealthy",HTTPStatus:503,FailureCode:"arbitrary"},
+		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready",HealthStatus:"unhealthy",HTTPStatus:204,FailureCode:"timeout"},
+		{DeploymentID:"deployment-a",ArtifactSHA256:digest,ProbePath:"/ready?token=secret",HealthStatus:"healthy",HTTPStatus:200},
+	} {
+		if err := ReportHealthCheck(context.Background(), nil, config, report); err == nil {
+			t.Fatalf("expected invalid health report rejection: %+v", report)
+		}
+	}
+}
