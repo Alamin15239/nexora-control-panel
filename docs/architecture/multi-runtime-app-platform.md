@@ -244,7 +244,7 @@ The Linux runtime controller now composes the existing desired-state reconciliat
 
 The controller performs one lifecycle convergence, re-inspects the backend-owned container, verifies the observed container/workload/release identities, and only then persists the observed metadata snapshot. When a workload is no longer desired and no container remains, its stale metadata entry is deleted. Backend inspection or persistence errors are returned and are not silently treated as success.
 
-This remains a single-process local state foundation. It does not implement the authenticated control-plane polling loop, inter-process locking, container discovery after agent restart, service startup recovery, or customer workload authorization. It does not enable customer execution. Runtime execution remains disabled until the full node service, isolation, storage, egress, ingress, secret delivery, recovery, and end-to-end acceptance gates are complete.
+This remains a single-process local state foundation. The controller also exposes a fail-closed startup recovery primitive that loads the snapshot, inspects each exact container ID, verifies immutable workload/release ownership, and refreshes observed states. It does not yet wire that recovery call into the running agent's systemd startup path, implement inter-process locking or full container discovery when the snapshot is missing, or authorize customer workload execution. It does not enable customer execution. Runtime execution remains disabled until the full node service, isolation, storage, egress, ingress, secret delivery, recovery, and end-to-end acceptance gates are complete.
 
 
 ### Authenticated desired-state polling contract
