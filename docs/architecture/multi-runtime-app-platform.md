@@ -90,6 +90,14 @@ Error paths: FAILED, CANCELLED and ROLLED_BACK. Transitions must be conditional 
 - Enable only after all prior gates, runbooks, alerts, incident response, backups, restore drills, usage enforcement and support processes are ready.
 - Start with an allowlisted pilot and expand only against measured capacity.
 
+## Isolated-builder usage report authentication
+
+The internal `POST /internal/v1/application-build-usage` endpoint accepts only a bounded JSON completion report signed with HMAC-SHA256. The signature covers the exact raw request body and a Unix timestamp (`timestamp + "." + rawBody)); reports outside a five-minute clock-skew window are rejected. The signing secret is a Worker secret named `APPLICATION_BUILDER_METERING_SECRET` and must be at least 32 characters. It is intentionally not configured by this change, so the endpoint returns 503 until an isolated builder is provisioned and the secret is installed through the secret manager.
+
+Accepted reports contain only `deploymentId`, `buildSeconds` (1–604,800), and `buildResult` (`succeeded`, `failed`, or `cancelled`). The API independently resolves the deployment's organization/project and requires an active build state; callers cannot choose a tenant, project, period, or quota. A D1 batch inserts the monthly period snapshot, inserts one unique event per deployment, adds all pending event seconds to the aggregate, and marks those events aggregated in one transaction. Replayed reports are idempotent, including retries after a month boundary; the original event period is returned.
+
+This first ingestion boundary uses one shared HMAC secret as a bootstrap control. Before multi-node builder rollout, replace it with per-node credentials or asymmetric node identity, key rotation/revocation, and builder-pool authorization. The endpoint records metering only; it does not authorize a build, alter deployment status, publish artifacts, or enforce quota at dispatch. Customer execution remains disabled.
+
 ## Monthly build-minute accounting
 
 Hosting plans carry an explicit monthly application build-minute allowance (default 300 minutes; administrators may configure 0–100,000 minutes). The period is the UTC calendar month. Usage is stored as integer build seconds to avoid rounding each short build upward; API responses expose both seconds and fractional minutes.
