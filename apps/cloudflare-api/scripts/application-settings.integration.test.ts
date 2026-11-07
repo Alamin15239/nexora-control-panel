@@ -27,6 +27,7 @@ class TestD1 {
   settings: SavedSettings | null = null;
   writes = 0;
   audits = 0;
+  usageRow: { id: string; buildMinutesLimit: number; buildSecondsUsed: number } | null = null;
 
   constructor(identity: TestIdentity | null) { this.identity = identity; }
 
@@ -36,6 +37,11 @@ class TestD1 {
     const statement = {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
+        if (query.includes("FROM application_usage_periods")) {
+          const [periodStart, projectId, organizationId] = values;
+          if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
+          return (db.usageRow ?? { id: "project-a", buildMinutesLimit: 300, buildSecondsUsed: 0 }) as T;
+        }
         if (query.includes("FROM auth_sessions s")) return db.identity as T | null;
         if (query.includes("FROM github_projects p") && query.includes("JOIN hosting_accounts h") && !query.includes("LEFT JOIN application_project_settings")) {
           const [projectId, organizationId] = values;
@@ -245,5 +251,39 @@ test("settings GET does not reveal projects from another organization", async ()
   const db = new TestD1(identity("MEMBER"));
   db.projectOrganizationId = "org-b";
   const response = await worker.fetch(request("GET", "/v1/applications/projects/project-a/settings"), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 404);
+});
+
+
+test("project usage GET requires authentication", async () => {
+  const db = new TestD1(null);
+  const response = await worker.fetch(request("GET", "/v1/applications/projects/project-a/usage", undefined, false), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 401);
+});
+
+test("project usage GET is tenant-scoped and reports current monthly allowance", async () => {
+  const db = new TestD1(identity("MEMBER"));
+  db.usageRow = { id: "project-a", buildMinutesLimit: 300, buildSecondsUsed: 90 };
+  const response = await worker.fetch(request("GET", "/v1/applications/projects/project-a/usage"), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const result = await response.json() as {
+    buildMinutesLimit: number; buildSecondsUsed: number; buildMinutesUsed: number;
+    buildSecondsRemaining: number; quotaExhausted: boolean; executionEnabled: boolean;
+    meteringStatus: string; periodStart: string;
+  };
+  assert.equal(result.buildMinutesLimit, 300);
+  assert.equal(result.buildSecondsUsed, 90);
+  assert.equal(result.buildMinutesUsed, 1.5);
+  assert.equal(result.buildSecondsRemaining, 17910);
+  assert.equal(result.quotaExhausted, false);
+  assert.equal(result.executionEnabled, false);
+  assert.equal(result.meteringStatus, "not_connected");
+  assert.match(result.periodStart, /^\\d{4}-\\d{2}-01$/);
+});
+
+test("project usage GET does not expose another organization's project", async () => {
+  const db = new TestD1(identity("MEMBER"));
+  db.projectOrganizationId = "org-b";
+  const response = await worker.fetch(request("GET", "/v1/applications/projects/project-a/usage"), environment(db), {} as ExecutionContext);
   assert.equal(response.status, 404);
 });
