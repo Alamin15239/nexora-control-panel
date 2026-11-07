@@ -24,7 +24,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/supervisorstate"
 )
 
-var runtimeNodeIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$`)
+var runtimeNodeIdentityPattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
 
 type Config struct {
 	ControlPlaneURL string `json:"control_plane_url"`
