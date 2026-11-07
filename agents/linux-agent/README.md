@@ -89,3 +89,38 @@ The service unit is `systemd/nexora-runtime-node.service`. It runs under a dedic
 At startup the process loads and validates the durable supervisor snapshot, then verifies every recorded container through Podman and fails closed on an ownership mismatch or missing container. An absent snapshot is treated as an empty first-boot state. It then performs signed Ed25519 desired-state polling at the configured interval.
 
 **Execution remains disabled.** The client rejects any response that enables execution or includes commands/secrets. It does not call `Controller.Converge`, start/stop/restart containers, create volumes, or deliver secrets. Rootless Podman service/storage integration, actual runtime activation, and host network policy remain separate acceptance gates. The example registry allowlist is configuration only and is not a claim that an image build or deployment pipeline exists.
+
+## Isolated static artifact publisher (activation milestone)
+
+The separate `nexora-static-publisher` service consumes only static releases explicitly assigned to its enrolled runtime node. It does not run npm, shell commands, customer processes, OCI containers or build scripts. It:
+
+1. Polls an authenticated, nonce-protected control-plane endpoint for releases assigned to its exact node.
+2. Accepts only the enabled `static-v1` profile and projects configured with the `static` build method.
+3. Downloads the artifact only through the node-authenticated artifact endpoint.
+4. Verifies the short-lived RS256 deployment envelope against an operator-installed public key and checks organization, project, deployment, hosting account, repository ID and immutable commit identity.
+5. Verifies the SHA-256 digest and bounded gzip/tar archive, rejects links/traversal/special files, extracts into a private staging directory, and atomically switches the account's `current` symlink.
+6. Reports archive validation and release activation to the control plane using signed node requests. Activation moves the release to `health_checking`; it does **not** claim that the website is reachable or healthy.
+
+Build and test:
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-publisher ./cmd/nexora-static-publisher
+```
+
+### Operator preparation (not performed by CI)
+
+The service is not enabled by default. Before installing it, the operator must:
+
+- Enroll a dedicated runtime node in a ready `rootless` or `microvm` pool and configure its owner-only Ed25519 private-key file.
+- Install the matching RSA deployment-envelope public key, key ID, issuer and audience. The private signing key remains only in the Cloudflare Worker secret store.
+- Create `/var/lib/nexora-static`, `accounts`, and each assigned account directory as real, non-symlink directories. The account ID directory must be provisioned out-of-band from the trusted hosting-account mapping.
+- Make the publisher's `staging` and `releases` directories operator-owned and setgid with the dedicated read-only static-origin group (for example `www-data`). The publisher base and these directories must not be group/world writable. Create the replay directory mode `0700`.
+- Configure the web server's document root for each account as `/var/lib/nexora-static/accounts/<hosting-account-id>/current`. The service makes validated regular files readable (0644), directories traversable (0755), and the release root 0750. The web-server group receives read/traverse access only; it must not be able to modify releases.
+- Verify Nginx can read a manually staged test release, and test rollback by switching the `current` symlink to a previous immutable release before enabling the service.
+
+Example config: `config.static-publisher.example.json`. Install a completed, owner-only configuration at `/etc/nexora-static-publisher/node.json`, and place the node key and public trust key in the configured paths. Install `systemd/nexora-static-publisher.service`, then use `systemd-analyze verify` before enabling the unit.
+
+**Do not enable this service on the existing VirtualBox development VM or any customer node yet.** The publisher is a controlled static-file activation component, not a complete production release service. External HTTP health probes, rollback orchestration, web-server routing, account quota enforcement, production tenant-isolation tests, and live Cloudflare/D1/R2 configuration verification remain release gates. The runtime OCI execution loop remains disabled.
