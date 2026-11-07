@@ -37,6 +37,7 @@ class ArtifactD1 {
   nonces = new Set<string>();
   lastSignatureUpdated = false;
   validationEventDetails: string | null = null;
+  activationEventDetails: string | null = null;
 
   async batch(statements: Array<{ run: () => Promise<{ success: boolean; meta: { changes: number } }> }>) {
     const results = [];
@@ -66,19 +67,31 @@ class ArtifactD1 {
         }
         if (query.includes("SELECT id FROM application_release_events")) {
           const [, details] = values;
+          if (query.includes("release_files_activated")) {
+            return db.activationEventDetails === details ? ({ id: "activation-event" } as T) : null;
+          }
           return db.validationEventDetails === details ? ({ id: "validation-event" } as T) : null;
         }
-        if (query.includes("FROM application_releases r") && query.includes("artifactDigest")) {
+        if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
           const [deploymentId, nodePoolId] = values;
-          return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId
-            ? ({
-                releaseId: db.release.releaseId,
-                state: db.release.state,
-                artifactDigest: db.release.releaseArtifactDigest,
-                releaseArtifactBytes: db.release.releaseArtifactBytes,
-                deploymentArtifactDigest: db.release.artifactSha256,
-                deploymentArtifactBytes: db.release.artifactBytes,
-              } as T) : null;
+          if (deploymentId !== db.release.deploymentId || nodePoolId !== db.release.nodePoolId) return null;
+          if (query.includes("releaseArtifactBytes")) {
+            return ({
+              releaseId: db.release.releaseId,
+              state: db.release.state,
+              artifactDigest: db.release.releaseArtifactDigest,
+              releaseArtifactBytes: db.release.releaseArtifactBytes,
+              deploymentArtifactDigest: db.release.artifactSha256,
+              deploymentArtifactBytes: db.release.artifactBytes,
+            } as T);
+          }
+          return ({
+            releaseId: db.release.releaseId,
+            state: db.release.state,
+            artifactDigest: db.release.releaseArtifactDigest,
+            deploymentArtifactDigest: db.release.artifactSha256,
+            nodePoolId: db.release.nodePoolId,
+          } as T);
         }
         if (query.includes("FROM application_releases r")) {
           const [deploymentId, nodePoolId] = values;
@@ -116,8 +129,16 @@ class ArtifactD1 {
           db.release.state = "publishing";
           return { success: true, meta: { changes: 1 } };
         }
+        if (query.includes("UPDATE application_releases SET state = 'health_checking'")) {
+          if (db.release.state !== "publishing") return { success: true, meta: { changes: 0 } };
+          db.release.state = "health_checking";
+          return { success: true, meta: { changes: 1 } };
+        }
         if (query.includes("INSERT INTO application_release_events") && query.includes("archive_validated_for_publish")) {
           db.validationEventDetails = String(values[2]);
+        }
+        if (query.includes("INSERT INTO application_release_events") && query.includes("release_files_activated")) {
+          db.activationEventDetails = String(values[2]);
         }
         if (query.includes("UPDATE application_nodes SET last_signature_at")) {
           db.lastSignatureUpdated = true;
@@ -187,6 +208,35 @@ async function signedValidationReportRequest(
   nodeIdentity = "runtime-a",
 ) {
   const path = "/internal/v1/application-nodes/releases/validated";
+  const rawBody = JSON.stringify(report);
+  const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
+  const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const message = [
+    "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, "POST", path, bodyHashHex,
+  ].join("\n");
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(message)));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": nodeIdentity,
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+    body: rawBody,
+  });
+}
+
+async function signedActivationRequest(
+  privateKey: CryptoKey,
+  report: { deploymentId: string; releaseId: string; artifactSha256: string },
+  nonce = "8".repeat(32),
+  nodeIdentity = "runtime-a",
+) {
+  const path = "/internal/v1/application-nodes/releases/activated";
   const rawBody = JSON.stringify(report);
   const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
   const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -432,3 +482,76 @@ test("archive validation report rejects digest mismatch and unsafe node identity
   assert.equal(db.release.state, "artifact_uploaded");
 });
 
+
+
+test("signed release activation advances publishing to health_checking, not succeeded", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "publishing";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a",
+    releaseId: "deployment-a",
+    artifactSha256: await artifactDigestPromise,
+  };
+  const response = await worker.fetch(await signedActivationRequest(node.privateKey, report),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const body = await response.json() as { accepted: boolean; releaseState: string; workloadHealth: string };
+  assert.equal(body.accepted, true);
+  assert.equal(body.releaseState, "health_checking");
+  assert.equal(body.workloadHealth, "pending");
+  assert.equal(db.release.state, "health_checking");
+  assert.ok(db.activationEventDetails);
+});
+
+test("release activation acknowledgement is idempotent for an exact report", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "publishing";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a",
+    releaseId: "deployment-a",
+    artifactSha256: await artifactDigestPromise,
+  };
+  const env = { DB: db as unknown as D1Database };
+  const first = await worker.fetch(await signedActivationRequest(node.privateKey, report, "5".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const duplicate = await worker.fetch(await signedActivationRequest(node.privateKey, report, "6".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(duplicate.status, 200);
+  const body = await duplicate.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(body.duplicate, true);
+  assert.equal(body.releaseState, "health_checking");
+});
+
+test("release activation rejects digest mismatch, unassigned node, and replayed nonce", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "publishing";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const env = { DB: db as unknown as D1Database };
+  const mismatch = await worker.fetch(await signedActivationRequest(node.privateKey, {
+    deploymentId: "deployment-a", releaseId: "deployment-a", artifactSha256: "f".repeat(64),
+  }, "7".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(mismatch.status, 409);
+  const wrongNode = await worker.fetch(await signedActivationRequest(node.privateKey, {
+    deploymentId: "deployment-a", releaseId: "deployment-a", artifactSha256: await artifactDigestPromise,
+  }, "8".repeat(32), "another-runtime"), env, {} as ExecutionContext);
+  assert.equal(wrongNode.status, 401);
+  const nonce = "9".repeat(32);
+  const valid = await worker.fetch(await signedActivationRequest(node.privateKey, {
+    deploymentId: "deployment-a", releaseId: "deployment-a", artifactSha256: await artifactDigestPromise,
+  }, nonce), env, {} as ExecutionContext);
+  assert.equal(valid.status, 200);
+  const replay = await worker.fetch(await signedActivationRequest(node.privateKey, {
+    deploymentId: "deployment-a", releaseId: "deployment-a", artifactSha256: await artifactDigestPromise,
+  }, nonce), env, {} as ExecutionContext);
+  assert.equal(replay.status, 409);
+});
