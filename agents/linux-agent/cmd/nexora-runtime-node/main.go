@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/signal"
@@ -84,7 +85,7 @@ func loadConfig(path string) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil { return cfg, fmt.Errorf("decode runtime config: %w", err) }
 	var extra any
-	if err := decoder.Decode(&extra); err == nil { return cfg, errors.New("runtime config contains trailing JSON data") }
+	if err := decoder.Decode(&extra); err != io.EOF { return cfg, errors.New("runtime config contains trailing or malformed JSON data") }
 	u, err := url.Parse(cfg.ControlPlaneURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return cfg, errors.New("control_plane_url must be an HTTPS origin without credentials, path, query or fragment")
