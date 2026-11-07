@@ -514,12 +514,16 @@ app.get("/v1/overview", async (c) => {
 app.get("/v1/auth/me", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const customerAccess = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(identity.id).first<{ active: number }>();
   return c.json({
     id: identity.id,
     email: identity.email,
     displayName: identity.displayName,
     organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
     role: identity.role,
+    customerAccess: Boolean(customerAccess),
   });
 });
 
