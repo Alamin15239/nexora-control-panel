@@ -58,9 +58,10 @@ func TestStartUsesRootlessConstrainedPodman(t *testing.T) {
 	create := strings.Join(runner.calls[1], " ")
 	for _, required := range []string{
 		"--read-only", "--cap-drop ALL", "--security-opt no-new-privileges",
-		"--user 10001:10001", "--pids-limit 128", "--memory 512m",
+		"--userns keep-id:uid=10001,gid=10001", "--user 10001:10001", "--pids-limit 128", "--memory 512m",
 		"--memory-swap 512m", "--cpus 0.500", "--network slirp4netns",
 		"--publish 127.0.0.1:18080:8080", "--ipc private", "--pid private",
+		"--log-driver k8s-file", "--log-opt max-size=10mb",
 		"dst=/app,ro=true", spec.ImageDigest,
 	} {
 		if !strings.Contains(create, required) { t.Errorf("create command missing %q: %s", required, create) }
