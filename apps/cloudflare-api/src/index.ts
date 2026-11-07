@@ -1628,6 +1628,53 @@ app.get("/v1/customer/hosting-accounts/:id/overview", async (c) => {
   return c.json({ account });
 });
 
+// Customer website inventory: only the active member's selected hosting account.
+app.get("/v1/customer/hosting-accounts/:id/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND a.organization_id = ? AND m.user_id = ?
+       AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.organizationId, identity.id).first<{ id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at,
+            (SELECT j.status FROM provisioning_jobs j
+             WHERE j.idempotency_key = 'add-domain:' || d.id AND j.operation = 'ADD_DOMAIN'
+             LIMIT 1) AS job_status
+     FROM domains d
+     WHERE d.hosting_account_id = ?
+     ORDER BY d.is_primary DESC, d.created_at ASC`,
+  ).bind(membership.id).all();
+  return c.json({ domains: result.results ?? [] });
+});
+
+// Customer database inventory: metadata only; credentials and mutations are never returned here.
+app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND a.organization_id = ? AND m.user_id = ?
+       AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.organizationId, identity.id).first<{ id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.engine, d.status, d.created_at,
+            (SELECT COUNT(*) FROM hosting_database_users u
+             WHERE u.database_id = d.id AND u.status = 'ACTIVE') AS active_users
+     FROM hosting_databases d
+     WHERE d.hosting_account_id = ? AND d.organization_id = ? AND d.status != 'DELETED'
+     ORDER BY d.created_at DESC`,
+  ).bind(membership.id, identity.organizationId).all();
+  return c.json({ databases: result.results ?? [] });
+});
+
 app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
