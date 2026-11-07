@@ -4183,7 +4183,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
       !/^[a-f0-9]{128}$/.test(signature)) {
     return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
   }
-  if (!/^application\\/json(?:;\\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
     return c.json({ message: "Artifact requests must use application/json." }, 415);
   }
   const declaredLength = c.req.header("content-length");
