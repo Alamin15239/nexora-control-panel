@@ -27,3 +27,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile
       - name: Typecheck Cloudflare Worker
         run: pnpm --filter @nexora/cloudflare-api typecheck
+      - name: Test D1 migration schema and tenant guards
+        run: python3 apps/cloudflare-api/scripts/test_migrations.py
+      - name: Test application settings HTTP routes
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/application-*.integration.test.ts

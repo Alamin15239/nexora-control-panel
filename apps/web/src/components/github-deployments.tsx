@@ -9,6 +9,182 @@ type Repository = { id: number; name: string; fullName: string; private: boolean
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
 
+type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
+type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
+type RuntimeUsage = { periodStart: string; buildMinutesLimit: number; buildMinutesUsed: number; buildSecondsRemaining: number; quotaExhausted: boolean; meteringStatus: string; executionEnabled: boolean };
+
+function RuntimeProjectSettings({ projectId }: { projectId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [profiles, setProfiles] = useState<RuntimeProfile[]>([]);
+  const [runtimeProfileId, setRuntimeProfileId] = useState("");
+  const [buildMethod, setBuildMethod] = useState("managed");
+  const [buildContext, setBuildContext] = useState(".");
+  const [buildCommand, setBuildCommand] = useState("");
+  const [outputDirectory, setOutputDirectory] = useState("");
+  const [startCommand, setStartCommand] = useState("");
+  const [listenPort, setListenPort] = useState("");
+  const [healthCheckPath, setHealthCheckPath] = useState("/");
+  const [cpuMillis, setCpuMillis] = useState("500");
+  const [memoryMiB, setMemoryMiB] = useState("512");
+  const [diskMiB, setDiskMiB] = useState("2048");
+  const [processLimit, setProcessLimit] = useState("128");
+  const [planLimits, setPlanLimits] = useState<RuntimePlanLimits | null>(null);
+  const [usage, setUsage] = useState<RuntimeUsage | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function openSettings() {
+    const next = !expanded;
+    setExpanded(next);
+    if (!next || profiles.length) return;
+    setLoading(true); setError("");
+    try {
+      const [profileResponse, settingsResponse, usageResponse] = await Promise.all([
+        fetch("/api/control/applications/runtime-profiles", { cache: "no-store" }),
+        fetch(`/api/control/applications/projects/${projectId}/settings`, { cache: "no-store" }),
+        fetch(`/api/control/applications/projects/${projectId}/usage`, { cache: "no-store" }),
+      ]);
+      const [profileData, settingsData, usageData] = await Promise.all([profileResponse.json(), settingsResponse.json(), usageResponse.json()]);
+      if (!profileResponse.ok) throw new Error(profileData.message ?? "Unable to load runtime catalog.");
+      if (!settingsResponse.ok) throw new Error(settingsData.message ?? "Unable to load project runtime settings.");
+      if (!usageResponse.ok) throw new Error(usageData.message ?? "Unable to load monthly build usage.");
+      setProfiles(profileData.profiles ?? []);
+      setPlanLimits(settingsData.planLimits ?? null);
+      setUsage(usageData);
+      const current = settingsData.settings;
+      if (current) {
+        setRuntimeProfileId(current.runtimeProfileId ?? "");
+        setBuildMethod(current.buildMethod ?? "managed");
+        setBuildContext(current.buildContext ?? ".");
+        setBuildCommand(current.buildCommand ?? "");
+        setOutputDirectory(current.outputDirectory ?? "");
+        setStartCommand(current.startCommand ?? "");
+        setListenPort(current.listenPort ? String(current.listenPort) : "");
+        setHealthCheckPath(current.healthCheckPath ?? "/");
+        setCpuMillis(String(current.resources?.cpuMillis ?? settingsData.planLimits?.cpuMillis ?? 500));
+        setMemoryMiB(String(current.resources?.memoryMiB ?? settingsData.planLimits?.memoryMiB ?? 512));
+        setDiskMiB(String(current.resources?.diskMiB ?? settingsData.planLimits?.diskMiB ?? 2048));
+        setProcessLimit(String(current.resources?.processLimit ?? settingsData.planLimits?.processLimit ?? 128));
+      } else if (settingsData.planLimits) {
+        setCpuMillis(String(Math.min(500, settingsData.planLimits.cpuMillis)));
+        setMemoryMiB(String(Math.min(512, settingsData.planLimits.memoryMiB)));
+        setDiskMiB(String(Math.min(2048, settingsData.planLimits.diskMiB)));
+        setProcessLimit(String(Math.min(128, settingsData.planLimits.processLimit)));
+      }
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to load runtime settings."); }
+    finally { setLoading(false); }
+  }
+
+  const selectedProfile = profiles.find(profile => profile.id === runtimeProfileId);
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!runtimeProfileId) { setError("Choose a runtime profile."); return; }
+    setSaving(true); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/control/applications/projects/${projectId}/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runtimeProfileId, buildMethod, buildContext, buildCommand: buildCommand || null,
+          outputDirectory: outputDirectory || null, startCommand: startCommand || null,
+          listenPort: listenPort ? Number(listenPort) : null,
+          healthCheckPath: healthCheckPath || null,
+          cpuMillis: Number(cpuMillis),
+          memoryMiB: Number(memoryMiB),
+          diskMiB: Number(diskMiB),
+          processLimit: Number(processLimit),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? "Unable to save runtime settings.");
+      setNotice(data.message ?? "Runtime settings saved.");
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to save runtime settings."); }
+    finally { setSaving(false); }
+  }
+
+  return <div className="border-t border-slate-100 px-6 py-3">
+    <button type="button" onClick={openSettings} className="text-xs font-semibold text-blue-700 hover:underline">
+      {expanded ? "Hide runtime settings" : "Configure application runtime"}
+    </button>
+    {expanded && <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+      {error && <p role="alert" className="mb-3 text-xs text-rose-700">{error}</p>}
+      {notice && <p role="status" className="mb-3 text-xs text-emerald-700">{notice}</p>}
+      {usage && <div className="mb-3 rounded-lg border border-slate-200 bg-white p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-semibold text-slate-700">Monthly build allowance · {usage.periodStart}</p>
+          <span className="text-[11px] text-slate-500">{usage.buildMinutesUsed.toLocaleString()} / {usage.buildMinutesLimit.toLocaleString()} minutes</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+          <div className="h-full rounded-full bg-blue-600" style={{ width: `${usage.buildMinutesLimit > 0 ? Math.min(100, (usage.buildMinutesUsed / usage.buildMinutesLimit) * 100) : usage.quotaExhausted ? 100 : 0}%` }}/>
+        </div>
+        <p className="mt-2 text-[11px] text-amber-700">{usage.meteringStatus !== "active" ? "Builder metering has not reported usage yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted. Dispatch enforcement is not enabled." : "Usage has been reported by the authenticated builder. Dispatch quota enforcement remains disabled."}</p>
+      </div>}
+      {loading ? <p className="text-xs text-slate-500">Loading runtime catalog…</p> : <form onSubmit={save} className="grid gap-3 md:grid-cols-2">
+        <label className="space-y-1 text-xs font-medium text-slate-700 md:col-span-2">Runtime profile
+          <select required value={runtimeProfileId} onChange={event => {
+            const profile = profiles.find(item => item.id === event.target.value);
+            setRuntimeProfileId(event.target.value);
+            if (profile?.runtimeFamily === "static") { setBuildMethod("static"); setOutputDirectory("dist"); }
+            else if (profile?.runtimeFamily === "container") setBuildMethod("dockerfile");
+            else setBuildMethod("managed");
+          }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+            <option value="">Choose runtime profile</option>
+            {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.displayName} · {profile.enabled ? "Enabled" : "Catalog only"}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Build method
+          <select value={buildMethod} onChange={event => setBuildMethod(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+            <option value="managed">Managed build</option><option value="static">Static output</option><option value="dockerfile">Dockerfile / OCI</option>
+          </select>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Build context
+          <input value={buildContext} onChange={event => setBuildContext(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"/>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Build command (stored, not executed)
+          <input value={buildCommand} onChange={event => setBuildCommand(event.target.value)} maxLength={1000} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="npm run build"/>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Output directory
+          <input value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} maxLength={240} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="dist"/>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Start command (stored, not executed)
+          <input value={startCommand} onChange={event => setStartCommand(event.target.value)} maxLength={1000} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="npm start"/>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Application port
+          <input type="number" min="1" max="65535" value={listenPort} onChange={event => setListenPort(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="3000"/>
+        </label>
+        <label className="space-y-1 text-xs font-medium text-slate-700">Health check path
+          <input value={healthCheckPath} onChange={event => setHealthCheckPath(event.target.value)} maxLength={200} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="/health"/>
+        </label>
+        <div className="md:col-span-2 rounded-lg border border-slate-200 bg-white p-3">
+          <p className="mb-3 text-xs font-semibold text-slate-700">Requested runtime resources</p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="space-y-1 text-xs text-slate-600">CPU (millicores)
+              <input type="number" min="100" max={planLimits?.cpuMillis ?? 8000} value={cpuMillis} onChange={event => setCpuMillis(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Memory (MiB)
+              <input type="number" min="128" max={planLimits?.memoryMiB ?? 16384} value={memoryMiB} onChange={event => setMemoryMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Storage (MiB)
+              <input type="number" min="128" max={planLimits?.diskMiB ?? 65536} value={diskMiB} onChange={event => setDiskMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+            <label className="space-y-1 text-xs text-slate-600">Process limit
+              <input type="number" min="16" max={planLimits?.processLimit ?? 512} value={processLimit} onChange={event => setProcessLimit(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
+            </label>
+          </div>
+          {planLimits && <p className="mt-2 text-[11px] text-slate-500">Hosting plan ceilings: {planLimits.cpuMillis} mCPU · {planLimits.memoryMiB} MiB RAM · {planLimits.diskMiB} MiB storage · {planLimits.processLimit} processes.</p>}
+        </div>
+        <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-amber-700">{selectedProfile?.enabled ? "Runtime profile enabled; deployment still gated." : "Catalog only: execution is disabled. Settings are saved as metadata."}</p>
+          <button type="submit" disabled={saving || !runtimeProfileId} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{saving ? "Saving…" : "Save runtime settings"}</button>
+        </div>
+      </form>}
+    </div>}
+  </div>;
+}
+
 export default function GithubDeployments() {
   const [connection, setConnection] = useState<Connection>(null);
   const [connected, setConnected] = useState(false);
@@ -138,7 +314,7 @@ export default function GithubDeployments() {
           {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
-          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
+          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><RuntimeProjectSettings projectId={project.id}/></div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
         </div>
       </>}
       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback will remain disabled until Nexora installs and verifies the isolated rootless build worker.</p></div>

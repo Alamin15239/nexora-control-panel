@@ -27,6 +27,7 @@ type Bindings = {
   GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE?: string;
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
+  APPLICATION_NODE_OPERATOR_TOKEN?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -224,6 +225,61 @@ async function issueSession(db: D1Database, userId: string, organizationId: stri
   };
 }
 
+function decodeHex(value: string, expectedBytes: number): Uint8Array | null {
+  if (value.length !== expectedBytes * 2 || !/^[a-f0-9]+$/i.test(value)) return null;
+  const bytes = new Uint8Array(expectedBytes);
+  for (let index = 0; index < expectedBytes; index++) {
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+async function verifyNodeSignature(publicKeyHex: string, timestamp: string, nonce: string, rawBody: string, signatureHex: string) {
+  if (!/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32,128}$/i.test(nonce)) return false;
+  const issuedAt = Number(timestamp);
+  if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
+  const publicKey = decodeHex(publicKeyHex, 32);
+  const signature = decodeHex(signatureHex, 64);
+  if (!publicKey || !signature) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
+    const message = new TextEncoder().encode(timestamp + "." + nonce + "." + rawBody);
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, signature, message);
+  } catch {
+    return false;
+  }
+}
+
+async function verifyApplicationNodeRequestSignature(
+  publicKeyHex: string, nodeIdentity: string, timestamp: string, nonce: string,
+  method: string, path: string, rawBody: string, signatureHex: string,
+): Promise<boolean> {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      method !== method.toUpperCase() || !path.startsWith("/") || /[?#\r\n]/.test(path)) return false;
+  const issuedAt = Number(timestamp);
+  if (!Number.isSafeInteger(issuedAt) || Math.abs(Math.floor(Date.now() / 1000) - issuedAt) > 300) return false;
+  const publicKey = decodeHex(publicKeyHex, 32);
+  const signature = decodeHex(signatureHex, 64);
+  if (!publicKey || !signature) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
+    const message = [
+      "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, method, path, await sha256(rawBody),
+    ].join("\n");
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, signature, new TextEncoder().encode(message));
+  } catch {
+    return false;
+  }
+}
+
+async function nodeOperatorAuthorized(request: Request, env: Bindings): Promise<boolean> {
+  const configured = env.APPLICATION_NODE_OPERATOR_TOKEN ?? "";
+  const supplied = request.headers.get("authorization") ?? "";
+  if (configured.length < 32 || !/^Bearer [A-Za-z0-9_-]{32,}$/.test(supplied)) return false;
+  return constantTimeEqual(supplied.slice(7), configured);
+}
+
 async function bearerIdentity(request: Request, db: D1Database) {
   const authorization = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
@@ -260,7 +316,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens"];
+  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -1402,7 +1458,9 @@ app.post("/v1/agent/heartbeat", async (c) => {
 
 type HostingPlanRow = {
   id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null;
-  website_limit: number; database_limit: number; mailbox_limit: number; active: number; created_at: string;
+  website_limit: number; database_limit: number; mailbox_limit: number;
+  app_cpu_millis: number; app_memory_mib: number; app_disk_mib: number; app_process_limit: number; app_build_minutes_month: number;
+  active: number; created_at: string;
 };
 
 app.get("/v1/hosting-plans", async (c) => {
@@ -1410,7 +1468,8 @@ app.get("/v1/hosting-plans", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const result = await c.env.DB.prepare(
     `SELECT id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit,
-            database_limit, mailbox_limit, active, created_at
+            database_limit, mailbox_limit, app_cpu_millis, app_memory_mib,
+            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at
      FROM hosting_plans WHERE organization_id = ? ORDER BY created_at DESC`,
   ).bind(identity.organizationId).all<HostingPlanRow>();
   return c.json({ plans: result.results ?? [] });
@@ -1430,28 +1489,43 @@ app.post("/v1/hosting-plans", async (c) => {
   const websiteLimit = Number(input.websiteLimit);
   const databaseLimit = Number(input.databaseLimit);
   const mailboxLimit = Number(input.mailboxLimit);
+  const appCpuMillis = input.appCpuMillis === undefined ? 500 : Number(input.appCpuMillis);
+  const appMemoryMiB = input.appMemoryMiB === undefined ? 512 : Number(input.appMemoryMiB);
+  const appDiskMiB = input.appDiskMiB === undefined ? 2048 : Number(input.appDiskMiB);
+  const appProcessLimit = input.appProcessLimit === undefined ? 128 : Number(input.appProcessLimit);
+  const appBuildMinutesMonth = input.appBuildMinutesMonth === undefined ? 300 : Number(input.appBuildMinutesMonth);
   if (!name || name.length > 80) return c.json({ message: "Plan name is required (maximum 80 characters)" }, 400);
   if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
   if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
   if (![websiteLimit, databaseLimit, mailboxLimit].every((v) => Number.isInteger(v) && v >= 0 && v <= 10000)) {
     return c.json({ message: "Resource limits must be whole numbers between 0 and 10,000" }, 400);
   }
+  if (!Number.isInteger(appCpuMillis) || appCpuMillis < 100 || appCpuMillis > 8000 ||
+      !Number.isInteger(appMemoryMiB) || appMemoryMiB < 128 || appMemoryMiB > 16384 ||
+      !Number.isInteger(appDiskMiB) || appDiskMiB < 128 || appDiskMiB > 65536 ||
+      !Number.isInteger(appProcessLimit) || appProcessLimit < 16 || appProcessLimit > 512 ||
+      !Number.isInteger(appBuildMinutesMonth) || appBuildMinutesMonth < 0 || appBuildMinutesMonth > 100000) {
+    return c.json({ message: "Application runtime quotas are outside the supported platform bounds." }, 400);
+  }
   const id = crypto.randomUUID();
   try {
     await c.env.DB.batch([
       c.env.DB.prepare(
         `INSERT INTO hosting_plans
-         (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+         (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit,
+          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
-        websiteLimit, databaseLimit, mailboxLimit),
+        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth),
       c.env.DB.prepare(
         "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_plan.create', 'hosting_plan', ?)",
       ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
     ]);
     return c.json({ plan: { id, name, disk_limit_bytes: diskGb * 1024 ** 3,
       bandwidth_limit_bytes: bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
-      website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit, active: 1 } }, 201);
+      website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit,
+      app_cpu_millis: appCpuMillis, app_memory_mib: appMemoryMiB, app_disk_mib: appDiskMiB,
+      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1 } }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/UNIQUE constraint failed: hosting_plans.organization_id, hosting_plans.name/i.test(message)) {
@@ -3397,10 +3471,17 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     return c.json({ message: "Private artifact storage is not configured; no upload capability was issued." }, 503);
   }
 
+  const applicationRelease = await c.env.DB.prepare(
+    "SELECT id, state FROM application_releases WHERE deployment_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(deployment.id, deployment.organizationId).first<{ id: string; state: string }>();
+  if (applicationRelease && applicationRelease.state !== "queued") {
+    return c.json({ message: "Application release is not waiting for its isolated builder." }, 409);
+  }
+
   const capability = randomHex(32);
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   try {
-    const results = await c.env.DB.batch([
+    const claimStatements = [
       c.env.DB.prepare(
         "INSERT INTO github_deployment_upload_tokens (id, token_hash, organization_id, project_id, deployment_id, repository_id, branch, commit_sha, run_id, run_attempt, expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM github_deployments WHERE id = ? AND organization_id = ? AND status = 'queued')",
       ).bind(
@@ -3411,9 +3492,35 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
       c.env.DB.prepare(
         "UPDATE github_deployments SET status = 'building', started_at = datetime('now'), workflow_run_id = ?, workflow_run_attempt = ?, workflow_sha = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(runId, runAttempt, workflowSha, deployment.id, deployment.organizationId),
-    ]);
-    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
-      return c.json({ message: "A runner has already claimed this deployment." }, 409);
+    ];
+    if (applicationRelease) {
+      claimStatements.push(c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'authorized', updated_at = datetime('now') " +
+        "WHERE id = ? AND organization_id = ? AND state = 'queued'",
+      ).bind(applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'queued', 'authorized', 'builder', ?, 'builder_authorized', ? " +
+        "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'authorized'",
+      ).bind(crypto.randomUUID(), runId, JSON.stringify({ workflowSha }), applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'building', started_at = datetime('now'), updated_at = datetime('now') " +
+        "WHERE id = ? AND organization_id = ? AND state = 'authorized'",
+      ).bind(applicationRelease.id, deployment.organizationId));
+      claimStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'authorized', 'building', 'builder', ?, 'build_started', ? " +
+        "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(crypto.randomUUID(), runId, JSON.stringify({ workflowSha }), applicationRelease.id, deployment.organizationId));
+    }
+    const results = await c.env.DB.batch(claimStatements);
+    if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1 ||
+        (applicationRelease && ((results[2]?.meta.changes ?? 0) !== 1 ||
+          (results[3]?.meta.changes ?? 0) !== 1 || (results[4]?.meta.changes ?? 0) !== 1 ||
+          (results[5]?.meta.changes ?? 0) !== 1))) {
+      return c.json({ message: "A runner has already claimed this deployment or the application release could not enter building state." }, 409);
     }
   } catch {
     return c.json({ message: "This deployment already has an upload capability or could not be claimed." }, 409);
@@ -3515,19 +3622,54 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
       throw new Error("R2 stored object checksum does not match the declared artifact digest");
     }
   
-    const updated = await c.env.DB.prepare(
-      "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
-    ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId).run();
-    if ((updated.meta.changes ?? 0) !== 1) {
+    const updates = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE github_deployments SET artifact_key = ?, artifact_bytes = ?, artifact_sha256 = ?, log_excerpt = 'Build artifact received; awaiting archive validation and publication.' WHERE id = ? AND organization_id = ? AND status = 'building' AND artifact_key IS NULL",
+      ).bind(objectKey, receivedBytes, artifactSHA256, token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "UPDATE application_releases SET artifact_digest = ?, artifact_bytes = ?, state = 'artifact_uploaded', updated_at = datetime('now') " +
+        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(artifactSHA256, receivedBytes, token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'building', 'artifact_uploaded', 'builder', NULL, 'artifact_uploaded', ? " +
+        "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'artifact_uploaded' " +
+        "AND artifact_digest = ? AND artifact_bytes = ?",
+      ).bind(crypto.randomUUID(), JSON.stringify({ bytes: receivedBytes }), token.deploymentId,
+        token.organizationId, artifactSHA256, receivedBytes),
+    ]);
+    if (Number(updates[0]?.meta?.changes ?? 0) !== 1) {
       await c.env.ARTIFACTS.delete(objectKey);
       return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
     }
-    return c.json({ received: true, deploymentId: token.deploymentId, bytes: receivedBytes }, 202);
+    return c.json({
+      received: true,
+      deploymentId: token.deploymentId,
+      bytes: receivedBytes,
+      applicationReleaseUpdated: Number(updates[1]?.meta?.changes ?? 0) === 1,
+      applicationReleaseEventRecorded: Number(updates[2]?.meta?.changes ?? 0) === 1,
+    }, 202);
   } catch (error) {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
-    await c.env.DB.prepare(
-      "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
-    ).bind(token.deploymentId, token.organizationId).run().catch(() => undefined);
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
+      ).bind(token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'artifact_upload_failed', " +
+        "failure_message_redacted = 'Build artifact upload failed.', updated_at = datetime('now') " +
+        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+      ).bind(token.deploymentId, token.organizationId),
+      c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "SELECT ?, organization_id, id, 'building', 'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
+        "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'failed' " +
+        "AND failure_code = 'artifact_upload_failed' " +
+        "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'artifact_upload_failed')",
+      ).bind(crypto.randomUUID(), token.deploymentId, token.organizationId),
+    ]).catch(() => undefined);
     console.error("GitHub artifact upload failed:", error instanceof Error ? error.message : "unknown error");
     return c.json({ message: "Artifact upload failed; the one-time capability has been consumed." }, 502);
   }
@@ -3553,12 +3695,41 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
     return c.json({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
   }
+  const runtimeAssignment = await c.env.DB.prepare(
+    "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
+    "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, p.status AS poolStatus, " +
+    "p.isolation_level AS isolationLevel, " +
+    "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key IS NOT NULL ORDER BY n.last_heartbeat_at DESC, n.id LIMIT 1) AS assignedNodeId " +
+    "FROM application_project_settings s " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
+    "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
+  ).bind(project.id, identity.organizationId).first<{
+    runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
+    runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
+    assignedNodeId: string | null;
+  }>();
+  if (runtimeAssignment && (
+    runtimeAssignment.runtimeEnabled !== 1 ||
+    !runtimeAssignment.nodePoolId ||
+    runtimeAssignment.poolStatus !== "ready" ||
+    !["rootless", "microvm"].includes(runtimeAssignment.isolationLevel ?? "") ||
+    !runtimeAssignment.assignedNodeId
+  )) {
+    return c.json({
+      message: "Application deployment is not admitted: the runtime must be enabled and assigned to a ready isolated pool with an online runtime node.",
+    }, 409);
+  }
+
   const active = await c.env.DB.prepare(
     "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
   ).bind(project.id).first<{ id: string }>();
   if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
+  const applicationReleaseId = runtimeAssignment ? crypto.randomUUID() : null;
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
@@ -3573,11 +3744,33 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
     if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
 
-    await c.env.DB.prepare(
-      `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
-       VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
-    ).bind(deploymentId, identity.organizationId, project.id, commitData.sha, project.productionBranch,
-      (commitData.commit?.message ?? "").slice(0, 500)).run();
+    const creationStatements = [
+      c.env.DB.prepare(
+        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
+         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
+      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha.toLowerCase(), project.productionBranch,
+        (commitData.commit?.message ?? "").slice(0, 500)),
+    ];
+    if (runtimeAssignment && applicationReleaseId) {
+      creationStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_releases " +
+        "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, assigned_node_id, spec_version, state, source_commit_sha) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
+      ).bind(applicationReleaseId, identity.organizationId, project.id, deploymentId,
+        runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.assignedNodeId,
+        runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
+      creationStatements.push(c.env.DB.prepare(
+        "INSERT INTO application_release_events " +
+        "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+        "VALUES (?, ?, ?, NULL, 'queued', 'user', ?, 'deployment_queued', ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, applicationReleaseId, identity.id,
+        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId })));
+    }
+    const created = await c.env.DB.batch(creationStatements);
+    if (Number(created[0]?.meta?.changes ?? 0) !== 1 ||
+        (runtimeAssignment && Number(created[1]?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("Unable to create the deployment and its application release atomically");
+    }
     deploymentCreated = true;
 
     const workflowPath = ".github/workflows/nexora-deploy.yml";
@@ -3600,6 +3793,22 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       await c.env.DB.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, identity.organizationId).run();
+      if (applicationReleaseId) {
+        await c.env.DB.batch([
+          c.env.DB.prepare(
+            "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_rejected', " +
+            "failure_message_redacted = 'GitHub workflow dispatch was rejected.', updated_at = datetime('now') " +
+            "WHERE id = ? AND organization_id = ? AND state = 'queued'",
+          ).bind(applicationReleaseId, identity.organizationId),
+          c.env.DB.prepare(
+            "INSERT INTO application_release_events " +
+            "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+            "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_rejected', '{}' " +
+            "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
+            "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_rejected')",
+          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+        ]);
+      }
       return c.json({
         message: dispatch.status === 404
           ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
@@ -3618,13 +3827,36 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     ]);
     return c.json({
       deployment: { id: deploymentId, commitSha: commitData.sha, branch: project.productionBranch, status: "queued" },
-      message: "GitHub Actions accepted the workflow dispatch. Build execution is not complete until the isolated runner reports a verified artifact.",
+      applicationRelease: applicationReleaseId ? {
+        id: applicationReleaseId,
+        deploymentId,
+        nodePoolId: runtimeAssignment?.nodePoolId,
+        assignedNodeId: runtimeAssignment?.assignedNodeId,
+        state: "queued",
+      } : null,
+      message: "GitHub Actions accepted the workflow dispatch. Application releases remain gated until the isolated runtime validates and publishes the artifact.",
     }, 202);
   } catch (error) {
     if (deploymentCreated && !dispatchAccepted) {
       await c.env.DB.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'GitHub did not accept the workflow dispatch.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
       ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
+      if (applicationReleaseId) {
+        await c.env.DB.batch([
+          c.env.DB.prepare(
+            "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_error', " +
+            "failure_message_redacted = 'GitHub workflow dispatch did not complete.', updated_at = datetime('now') " +
+            "WHERE id = ? AND organization_id = ? AND state = 'queued'",
+          ).bind(applicationReleaseId, identity.organizationId),
+          c.env.DB.prepare(
+            "INSERT INTO application_release_events " +
+            "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+            "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_error', '{}' " +
+            "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
+            "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_error')",
+          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+        ]).catch(() => undefined);
+      }
     }
     const detail = error instanceof Error ? error.message : "unknown error";
     console.error("GitHub deployment dispatch failed:", detail);
@@ -3633,6 +3865,1534 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     }
     return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
   }
+});
+
+
+// Runtime catalog is metadata only. Disabled profiles cannot be selected for execution.
+app.get("/v1/applications/runtime-profiles", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const rows = await c.env.DB.prepare(
+    `SELECT id, runtime_family AS runtimeFamily, profile_key AS profileKey,
+            display_name AS displayName, profile_version AS profileVersion,
+            execution_kind AS executionKind, default_port AS defaultPort,
+            enabled
+     FROM application_runtime_profiles
+     ORDER BY runtime_family, profile_key`,
+  ).all<{
+    id: string; runtimeFamily: string; profileKey: string; displayName: string;
+    profileVersion: number; executionKind: string; defaultPort: number | null; enabled: number;
+  }>();
+  return c.json({
+    profiles: (rows.results ?? []).map((profile) => ({
+      ...profile,
+      enabled: profile.enabled === 1,
+      selectable: profile.enabled === 1,
+    })),
+    executionEnabled: false,
+    message: "Runtime execution remains disabled until isolated builders and application nodes pass platform acceptance tests.",
+  });
+});
+
+app.put("/v1/applications/projects/:projectId/settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, hp.app_cpu_millis AS appCpuMillis,
+            hp.app_memory_mib AS appMemoryMiB,
+            hp.app_disk_mib AS appDiskMiB,
+            hp.app_process_limit AS appProcessLimit,
+            hp.disk_limit_bytes AS accountDiskLimitBytes
+     FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<{
+    id: string; appCpuMillis: number; appMemoryMiB: number;
+    appDiskMiB: number; appProcessLimit: number; accountDiskLimitBytes: number;
+  }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+
+  let body: Record<string, unknown>;
+  try {
+    body = await c.req.json<Record<string, unknown>>();
+  } catch {
+    return c.json({ message: "Request body must be valid JSON." }, 400);
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ message: "Request body must be a JSON object." }, 400);
+  }
+
+  const allowed = new Set([
+    "runtimeProfileId", "buildMethod", "buildContext", "buildCommand",
+    "outputDirectory", "startCommand", "listenPort", "healthCheckPath",
+    "cpuMillis", "memoryMiB", "diskMiB", "processLimit",
+  ]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    return c.json({ message: "Request contains unsupported settings." }, 400);
+  }
+
+  const runtimeProfileId = typeof body.runtimeProfileId === "string" ? body.runtimeProfileId.trim() : "";
+  if (!runtimeProfileId || runtimeProfileId.length > 128) {
+    return c.json({ message: "A valid runtimeProfileId is required." }, 400);
+  }
+  const profile = await c.env.DB.prepare(
+    "SELECT id, runtime_family AS runtimeFamily, enabled FROM application_runtime_profiles WHERE id = ? LIMIT 1",
+  ).bind(runtimeProfileId).first<{ id: string; runtimeFamily: string; enabled: number }>();
+  if (!profile) return c.json({ message: "Unknown runtime profile." }, 400);
+
+  const buildMethod = body.buildMethod ?? "managed";
+  if (buildMethod !== "static" && buildMethod !== "managed" && buildMethod !== "dockerfile") {
+    return c.json({ message: "buildMethod must be static, managed, or dockerfile." }, 400);
+  }
+  if (profile.runtimeFamily === "static" && buildMethod !== "static") {
+    return c.json({ message: "Static websites must use the static build method." }, 400);
+  }
+  if (profile.runtimeFamily === "container" && buildMethod !== "dockerfile") {
+    return c.json({ message: "Custom OCI profiles must use the Dockerfile build method." }, 400);
+  }
+
+  const relativePath = (value: unknown, fallback: string, field: string): string | null => {
+    const raw = value === undefined ? fallback : value;
+    if (typeof raw !== "string" || raw.length > 240 || raw.startsWith("/") ||
+        raw.includes("\\") || raw.split("/").some((part) => part === ".." || part === "." && raw !== ".")) {
+      return null;
+    }
+    return raw;
+  };
+  const buildContext = relativePath(body.buildContext, ".", "buildContext");
+  if (buildContext === null) return c.json({ message: "buildContext must be a safe relative path." }, 400);
+
+  const outputDirectory = body.outputDirectory === undefined
+    ? (profile.runtimeFamily === "static" ? "dist" : null)
+    : body.outputDirectory;
+  if (outputDirectory !== null &&
+      (typeof outputDirectory !== "string" || outputDirectory.length > 240 ||
+       outputDirectory.startsWith("/") || outputDirectory.includes("\\") ||
+       outputDirectory.split("/").some((part) => part === ".." || part === "."))) {
+    return c.json({ message: "outputDirectory must be null or a safe relative path." }, 400);
+  }
+
+  const boundedText = (value: unknown, field: string, max: number): string | null => {
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string" || value.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) {
+      throw new Error(field + " is invalid or too long.");
+    }
+    return value;
+  };
+  let buildCommand: string | null;
+  let startCommand: string | null;
+  let healthCheckPath: string | null;
+  try {
+    buildCommand = boundedText(body.buildCommand, "buildCommand", 1000);
+    startCommand = boundedText(body.startCommand, "startCommand", 1000);
+    healthCheckPath = boundedText(body.healthCheckPath, "healthCheckPath", 200);
+  } catch (error) {
+    return c.json({ message: error instanceof Error ? error.message : "Invalid command field." }, 400);
+  }
+  if (healthCheckPath !== null && !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%\-\/]*$/.test(healthCheckPath)) {
+    return c.json({ message: "healthCheckPath must be an absolute URL path without query or fragment." }, 400);
+  }
+
+  const boundedInteger = (value: unknown, fallback: number, min: number, max: number, field: string): number | null => {
+    const n = value === undefined ? fallback : value;
+    return typeof n === "number" && Number.isInteger(n) && n >= min && n <= max ? n : null;
+  };
+  const listenPort = body.listenPort === undefined || body.listenPort === null
+    ? null : boundedInteger(body.listenPort, 0, 1, 65535, "listenPort");
+  const cpuMillis = boundedInteger(body.cpuMillis, 500, 100, 8000, "cpuMillis");
+  const memoryMiB = boundedInteger(body.memoryMiB, 512, 128, 16384, "memoryMiB");
+  const diskMiB = boundedInteger(body.diskMiB, 2048, 128, 65536, "diskMiB");
+  const processLimit = boundedInteger(body.processLimit, 128, 16, 512, "processLimit");
+  if (listenPort === null && body.listenPort !== undefined && body.listenPort !== null ||
+      cpuMillis === null || memoryMiB === null || diskMiB === null || processLimit === null) {
+    return c.json({ message: "Resource values are outside the permitted platform bounds." }, 400);
+  }
+
+  const planDiskLimitMiB = Math.min(
+    project.appDiskMiB,
+    Math.floor(project.accountDiskLimitBytes / (1024 * 1024)),
+  );
+  if (cpuMillis > project.appCpuMillis || memoryMiB > project.appMemoryMiB ||
+      diskMiB > planDiskLimitMiB || processLimit > project.appProcessLimit) {
+    return c.json({
+      message: "Requested runtime resources exceed the hosting plan quotas assigned to this project.",
+      planResourceLimits: {
+        cpuMillis: project.appCpuMillis,
+        memoryMiB: project.appMemoryMiB,
+        diskMiB: planDiskLimitMiB,
+        processLimit: project.appProcessLimit,
+      },
+    }, 400);
+  }
+
+  const settingsId = crypto.randomUUID();
+  await c.env.DB.prepare(
+    `INSERT INTO application_project_settings
+      (id, organization_id, project_id, runtime_profile_id, spec_version,
+       build_method, build_context, build_command, output_directory, start_command,
+       listen_port, health_check_path, cpu_millis, memory_mib, disk_mib, process_limit,
+       updated_at)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(project_id) DO UPDATE SET
+       runtime_profile_id = excluded.runtime_profile_id,
+       spec_version = application_project_settings.spec_version + 1,
+       build_method = excluded.build_method,
+       build_context = excluded.build_context,
+       build_command = excluded.build_command,
+       output_directory = excluded.output_directory,
+       start_command = excluded.start_command,
+       listen_port = excluded.listen_port,
+       health_check_path = excluded.health_check_path,
+       cpu_millis = excluded.cpu_millis,
+       memory_mib = excluded.memory_mib,
+       disk_mib = excluded.disk_mib,
+       process_limit = excluded.process_limit,
+       updated_at = datetime('now')
+     WHERE application_project_settings.organization_id = excluded.organization_id`,
+  ).bind(
+    settingsId, identity.organizationId, projectId, runtimeProfileId,
+    buildMethod, buildContext, buildCommand, outputDirectory, startCommand,
+    listenPort, healthCheckPath, cpuMillis, memoryMiB, diskMiB, processLimit,
+  ).run();
+
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'application.settings_updated', 'github_project', ?, ?)",
+  ).bind(
+    crypto.randomUUID(), identity.organizationId, identity.id, projectId,
+    JSON.stringify({
+      runtimeProfileId, buildMethod, cpuMillis, memoryMiB, diskMiB, processLimit,
+      executionEnabled: false,
+    }),
+  ).run();
+
+  return c.json({
+    saved: true,
+    projectId,
+    runtimeProfileId,
+    runtimeEnabled: profile.enabled === 1,
+    executionEnabled: false,
+    platformResourceBounds: { cpuMillis: [100, 8000], memoryMiB: [128, 16384], diskMiB: [128, 65536], processLimit: [16, 512] },
+    planResourceLimits: {
+      cpuMillis: project.appCpuMillis,
+      memoryMiB: project.appMemoryMiB,
+      diskMiB: planDiskLimitMiB,
+      processLimit: project.appProcessLimit,
+    },
+    planQuotasEnforced: true,
+    message: "Configuration saved as metadata only within the assigned hosting plan quotas. Customer builds and runtime execution remain disabled.",
+  });
+});
+
+app.get("/v1/applications/projects/:projectId/usage", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const now = new Date();
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const row = await c.env.DB.prepare(
+    `SELECT p.id, COALESCE(u.build_seconds_used, 0) AS buildSecondsUsed,
+            COALESCE(u.build_minutes_limit, hp.app_build_minutes_month) AS buildMinutesLimit,
+            EXISTS (SELECT 1 FROM application_usage_events e WHERE e.organization_id = p.organization_id
+                    AND e.project_id = p.id AND e.period_start = ?) AS hasUsageEvents
+     FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
+     LEFT JOIN application_usage_periods u
+       ON u.organization_id = p.organization_id AND u.project_id = p.id AND u.period_start = ?
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(periodStart, periodStart, projectId, identity.organizationId).first<{
+    id: string; buildMinutesLimit: number; buildSecondsUsed: number; hasUsageEvents: number;
+  }>();
+  if (!row) return c.json({ message: "GitHub project not found." }, 404);
+  const quotaSeconds = row.buildMinutesLimit * 60;
+  return c.json({
+    periodStart,
+    buildMinutesLimit: row.buildMinutesLimit,
+    buildSecondsUsed: row.buildSecondsUsed,
+    buildMinutesUsed: Math.round((row.buildSecondsUsed / 60) * 100) / 100,
+    buildSecondsRemaining: Math.max(0, quotaSeconds - row.buildSecondsUsed),
+    quotaExhausted: row.buildSecondsUsed >= quotaSeconds,
+    meteringStatus: row.hasUsageEvents ? "active" : "not_connected",
+    executionEnabled: false,
+    message: "Usage reports are accepted only from the authenticated isolated builder; build dispatch quota enforcement remains disabled.",
+  });
+});
+
+app.get("/internal/v1/operator/application-node-pools", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) {
+    return c.json({ message: "Node operator authorization required." }, 401);
+  }
+  const rows = await c.env.DB.prepare(
+    "SELECT p.id, p.name, p.environment, p.region, p.runtime_engine AS runtimeEngine, " +
+    "p.isolation_level AS isolationLevel, " +
+    "(SELECT COUNT(*) FROM application_nodes n WHERE n.node_pool_id = p.id AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
+    "FROM application_node_pools p WHERE p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "ORDER BY p.environment, p.region, p.name",
+  ).all<{
+    id: string; name: string; environment: string; region: string;
+    runtimeEngine: string; isolationLevel: string; onlineRuntimeNodes: number;
+  }>();
+  return c.json({
+    pools: (rows.results ?? []).filter((pool) => pool.onlineRuntimeNodes > 0),
+    capacityAllocated: false,
+    executionEnabled: false,
+  });
+});
+
+app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) {
+    return c.json({ message: "Node operator authorization required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Request body must be between 2 and 2048 bytes." }, 413);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "nodePoolId") ||
+      typeof body.nodePoolId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.nodePoolId)) {
+    return c.json({ message: "A valid nodePoolId is required." }, 400);
+  }
+  const projectId = c.req.param("projectId");
+  const assignment = await c.env.DB.prepare(
+    "SELECT s.id AS settingsId, s.node_pool_id AS previousNodePoolId, " +
+    "rp.enabled AS runtimeEnabled, " +
+    "EXISTS (SELECT 1 FROM application_workloads w WHERE w.project_id = s.project_id " +
+    "AND w.organization_id = s.organization_id AND w.status IN ('starting','healthy')) AS hasActiveWorkload " +
+    "FROM application_project_settings s " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE s.project_id = ? LIMIT 1",
+  ).bind(projectId).first<{
+    settingsId: string; previousNodePoolId: string | null;
+    runtimeEnabled: number; hasActiveWorkload: number;
+  }>();
+  if (!assignment) return c.json({ message: "Application project settings not found." }, 404);
+  if (assignment.runtimeEnabled !== 1) {
+    return c.json({ message: "The selected runtime profile is disabled and cannot be assigned for execution." }, 409);
+  }
+  if (assignment.hasActiveWorkload === 1) {
+    return c.json({ message: "Stop or drain the active workload before changing its runtime pool." }, 409);
+  }
+  const pool = await c.env.DB.prepare(
+    "SELECT p.id FROM application_node_pools p " +
+    "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key IS NOT NULL) LIMIT 1",
+  ).bind(body.nodePoolId).first<{ id: string }>();
+  if (!pool) {
+    return c.json({ message: "Runtime pool must be ready, isolated, and contain an enrolled online runtime node." }, 409);
+  }
+  const updated = await c.env.DB.prepare(
+    "UPDATE application_project_settings SET node_pool_id = ?, updated_at = datetime('now') " +
+    "WHERE id = ? AND NOT EXISTS (SELECT 1 FROM application_workloads w WHERE w.project_id = application_project_settings.project_id " +
+    "AND w.organization_id = application_project_settings.organization_id AND w.status IN ('starting','healthy'))",
+  ).bind(pool.id, assignment.settingsId).run();
+  if (Number(updated.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime pool assignment changed concurrently or the project became active." }, 409);
+  }
+  return c.json({
+    assigned: true,
+    projectId,
+    nodePoolId: pool.id,
+    previousNodePoolId: assignment.previousNodePoolId,
+    executionEnabled: false,
+    capacityAllocated: false,
+    message: "Runtime pool assigned as metadata. This does not start an application or allocate physical capacity.",
+  });
+});
+
+app.post("/internal/v1/operator/application-nodes/:nodeId/revoke", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) return c.json({ message: "Node operator authorization required." }, 401);
+  const nodeId = c.req.param("nodeId");
+  let input: unknown = {};
+  const rawBody = await c.req.text();
+  if (rawBody.length > 1024) return c.json({ message: "Request body is too large." }, 413);
+  if (rawBody) {
+    try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "reason") ||
+      (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 500 ||
+        /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(body.reason)))) {
+    return c.json({ message: "Invalid revocation payload." }, 400);
+  }
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET status = 'revoked', revoked_at = datetime('now'), revoked_reason = ?, " +
+    "key_rotation_challenge_hash = NULL, key_rotation_challenge_expires_at = NULL, " +
+    "enrollment_key_hash = ?, updated_at = datetime('now') " +
+    "WHERE id = ? AND status <> 'revoked'",
+  ).bind(body.reason ?? "Revoked by platform operator", randomHex(32), nodeId).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node not found or already revoked." }, 404);
+  return c.json({ revoked: true, nodeId, terminal: true });
+});
+
+app.post("/internal/v1/operator/application-nodes/:nodeId/key-rotation-challenge", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) return c.json({ message: "Node operator authorization required." }, 401);
+  const nodeId = c.req.param("nodeId");
+  const challenge = randomHex(32);
+  const challengeHash = await sha256(challenge);
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET key_rotation_challenge_hash = ?, " +
+    "key_rotation_challenge_expires_at = datetime('now', '+10 minutes'), updated_at = datetime('now') " +
+    "WHERE id = ? AND status IN ('online','draining') AND signing_public_key IS NOT NULL AND revoked_at IS NULL",
+  ).bind(challengeHash, nodeId).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Active enrolled node not found." }, 404);
+  return c.json({ nodeId, challenge, expiresInSeconds: 600, proofRequired: "current Ed25519 signing key" });
+});
+
+app.post("/internal/v1/application-nodes/rotate-key", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) return c.json({ message: "Node identity is required." }, 401);
+  const rawBody = await c.req.text();
+  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT id, signing_public_key AS signingPublicKey, key_rotation_challenge_hash AS challengeHash, " +
+    "key_rotation_challenge_expires_at AS challengeExpiresAt FROM application_nodes " +
+    "WHERE node_identity = ? AND status IN ('online','draining') AND revoked_at IS NULL " +
+    "AND signing_public_key IS NOT NULL AND key_rotation_challenge_hash IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string; challengeHash: string; challengeExpiresAt: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["newPublicKey", "challenge"].includes(key)) ||
+      typeof body.newPublicKey !== "string" || !/^[a-f0-9]{64}$/i.test(body.newPublicKey) ||
+      typeof body.challenge !== "string" || !/^[a-f0-9]{64}$/i.test(body.challenge)) {
+    return c.json({ message: "Invalid key rotation payload." }, 400);
+  }
+  if (await sha256(body.challenge) !== node.challengeHash || Date.parse(node.challengeExpiresAt + "Z") <= Date.now()) {
+    return c.json({ message: "Key rotation challenge is invalid or expired." }, 409);
+  }
+  if (body.newPublicKey.toLowerCase() === node.signingPublicKey) return c.json({ message: "New key must differ from the current key." }, 400);
+  const previouslyUsedKey = await c.env.DB.prepare(
+    "SELECT id FROM application_node_signing_key_history WHERE node_id = ? AND public_key = ? LIMIT 1",
+  ).bind(node.id, body.newPublicKey.toLowerCase()).first<{ id: string }>();
+  if (previouslyUsedKey) return c.json({ message: "A previously used signing key cannot be reactivated." }, 409);
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET signing_public_key = ?, key_rotation_challenge_hash = NULL, " +
+      "key_rotation_challenge_expires_at = NULL, signing_key_rotated_at = datetime('now'), " +
+      "last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND signing_public_key = ? AND key_rotation_challenge_hash = ? " +
+      "AND key_rotation_challenge_expires_at > datetime('now') AND status IN ('online','draining') AND revoked_at IS NULL",
+    ).bind(body.newPublicKey.toLowerCase(), node.id, nodeIdentity, node.signingPublicKey, node.challengeHash),
+    c.env.DB.prepare(
+      "UPDATE application_node_signing_key_history SET retired_at = datetime('now') " +
+      "WHERE node_id = ? AND public_key = ? AND retired_at IS NULL",
+    ).bind(node.id, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_node_signing_key_history (id,node_id,public_key) VALUES (?,?,?)",
+    ).bind(crypto.randomUUID(), node.id, body.newPublicKey.toLowerCase()),
+  ]);
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) return c.json({ message: "Key rotation challenge was consumed or node is no longer authorized." }, 409);
+  return c.json({ rotated: true, nodeIdentity, credentialModel: "ed25519_per_node" });
+});
+
+app.post("/internal/v1/application-nodes/enroll", async (c) => {
+  const rawBody = await c.req.text();
+  if (rawBody.length > 4096) return c.json({ message: "Request body is too large." }, 413);
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["nodeIdentity", "enrollmentToken", "publicKey", "agentVersion"].includes(key)) ||
+      typeof body.nodeIdentity !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(body.nodeIdentity) ||
+      typeof body.enrollmentToken !== "string" || !/^[a-f0-9]{64}$/i.test(body.enrollmentToken) ||
+      typeof body.publicKey !== "string" || !/^[a-f0-9]{64}$/i.test(body.publicKey) ||
+      typeof body.agentVersion !== "string" || body.agentVersion.length < 1 || body.agentVersion.length > 64 ||
+      /[\u0000-\u001f\u007f]/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid node enrollment payload." }, 400);
+  }
+  const tokenHash = await sha256(body.enrollmentToken);
+  let enrollmentResults: D1Result[];
+  try {
+    // D1 batch is transactional: the active key and immutable key-history record
+    // must commit together, or neither enrollment change is persisted.
+    enrollmentResults = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE application_nodes SET signing_public_key = ?, enrollment_consumed_at = datetime('now'), " +
+        "status = 'online', agent_version = ?, last_heartbeat_at = datetime('now'), updated_at = datetime('now') " +
+        "WHERE node_identity = ? AND enrollment_key_hash = ? AND enrollment_consumed_at IS NULL " +
+        "AND signing_public_key IS NULL AND status = 'pending' " +
+        "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready')",
+      ).bind(body.publicKey.toLowerCase(), body.agentVersion, body.nodeIdentity, tokenHash),
+      c.env.DB.prepare(
+        "INSERT INTO application_node_signing_key_history (id,node_id,public_key) " +
+        "SELECT ?, id, signing_public_key FROM application_nodes " +
+        "WHERE node_identity = ? AND signing_public_key = ? AND enrollment_consumed_at IS NOT NULL",
+      ).bind(crypto.randomUUID(), body.nodeIdentity, body.publicKey.toLowerCase()),
+    ]);
+  } catch (error) {
+    console.error("Node enrollment transaction failed:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Node enrollment could not be committed safely." }, 500);
+  }
+  if (Number(enrollmentResults[0]?.meta?.changes ?? 0) !== 1 ||
+      Number(enrollmentResults[1]?.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Enrollment token is invalid, already consumed, or the node pool is not ready." }, 409);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT id, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
+    "FROM application_nodes WHERE node_identity = ? LIMIT 1",
+  ).bind(body.nodeIdentity).first<{ id: string; nodeIdentity: string; status: string; agentVersion: string }>();
+  if (!node) return c.json({ message: "Node enrollment could not be confirmed." }, 500);
+  return c.json({ enrolled: true, node: { id: node.id, identity: node.nodeIdentity, status: node.status, agentVersion: node.agentVersion },
+    credentialModel: "ed25519_per_node", executionEnabled: false });
+});
+
+app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
+    return c.json({ message: "Node identity is required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status IN ('online', 'draining') AND p.status = 'ready' " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => key !== "agentVersion") ||
+      typeof body.agentVersion !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid heartbeat payload." }, 400);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  const result = await c.env.DB.prepare(
+    "UPDATE application_nodes SET agent_version = ?, last_heartbeat_at = datetime('now'), " +
+    "last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND status IN ('online', 'draining')",
+  ).bind(body.agentVersion, node.id).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node is no longer authorized." }, 409);
+  return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
+});
+
+app.get("/internal/v1/application-nodes/desired-state", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (c.req.raw.body !== null) {
+    return c.json({ message: "Desired-state polling does not accept a request body." }, 400);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "GET", path, "", signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to poll desired state." }, 401);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  // Return only node-assigned workload and successful release metadata.
+  // Customer commands, environment values, secrets and arbitrary spec_json
+  // are deliberately excluded. This endpoint cannot authorize execution.
+  const rows = await c.env.DB.prepare(
+    "SELECT w.id AS workloadId, w.project_id AS projectId, w.workload_kind AS workloadKind, " +
+    "w.status AS workloadStatus, w.desired_replicas AS desiredReplicas, " +
+    "w.observed_replicas AS observedReplicas, r.id AS releaseId, r.state AS releaseState, " +
+    "r.spec_version AS releaseSpecVersion, r.image_digest AS imageDigest, " +
+    "r.artifact_digest AS artifactDigest, s.spec_version AS settingsSpecVersion, " +
+    "s.runtime_profile_id AS runtimeProfileId, rp.profile_key AS runtimeProfileKey, " +
+    "rp.runtime_family AS runtimeFamily, rp.execution_kind AS executionKind, " +
+    "COALESCE(s.listen_port, rp.default_port) AS listenPort, " +
+    "s.cpu_millis AS cpuMillis, s.memory_mib AS memoryMiB, " +
+    "s.disk_mib AS diskMiB, s.process_limit AS processLimit " +
+    "FROM application_workloads w " +
+    "JOIN application_releases r ON r.id = w.active_release_id " +
+    "AND r.project_id = w.project_id AND r.organization_id = w.organization_id " +
+    "AND r.assigned_node_id = w.node_id AND r.state = 'succeeded' " +
+    "JOIN application_project_settings s ON s.project_id = w.project_id " +
+    "AND s.organization_id = w.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE w.node_id = ? ORDER BY w.updated_at DESC LIMIT 100",
+  ).bind(node.id).all<{
+    workloadId: string; projectId: string; workloadKind: string; workloadStatus: string;
+    desiredReplicas: number; observedReplicas: number; releaseId: string; releaseState: string;
+    releaseSpecVersion: number; imageDigest: string | null; artifactDigest: string | null;
+    settingsSpecVersion: number; runtimeProfileId: string; runtimeProfileKey: string;
+    runtimeFamily: string; executionKind: string; listenPort: number | null;
+    cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number;
+  }>();
+  return c.json({
+    nodeIdentity,
+    polledAt: new Date().toISOString(),
+    executionEnabled: false,
+    workloads: (rows.results ?? []).map((row) => ({
+      ...row,
+      desiredState: row.desiredReplicas > 0 ? "running" : "stopped",
+    })),
+    commandsIncluded: false,
+    secretsIncluded: false,
+  }, 200, { "cache-control": "no-store" });
+});
+
+app.post("/internal/v1/application-nodes/artifact", async (c) => {
+  if (!c.env.ARTIFACTS) return c.json({ message: "Private application artifact storage is unavailable." }, 503);
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Artifact requests must use application/json." }, 415);
+  }
+  const declaredLength = c.req.header("content-length");
+  if (declaredLength !== undefined) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 2 || parsedLength > 1024) {
+      return c.json({ message: "Artifact request body is empty or exceeds 1024 bytes." }, 413);
+    }
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Artifact request body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 1024) {
+        await reader.cancel();
+        return c.json({ message: "Artifact request body exceeds 1024 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read artifact request body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Artifact request body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    rawBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Artifact request body must be valid UTF-8." }, 400);
+  }
+  const rawBody = decodedBody;
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized for artifact delivery." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid artifact request JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const purpose = body.purpose === undefined ? "publish" : body.purpose;
+  if (Object.keys(body).some((key) => !["deploymentId", "purpose"].includes(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      (purpose !== "validate" && purpose !== "publish")) {
+    return c.json({ message: "Invalid artifact request payload." }, 400);
+  }
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.organization_id AS organizationId, r.project_id AS projectId, " +
+    "r.deployment_id AS deploymentId, r.node_pool_id AS nodePoolId, r.state, " +
+    "r.artifact_digest AS releaseArtifactDigest, r.artifact_bytes AS releaseArtifactBytes, " +
+    "d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes, " +
+    "d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId, " +
+    "p.github_repository_id AS repositoryId FROM application_releases r " +
+    "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
+    "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id, purpose, purpose).first<{
+    releaseId: string; organizationId: string; projectId: string; deploymentId: string;
+    nodePoolId: string; state: string; releaseArtifactDigest: string | null;
+    releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
+    artifactBytes: number | null; artifactSha256: string | null;
+    hostingAccountId: string; repositoryId: string;
+  }>();
+  if (!release) return c.json({ message: "No publishable release is assigned to this runtime node pool." }, 404);
+  if (!release.artifactKey || !Number.isSafeInteger(release.artifactBytes) ||
+      !Number.isSafeInteger(release.releaseArtifactBytes) ||
+      release.artifactBytes !== release.releaseArtifactBytes ||
+      release.artifactSha256 !== release.releaseArtifactDigest ||
+      (release.artifactBytes ?? 0) < 1 || (release.artifactBytes ?? 0) > 100 * 1024 * 1024 ||
+      !/^[a-f0-9]{64}$/.test(release.artifactSha256 ?? "") ||
+      !/^[a-f0-9]{40}$/.test(release.commitSha) ||
+      !/^[1-9][0-9]{0,19}$/.test(release.repositoryId)) {
+    return c.json({ message: "Release artifact metadata is missing or inconsistent." }, 409);
+  }
+  const object = await c.env.ARTIFACTS.get(release.artifactKey);
+  if (!object || object.size !== release.artifactBytes ||
+      object.customMetadata?.organizationId !== release.organizationId ||
+      object.customMetadata?.projectId !== release.projectId ||
+      object.customMetadata?.deploymentId !== release.deploymentId ||
+      object.customMetadata?.commitSha !== release.commitSha ||
+      object.customMetadata?.artifactSha256 !== release.artifactSha256) {
+    return c.json({ message: "Stored artifact integrity metadata does not match its release." }, 409);
+  }
+  let envelope: string;
+  try {
+    envelope = await signDeploymentEnvelope(c.env, {
+      organizationId: release.organizationId, projectId: release.projectId,
+      deploymentId: release.deploymentId, hostingAccountId: release.hostingAccountId,
+      repositoryId: release.repositoryId, commitSha: release.commitSha,
+      artifactSha256: release.artifactSha256, artifactBytes: release.artifactBytes!,
+    });
+  } catch (error) {
+    console.error("Application deployment envelope signing unavailable:", error instanceof Error ? error.message : "unknown error");
+    return c.json({ message: "Application deployment envelope signing is not configured." }, 503);
+  }
+  if (purpose === "publish" && release.state === "ready_to_publish") {
+    const transition = await c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'ready_to_publish'",
+    ).bind(release.releaseId).run();
+    if (Number(transition.meta?.changes ?? 0) !== 1) {
+      const latest = await c.env.DB.prepare("SELECT state FROM application_releases WHERE id = ? LIMIT 1")
+        .bind(release.releaseId).first<{ state: string }>();
+      if (latest?.state !== "publishing") {
+        return c.json({ message: "Release is no longer eligible for artifact delivery." }, 409);
+      }
+    }
+  }
+  await c.env.DB.prepare(
+    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'online'",
+  ).bind(node.id).run();
+  return new Response(object.body, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/gzip",
+      "Content-Length": String(release.artifactBytes),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Nexora-Deployment-Envelope": envelope,
+      "X-Nexora-Artifact-SHA256": release.artifactSha256,
+      "X-Nexora-Release-ID": release.releaseId,
+    },
+  });
+});
+
+app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Validation reports must use application/json." }, 415);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Validation report body is empty or exceeds 2048 bytes." }, 413);
+  }
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report archive validation." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid validation report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set(["deploymentId", "artifactSha256", "archiveEntries", "archiveFiles", "archiveBytes"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
+      !Number.isSafeInteger(body.archiveEntries) || Number(body.archiveEntries) < 1 || Number(body.archiveEntries) > 10000 ||
+      !Number.isSafeInteger(body.archiveFiles) || Number(body.archiveFiles) < 0 ||
+      Number(body.archiveFiles) > Number(body.archiveEntries) ||
+      !Number.isSafeInteger(body.archiveBytes) || Number(body.archiveBytes) < 0 || Number(body.archiveBytes) > 500 * 1024 * 1024) {
+    return c.json({ message: "Archive validation report is outside permitted bounds." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.state, r.artifact_digest AS artifactDigest, " +
+    "r.artifact_bytes AS releaseArtifactBytes, d.artifact_sha256 AS deploymentArtifactDigest, " +
+    "d.artifact_bytes AS deploymentArtifactBytes " +
+    "FROM application_releases r JOIN github_deployments d " +
+    "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
+    releaseId: string; state: string; artifactDigest: string | null;
+    releaseArtifactBytes: number | null; deploymentArtifactDigest: string | null;
+    deploymentArtifactBytes: number | null;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256 ||
+      !Number.isSafeInteger(release.releaseArtifactBytes) ||
+      release.releaseArtifactBytes !== release.deploymentArtifactBytes) {
+    return c.json({ message: "Archive validation report does not match the assigned artifact metadata." }, 409);
+  }
+  const details = JSON.stringify({
+    artifactSha256: body.artifactSha256,
+    archiveEntries: body.archiveEntries,
+    archiveFiles: body.archiveFiles,
+    archiveBytes: body.archiveBytes,
+  });
+  if (release.state === "publishing") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? " +
+      "AND event_code = 'archive_validated_for_publish' AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseId, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Release is publishing without a matching validation record." }, 409);
+    return c.json({ accepted: true, duplicate: true, deploymentId: body.deploymentId, releaseState: "publishing" });
+  }
+  if (release.state !== "artifact_uploaded") {
+    return c.json({ message: "Application release is not awaiting archive validation." }, 409);
+  }
+
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'artifact_uploaded'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'artifact_uploaded', 'validating', 'node', ?, 'archive_validation_started', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'validating'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'ready_to_publish', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'validating'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'validating', 'ready_to_publish', 'node', ?, 'archive_validation_succeeded', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'ready_to_publish'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'ready_to_publish'" + activeNodePredicate,
+    ).bind(release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'ready_to_publish', 'publishing', 'node', ?, 'archive_validated_for_publish', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'publishing'" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ]);
+  if ([0, 2, 4, 6].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1) ||
+      [1, 3, 5].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Archive validation state transition could not be committed atomically." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: "publishing",
+    archive: {
+      entries: body.archiveEntries,
+      files: body.archiveFiles,
+      bytes: body.archiveBytes,
+    },
+  });
+});
+
+app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Activation reports must use application/json." }, 415);
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Activation report body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 1024) {
+        await reader.cancel();
+        return c.json({ message: "Activation report exceeds 1024 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read activation report body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Activation report body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) { rawBytes.set(chunk, offset); offset += chunk.byteLength; }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Activation report must be valid UTF-8." }, 400);
+  }
+
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, decodedBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report release activation." }, 401);
+  }
+
+  let input: unknown;
+  try { input = JSON.parse(decodedBody); } catch { return c.json({ message: "Invalid activation report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["deploymentId", "releaseId", "artifactSha256"].includes(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.releaseId !== "string" || body.releaseId !== body.deploymentId ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256)) {
+    return c.json({ message: "Release activation report is outside permitted bounds." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseId, r.state, r.artifact_digest AS artifactDigest, " +
+    "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
+    "FROM application_releases r JOIN github_deployments d " +
+    "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
+    releaseId: string; state: string; artifactDigest: string | null;
+    deploymentArtifactDigest: string | null; nodePoolId: string;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256) {
+    return c.json({ message: "Activation report digest does not match the assigned release artifact." }, 409);
+  }
+
+  const details = JSON.stringify({
+    releaseId: body.releaseId,
+    artifactSha256: body.artifactSha256,
+  });
+  if (release.state === "health_checking") {
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? " +
+      "AND event_code = 'release_files_activated' AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseId, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Release is health_checking without a matching activation event." }, 409);
+    return c.json({
+      accepted: true, duplicate: true, deploymentId: body.deploymentId,
+      releaseState: "health_checking", workloadHealth: "pending",
+    });
+  }
+  if (release.state !== "publishing") {
+    return c.json({ message: "Application release is not awaiting filesystem activation." }, 409);
+  }
+
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'health_checking', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'publishing' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(release.releaseId, body.artifactSha256, node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'publishing', 'health_checking', 'node', ?, 'release_files_activated', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseId, body.artifactSha256,
+      node.id, nodeIdentity, node.signingPublicKey),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ]);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Release activation acknowledgement could not be committed safely." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: "health_checking",
+    workloadHealth: "pending",
+  });
+});
+
+app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node authentication headers." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Health-check reports must use application/json." }, 415);
+  }
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Health-check report body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 2048) {
+        await reader.cancel();
+        return c.json({ message: "Health-check report exceeds 2048 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read health-check report body." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Health-check report body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) { rawBytes.set(chunk, offset); offset += chunk.byteLength; }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Health-check report must be valid UTF-8." }, 400);
+  }
+
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, decodedBody, signature,
+  )) {
+    return c.json({ message: "Application node is not authorized to report health checks." }, 401);
+  }
+
+  let input: unknown;
+  try { input = JSON.parse(decodedBody); } catch { return c.json({ message: "Invalid health-check report JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "deploymentId", "artifactSha256", "probePath", "healthStatus",
+    "httpStatus", "durationMs", "failureCode",
+  ]);
+  const failureCodes = new Set([
+    "connection_refused", "timeout", "http_4xx", "http_5xx",
+    "invalid_response", "process_exit", "probe_error",
+  ]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
+      typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
+      typeof body.probePath !== "string" || !body.probePath.startsWith("/") ||
+      body.probePath.length > 512 || /[?#\r\n]/.test(body.probePath) ||
+      /[\x00-\x1F\x7F]/.test(body.probePath) ||
+      !["healthy", "unhealthy"].includes(String(body.healthStatus)) ||
+      !Number.isInteger(body.httpStatus) || Number(body.httpStatus) < 0 || Number(body.httpStatus) > 599 ||
+      !Number.isInteger(body.durationMs) || Number(body.durationMs) < 0 || Number(body.durationMs) > 30000) {
+    return c.json({ message: "Health-check report is outside permitted bounds." }, 400);
+  }
+  const healthStatus = String(body.healthStatus);
+  const httpStatus = Number(body.httpStatus);
+  const durationMs = Number(body.durationMs);
+  const failureCode = body.failureCode === undefined ? "" : String(body.failureCode);
+  if ((healthStatus === "healthy" && (httpStatus < 200 || httpStatus > 299 || failureCode !== "")) ||
+      (healthStatus === "unhealthy" && (!failureCodes.has(failureCode) ||
+        (httpStatus >= 200 && httpStatus <= 299)))) {
+    return c.json({ message: "Health-check status, HTTP status, and failure code are inconsistent." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  const release = await c.env.DB.prepare(
+    "SELECT r.id AS releaseRowId, r.state, r.artifact_digest AS artifactDigest, " +
+    "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
+    "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
+    "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
+    "w.node_id AS previousActiveNodeId " +
+    "FROM application_releases r " +
+    "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
+    "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+  ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
+    releaseRowId: string; state: string; artifactDigest: string | null;
+    deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
+    healthCheckPath: string | null; previousActiveReleaseId: string | null;
+    previousDeploymentId: string | null;
+    previousActiveNodeId: string | null;
+  }>();
+  if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
+  if (release.artifactDigest !== body.artifactSha256 ||
+      release.deploymentArtifactDigest !== body.artifactSha256) {
+    return c.json({ message: "Health-check report digest does not match the assigned release artifact." }, 409);
+  }
+  const expectedProbePath = release.healthCheckPath ?? "/";
+  if (body.probePath !== expectedProbePath) {
+    return c.json({ message: "Health-check path does not match the project runtime settings." }, 409);
+  }
+
+  const details = JSON.stringify({
+    artifactSha256: body.artifactSha256,
+    probePath: body.probePath,
+    healthStatus,
+    httpStatus,
+    durationMs,
+    failureCode: failureCode || null,
+  });
+  const eventCode = healthStatus === "healthy" ? "health_check_succeeded" : "health_check_failed";
+  const targetState = healthStatus === "healthy" ? "succeeded" : "failed";
+  if (release.state === "succeeded" || release.state === "failed") {
+    if (release.state !== targetState) {
+      return c.json({ message: "Health-check outcome conflicts with the terminal release state." }, 409);
+    }
+    const prior = await c.env.DB.prepare(
+      "SELECT id FROM application_release_events WHERE release_id = ? AND event_code = ? " +
+      "AND details_redacted_json = ? LIMIT 1",
+    ).bind(release.releaseRowId, eventCode, details).first<{ id: string }>();
+    if (!prior) return c.json({ message: "Terminal release has no matching health-check event." }, 409);
+    return c.json({
+      accepted: true, duplicate: true, deploymentId: body.deploymentId,
+      releaseState: targetState,
+      workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeId),
+      rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+        ? release.previousDeploymentId : null,
+      rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+        ? release.previousActiveNodeId : null,
+    });
+  }
+  if (release.state !== "health_checking") {
+    return c.json({ message: "Application release is not awaiting a health-check report." }, 409);
+  }
+
+  const activeNodePredicate =
+    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key = ?)";
+  const commonNodeArgs = [node.id, nodeIdentity, node.signingPublicKey];
+  const statements = healthStatus === "healthy" ? [
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'succeeded', finished_at = datetime('now'), " +
+      "failure_code = NULL, failure_message_redacted = NULL, updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'health_checking', 'succeeded', 'node', ?, 'health_check_succeeded', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'succeeded' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_workloads " +
+      "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
+      "VALUES (?, ?, ?, ?, ?, 'web', 'healthy', 1, 1) " +
+      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "active_release_id = excluded.active_release_id, node_id = excluded.node_id, status = 'healthy', " +
+      "desired_replicas = 1, observed_replicas = 1, updated_at = datetime('now')",
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id),
+    c.env.DB.prepare(
+      "UPDATE github_deployments SET status = 'succeeded', finished_at = datetime('now'), " +
+      "log_excerpt = 'Application health check succeeded.' " +
+      "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
+    ).bind(body.deploymentId, release.organizationId, release.projectId),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ] : [
+    c.env.DB.prepare(
+      "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), " +
+      "failure_code = ?, failure_message_redacted = 'Initial application health check failed.', updated_at = datetime('now') " +
+      "WHERE id = ? AND state = 'health_checking' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(failureCode, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'health_checking', 'failed', 'node', ?, 'health_check_failed', ? " +
+      "FROM application_releases WHERE id = ? AND state = 'failed' AND artifact_digest = ?" + activeNodePredicate,
+    ).bind(crypto.randomUUID(), node.id, details, release.releaseRowId, body.artifactSha256, ...commonNodeArgs),
+    c.env.DB.prepare(
+      "INSERT INTO application_workloads " +
+      "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
+      "VALUES (?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0) " +
+      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "status = 'unhealthy', observed_replicas = 0, updated_at = datetime('now')",
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+      release.previousActiveReleaseId, node.id),
+    c.env.DB.prepare(
+      "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), " +
+      "log_excerpt = 'Application health check failed.' " +
+      "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
+    ).bind(body.deploymentId, release.organizationId, release.projectId),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ];
+
+  const results = await c.env.DB.batch(statements);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Health-check outcome could not be committed safely." }, 409);
+  }
+  return c.json({
+    accepted: true,
+    duplicate: false,
+    deploymentId: body.deploymentId,
+    releaseState: targetState,
+    workloadHealth: healthStatus,
+    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeId),
+    rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      ? release.previousDeploymentId : null,
+    rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      ? release.previousActiveNodeId : null,
+  });
+});
+
+app.post("/internal/v1/application-build-usage", async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = c.req.header("x-nexora-node-signature") ?? "";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
+    return c.json({ message: "Node identity is required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length > 4096) return c.json({ message: "Request body is too large." }, 413);
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'builder' " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
+  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
+    return c.json({ message: "Invalid node identity or signature." }, 401);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set(["deploymentId", "buildSeconds", "buildResult"]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.deploymentId !== "string" || body.deploymentId.length < 1 || body.deploymentId.length > 128 ||
+      !Number.isInteger(body.buildSeconds) || Number(body.buildSeconds) < 1 || Number(body.buildSeconds) > 604800 ||
+      !["succeeded", "failed", "cancelled"].includes(String(body.buildResult))) {
+    return c.json({ message: "Invalid builder usage payload." }, 400);
+  }
+  const deploymentId = body.deploymentId;
+  const buildSeconds = Number(body.buildSeconds);
+  const buildResult = String(body.buildResult);
+  const db = c.env.DB;
+  const nonceResult = await db.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+
+  const priorEvent = await db.prepare(
+    "SELECT e.id, e.period_start AS periodStart, e.organization_id AS organizationId, e.project_id AS projectId, " +
+    "e.build_seconds AS buildSeconds, e.build_result AS buildResult " +
+    "FROM application_usage_events e WHERE e.deployment_id = ? AND e.node_id = ? LIMIT 1",
+  ).bind(deploymentId, node.id).first<{ id: string; periodStart: string; organizationId: string; projectId: string; buildSeconds: number; buildResult: string }>();
+
+  if (priorEvent) {
+    if (priorEvent.buildSeconds !== buildSeconds || priorEvent.buildResult !== buildResult) {
+      return c.json({ message: "A conflicting report already exists for this deployment and node." }, 409);
+    }
+    const priorUsage = await db.prepare(
+      "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
+      "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
+    ).bind(priorEvent.organizationId, priorEvent.projectId, priorEvent.periodStart)
+      .first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
+    if (!priorUsage) return c.json({ message: "Usage aggregate is unavailable." }, 500);
+    return c.json({ accepted: true, duplicate: true, periodStart: priorEvent.periodStart,
+      buildSecondsUsed: priorUsage.buildSecondsUsed, buildMinutesLimit: priorUsage.buildMinutesLimit,
+      quotaExhausted: priorUsage.buildSecondsUsed >= priorUsage.buildMinutesLimit * 60,
+      quotaEnforcement: "not_enabled" });
+  }
+
+  const deployment = await db.prepare(
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId " +
+    "FROM github_deployments d WHERE d.id = ? AND d.status IN ('cloning', 'installing', 'building') LIMIT 1",
+  ).bind(deploymentId).first<{ id: string; organizationId: string; projectId: string }>();
+  if (!deployment) return c.json({ message: "Deployment is not active or does not exist." }, 409);
+
+
+
+  const now = new Date();
+  const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
+  const results = await db.batch([
+    db.prepare(
+      "INSERT OR IGNORE INTO application_usage_periods " +
+      "(id, organization_id, project_id, period_start, build_seconds_used, build_minutes_limit) " +
+      "SELECT ?, p.organization_id, p.id, ?, 0, hp.app_build_minutes_month " +
+      "FROM github_projects p JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id " +
+      "JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id " +
+      "WHERE p.id = ? AND p.organization_id = ?",
+    ).bind(crypto.randomUUID(), periodStart, deployment.projectId, deployment.organizationId),
+    db.prepare(
+      "INSERT OR IGNORE INTO application_usage_events " +
+      "(id, organization_id, project_id, deployment_id, period_start, build_seconds, source, build_result, node_id) " +
+      "SELECT ?, d.organization_id, d.project_id, d.id, ?, ?, 'isolated_builder', ?, ? " +
+      "FROM github_deployments d WHERE d.id = ? AND d.organization_id = ? AND d.project_id = ? " +
+      "AND d.status IN ('cloning', 'installing', 'building') " +
+      "AND EXISTS (SELECT 1 FROM application_usage_periods u WHERE u.organization_id = d.organization_id " +
+      "AND u.project_id = d.project_id AND u.period_start = ?)",
+    ).bind(crypto.randomUUID(), periodStart, buildSeconds, buildResult, node.id, deploymentId, deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare(
+      "UPDATE application_usage_periods SET build_seconds_used = build_seconds_used + (" +
+      "SELECT COALESCE(SUM(e.build_seconds), 0) FROM application_usage_events e " +
+      "WHERE e.organization_id = ? AND e.project_id = ? AND e.period_start = ? AND e.aggregated_at IS NULL" +
+      "), updated_at = datetime('now') WHERE organization_id = ? AND project_id = ? AND period_start = ?",
+    ).bind(deployment.organizationId, deployment.projectId, periodStart, deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare(
+      "UPDATE application_usage_events SET aggregated_at = datetime('now') " +
+      "WHERE organization_id = ? AND project_id = ? AND period_start = ? AND aggregated_at IS NULL",
+    ).bind(deployment.organizationId, deployment.projectId, periodStart),
+    db.prepare("UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").bind(node.id),
+  ]);
+
+  const event = await db.prepare(
+    "SELECT id, period_start AS periodStart FROM application_usage_events WHERE organization_id = ? AND project_id = ? AND deployment_id = ? AND node_id = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, deploymentId, node.id).first<{ id: string; periodStart: string }>();
+  if (!event) return c.json({ message: "Usage report could not be associated with an active deployment." }, 409);
+  const usage = await db.prepare(
+    "SELECT build_seconds_used AS buildSecondsUsed, build_minutes_limit AS buildMinutesLimit " +
+    "FROM application_usage_periods WHERE organization_id = ? AND project_id = ? AND period_start = ? LIMIT 1",
+  ).bind(deployment.organizationId, deployment.projectId, event.periodStart).first<{ buildSecondsUsed: number; buildMinutesLimit: number }>();
+  if (!usage) return c.json({ message: "Usage aggregate is unavailable." }, 500);
+  const inserted = Number(results[1]?.meta?.changes ?? 0) > 0;
+  return c.json({
+    accepted: true,
+    duplicate: !inserted,
+    periodStart: event.periodStart,
+    buildSecondsUsed: usage.buildSecondsUsed,
+    buildMinutesLimit: usage.buildMinutesLimit,
+    quotaExhausted: usage.buildSecondsUsed >= usage.buildMinutesLimit * 60,
+    quotaEnforcement: "not_enabled",
+  });
+});
+
+app.get("/v1/applications/projects/:projectId/settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, p.repository_full_name AS repositoryFullName,
+            s.id AS settingsId, s.runtime_profile_id AS runtimeProfileId,
+            rp.runtime_family AS runtimeFamily, rp.profile_key AS runtimeProfileKey,
+            rp.enabled AS runtimeEnabled, s.spec_version AS specVersion,
+            s.build_method AS buildMethod, s.build_context AS buildContext,
+            s.build_command AS buildCommand, s.output_directory AS outputDirectory,
+            s.start_command AS startCommand, s.listen_port AS listenPort,
+            s.health_check_path AS healthCheckPath, s.cpu_millis AS cpuMillis,
+            s.memory_mib AS memoryMiB, s.disk_mib AS diskMiB,
+            s.process_limit AS processLimit, s.updated_at AS updatedAt,
+            hp.app_cpu_millis AS planCpuMillis, hp.app_memory_mib AS planMemoryMiB,
+            MIN(hp.app_disk_mib, CAST(hp.disk_limit_bytes / 1048576 AS INTEGER)) AS planDiskMiB,
+            hp.app_process_limit AS planProcessLimit,
+            hp.app_build_minutes_month AS planBuildMinutesMonth
+     FROM github_projects p
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
+     JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
+     LEFT JOIN application_project_settings s
+       ON s.project_id = p.id AND s.organization_id = p.organization_id
+     LEFT JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id
+     WHERE p.id = ? AND p.organization_id = ?
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<Record<string, unknown>>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  return c.json({
+    project: { id: project.id, repositoryFullName: project.repositoryFullName },
+    planLimits: {
+      cpuMillis: project.planCpuMillis,
+      memoryMiB: project.planMemoryMiB,
+      diskMiB: project.planDiskMiB,
+      processLimit: project.planProcessLimit,
+      buildMinutesPerMonth: project.planBuildMinutesMonth,
+    },
+    settings: project.settingsId ? {
+      id: project.settingsId,
+      runtimeProfileId: project.runtimeProfileId,
+      runtimeFamily: project.runtimeFamily,
+      runtimeProfileKey: project.runtimeProfileKey,
+      runtimeEnabled: project.runtimeEnabled === 1,
+      specVersion: project.specVersion,
+      buildMethod: project.buildMethod,
+      buildContext: project.buildContext,
+      buildCommand: project.buildCommand,
+      outputDirectory: project.outputDirectory,
+      startCommand: project.startCommand,
+      listenPort: project.listenPort,
+      healthCheckPath: project.healthCheckPath,
+      resources: {
+        cpuMillis: project.cpuMillis,
+        memoryMiB: project.memoryMiB,
+        diskMiB: project.diskMiB,
+        processLimit: project.processLimit,
+      },
+      selectable: project.runtimeEnabled === 1,
+    } : null,
+    executionEnabled: false,
+  });
 });
 
 app.get("/v1/github/projects/:projectId/deployments", async (c) => {

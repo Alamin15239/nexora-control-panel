@@ -97,3 +97,64 @@ func TestValidateGzipTarEnforcesEntryAndExpandedSizeLimits(t *testing.T) {
 	if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{MaxTotalBytes: 9}); err == nil { t.Fatal("expanded size limit was not enforced") }
 	if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{MaxFileBytes: 4}); err == nil { t.Fatal("per-file size limit was not enforced") }
 }
+
+
+func TestValidateGzipTarRejectsCorruptGzipTrailer(t *testing.T) {
+	archive := makeArchive(t, testEntry{name: "index.html", kind: tar.TypeReg, body: "safe"})
+	archive[len(archive)-1] ^= 0xff
+	if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{}); err == nil {
+		t.Fatal("archive with a corrupted gzip trailer was accepted")
+	}
+}
+
+func TestValidateGzipTarRejectsNonZeroDataAfterTarEndMarker(t *testing.T) {
+	var output bytes.Buffer
+	gz := gzip.NewWriter(&output)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "index.html", Mode: 0644, Typeflag: tar.TypeReg, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("safe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gz.Write([]byte("unexpected trailing payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateGzipTar(bytes.NewReader(output.Bytes()), Limits{}); err == nil {
+		t.Fatal("non-zero data after the tar end marker was accepted")
+	}
+}
+
+func TestValidateGzipTarRejectsConcatenatedGzipPayload(t *testing.T) {
+	archive := makeArchive(t, testEntry{name: "index.html", kind: tar.TypeReg, body: "safe"})
+	var output bytes.Buffer
+	output.Write(archive)
+	second := gzip.NewWriter(&output)
+	if _, err := second.Write([]byte("unexpected second gzip member")); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateGzipTar(bytes.NewReader(output.Bytes()), Limits{}); err == nil {
+		t.Fatal("unexpected concatenated gzip member was accepted")
+	}
+}
+
+
+func TestValidateGzipTarRejectsReservedPublisherManifestPath(t *testing.T) {
+	archive := makeArchive(t, testEntry{
+		name: "./.nexora-release.json",
+		kind: tar.TypeReg,
+		body: "{\"version\":1}",
+	})
+	if _, err := ValidateGzipTar(bytes.NewReader(archive), Limits{}); err == nil {
+		t.Fatal("customer archive was allowed to provide publisher-owned release metadata")
+	}
+}

@@ -9,8 +9,13 @@ type ApiServiceBinding = { fetch(request: Request): Promise<Response> };
 
 const COOKIE_NAME = "nexora_session";
 
-function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELETE"): boolean {
+function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT"): boolean {
   if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
+  if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
+  if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
+      /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "settings") return method === "GET" || method === "PUT";
+  if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
+      /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "usage") return method === "GET";
   if (parts.length === 2 && parts[0] === "github" && parts[1] === "connection") return method === "GET" || method === "DELETE";
   if (parts.length === 2 && parts[0] === "github" && ["connect", "repositories", "projects"].includes(parts[1])) return method === "GET" || method === "POST";
   if (parts.length === 1 && parts[0] === "dns-records") return method === "GET" || method === "POST";
@@ -68,7 +73,7 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
 async function proxy(
   request: NextRequest,
   context: { params: Promise<{ path: string[] }> },
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT",
 ) {
   const { path } = await context.params;
   if (!Array.isArray(path) || !allowedRoute(path, method)) {
@@ -136,4 +141,8 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ p
 
 export async function DELETE(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   return proxy(request, context, "DELETE");
+}
+
+export async function PUT(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+  return proxy(request, context, "PUT");
 }
