@@ -50,6 +50,13 @@ VALUES ('project-a','org-a','account-a','connection-a','repo-1','owner/repo')"""
 db.execute("""INSERT INTO github_deployments
 (id,organization_id,project_id,commit_sha,branch,trigger_type)
 VALUES ('deployment-a','org-a','project-a',?,'main','manual')""", ("a" * 40,))
+def must_reject(label, sql, args):
+    try:
+        db.execute(sql, args)
+    except sqlite3.IntegrityError:
+        return
+    raise AssertionError(f"Tenant guard did not reject: {label}")
+
 db.execute("""INSERT INTO application_node_pools
 (id,name,environment,region,runtime_engine,status)
 VALUES ('pool-a','Test builder pool','staging','test-region','containerd','ready')""")
@@ -72,12 +79,6 @@ must_reject(
 )
 
 
-def must_reject(label, sql, args):
-    try:
-        db.execute(sql, args)
-    except sqlite3.IntegrityError:
-        return
-    raise AssertionError(f"Tenant guard did not reject: {label}")
 
 must_reject(
     "settings organization mismatch",
