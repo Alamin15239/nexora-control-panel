@@ -4954,9 +4954,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
       typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
       typeof body.probePath !== "string" || !body.probePath.startsWith("/") ||
-      body.probePath.length > 512 || /[?#\\r\\n]/.test(body.probePath) ||
-      /[\\u0000-\\u001F\\u007F]/.test(body.probePath) ||
-      body.probePath.length > 512 ||
+      body.probePath.length > 512 || /[?#\r\n]/.test(body.probePath) ||
+      /[\x00-\x1F\x7F]/.test(body.probePath) ||
       !["healthy", "unhealthy"].includes(String(body.healthStatus)) ||
       !Number.isInteger(body.httpStatus) || Number(body.httpStatus) < 0 || Number(body.httpStatus) > 599 ||
       !Number.isInteger(body.durationMs) || Number(body.durationMs) < 0 || Number(body.durationMs) > 30000) {
