@@ -25,13 +25,8 @@ func (execRunner) Run(name string, args ...string) error {
 	return exec.Command(name, args...).Run()
 }
 
-// Install atomically installs one renderer-produced vhost, validates the full
-// Nginx configuration, then reloads Nginx. On failure it restores the previous
-// file (or removes the new file) and makes a best-effort validation/reload of
-// the restored configuration.
-// InstallBinding is the only supported installation API. It accepts a validated
-// domain/account binding and renders the vhost locally; callers cannot supply
-// arbitrary Nginx directives or a filesystem filename.
+// installBinding accepts a validated domain/account binding and renders the
+// vhost locally; callers cannot supply arbitrary Nginx directives or filenames.
 func installBinding(configDir string, binding Binding, ownerUID uint32, runner CommandRunner) error {
 	filename, err := ConfigName(binding.DomainID)
 	if err != nil {
