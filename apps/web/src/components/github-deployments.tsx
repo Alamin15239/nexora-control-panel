@@ -8,6 +8,7 @@ type Connection = { login: string; scopes: string; connectedAt: string } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
+type Deployment = { id: string; commitSha: string; branch: string; triggerType: string; status: string; commitMessage: string | null; deploymentUrl: string | null; logExcerpt: string | null; requestedAt: string; startedAt: string | null; finishedAt: string | null };
 
 type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
 type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
@@ -191,6 +192,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [deploymentsByProject, setDeploymentsByProject] = useState<Record<string, Deployment[]>>({});
   const [selectedRepository, setSelectedRepository] = useState("");
   const [hostingAccountId, setHostingAccountId] = useState("");
   const [branch, setBranch] = useState("main");
@@ -218,7 +220,15 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       if (!projectsResponse.ok) throw new Error(projectsData.message ?? "Unable to load linked repositories.");
       setConnected(Boolean(connectionData.connected)); setConnection(connectionData.connection ?? null);
       setAccounts((accountsData.accounts ?? []).filter((account: Account) => account.status === "ACTIVE"));
-      setProjects(projectsData.projects ?? []);
+      const linkedProjects: Project[] = projectsData.projects ?? [];
+      const deploymentResults = await Promise.all(linkedProjects.map(async (project) => {
+        const response = await fetch(`/api/control/github/projects/${project.id}/deployments`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? `Unable to load deployment history for ${project.repositoryFullName}.`);
+        return [project.id, (data.deployments ?? []) as Deployment[]] as const;
+      }));
+      setProjects(linkedProjects);
+      setDeploymentsByProject(Object.fromEntries(deploymentResults));
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load GitHub deployment settings."); }
     finally { setLoading(false); }
   }, [customerMode]);
@@ -314,7 +324,16 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
           {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
-          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div>{!customerMode && <RuntimeProjectSettings projectId={project.id}/ >}</div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
+          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><div className="border-t border-slate-100 px-6 py-4">
+              <div className="mb-3 flex items-center justify-between gap-3"><p className="text-xs font-semibold text-slate-700">Deployment history</p><span className="text-[11px] text-slate-400">{(deploymentsByProject[project.id] ?? []).length} records</span></div>
+              {(deploymentsByProject[project.id] ?? []).length ? <div className="space-y-3">{(deploymentsByProject[project.id] ?? []).map(deployment => <div key={deployment.id} className="rounded-lg border border-slate-200 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-slate-800">{deployment.status.replaceAll("_", " ")}</span><span className="text-[11px] text-slate-500">{deployment.requestedAt ? new Date(deployment.requestedAt).toLocaleString() : "Time unavailable"}</span></div>
+                <p className="mt-1 text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType}</p>
+                {deployment.commitMessage && <p className="mt-1 text-xs text-slate-500">{deployment.commitMessage}</p>}
+                {deployment.deploymentUrl && <a href={deployment.deploymentUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex text-xs font-medium text-blue-700 hover:underline">Open deployment URL</a>}
+                {deployment.logExcerpt && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium text-slate-600">View latest log excerpt</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-[11px] text-slate-100">{deployment.logExcerpt}</pre></details>}
+              </div>)}</div> : <p className="text-xs text-slate-500">No deployment records yet.</p>}
+            </div>{!customerMode && <RuntimeProjectSettings projectId={project.id}/ >}</div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
         </div>
       </>}
       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback remain disabled until the GitHub-hosted build workflow and a separately enrolled, isolated static publisher pass end-to-end acceptance tests.</p></div>
