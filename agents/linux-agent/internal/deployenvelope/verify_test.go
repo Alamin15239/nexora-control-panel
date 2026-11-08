@@ -155,3 +155,25 @@ func TestVerifySignedReturnsTrustedIdentityForLocalAuthorization(t *testing.T) {
 	}
 }
 
+
+func TestVerifyRejectsDomainRebindingAndMalformedHostname(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil { t.Fatal(err) }
+	now := time.Unix(1_800_000_000, 0)
+	expected := testExpected()
+	for name, mutate := range map[string]func(*Claims){
+		"another domain id": func(c *Claims) { c.DomainID = "domain_other" },
+		"another hostname": func(c *Claims) { c.Hostname = "attacker.example.test" },
+		"hostname injection": func(c *Claims) { c.Hostname = "example.test;return 200" },
+		"uppercase hostname": func(c *Claims) { c.Hostname = "WWW.EXAMPLE.TEST" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			claims := validClaims(expected, now)
+			mutate(&claims)
+			token := signTestToken(t, key, claims)
+			if _, err := Verify(token, map[string]*rsa.PublicKey{"test-key-1": &key.PublicKey}, expected, now); err == nil {
+				t.Fatal("Verify accepted a rebound or malformed domain")
+			}
+		})
+	}
+}
