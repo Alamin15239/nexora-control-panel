@@ -97,7 +97,7 @@ func TestInstallBindingRendersOnlyValidatedServerConfig(t *testing.T) {
 		Hostname: "www.example.test",
 		HostingAccountID: "account_123",
 	}
-	if err := InstallBinding(dir, binding, uid, runner); err != nil {
+	if err := installBinding(dir, binding, uid, runner); err != nil {
 		t.Fatal(err)
 	}
 	name, err := ConfigName(binding.DomainID)
@@ -128,7 +128,7 @@ func TestInstallBindingRejectsInvalidBindingBeforeCommands(t *testing.T) {
 		Hostname: "example.test; include /etc/passwd;",
 		HostingAccountID: "account_123",
 	}
-	if err := InstallBinding(dir, binding, uid, runner); err == nil {
+	if err := installBinding(dir, binding, uid, runner); err == nil {
 		t.Fatal("accepted invalid hostname binding")
 	}
 	if len(runner.calls) != 0 {
