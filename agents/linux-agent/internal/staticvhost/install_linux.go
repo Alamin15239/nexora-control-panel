@@ -90,8 +90,12 @@ func acquireInstallLock(dir, filename string, ownerUID uint32) (func(), error) {
 	if err != nil { return nil, fmt.Errorf("open Nginx install lock: %w", err) }
 	file := os.NewFile(uintptr(fd), path)
 	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("inspect Nginx install lock: %w", err)
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if err != nil || !ok || !info.Mode().IsRegular() || stat.Uid != ownerUID || info.Mode().Perm()&0077 != 0 {
+	if !ok || !info.Mode().IsRegular() || stat.Uid != ownerUID || info.Mode().Perm()&0077 != 0 {
 		file.Close()
 		return nil, errors.New("Nginx install lock failed ownership or permission checks")
 	}
