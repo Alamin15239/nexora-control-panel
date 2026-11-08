@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 var releaseIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -74,8 +75,74 @@ func Publish(baseDir, stagingID, releaseID string) error {
 }
 
 // Activate atomically changes baseDir/current to point at an existing release.
-// It is also the rollback primitive: pass the previously active release ID.
+// All activations are serialized with an advisory lock so a rollback compare-and-switch
+// cannot race another deployment activation.
 func Activate(baseDir, releaseID string) error {
+	if err := validateBase(baseDir); err != nil { return err }
+	if err := validateName(releaseID); err != nil { return err }
+	unlock, err := acquireActivationLock(baseDir)
+	if err != nil { return err }
+	defer unlock()
+	return activateLocked(baseDir, releaseID)
+}
+
+// Rollback switches from failedReleaseID to previousReleaseID only if the failed
+// release is still active. A retry after a successful rollback is idempotent;
+// a newer deployment or unexpected active target is never overwritten.
+func Rollback(baseDir, failedReleaseID, previousReleaseID string) error {
+	if err := validateBase(baseDir); err != nil { return err }
+	if err := validateName(failedReleaseID); err != nil { return fmt.Errorf("invalid failed release: %w", err) }
+	if err := validateName(previousReleaseID); err != nil { return fmt.Errorf("invalid previous release: %w", err) }
+	if failedReleaseID == previousReleaseID {
+		return errors.New("failed and previous release identifiers must differ")
+	}
+	unlock, err := acquireActivationLock(baseDir)
+	if err != nil { return err }
+	defer unlock()
+
+	active := filepath.Join(baseDir, "current")
+	currentTarget, err := os.Readlink(active)
+	if err != nil {
+		return fmt.Errorf("read active release before rollback: %w", err)
+	}
+	previousTarget := filepath.Join("releases", previousReleaseID)
+	if currentTarget == previousTarget {
+		return nil
+	}
+	failedTarget := filepath.Join("releases", failedReleaseID)
+	if currentTarget != failedTarget {
+		return errors.New("refusing stale rollback because the failed release is no longer active")
+	}
+	return activateLocked(baseDir, previousReleaseID)
+}
+
+func acquireActivationLock(baseDir string) (func(), error) {
+	lockPath := filepath.Join(baseDir, ".activation.lock")
+	if info, err := os.Lstat(lockPath); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+			return nil, errors.New("activation lock must be a private regular file")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect activation lock: %w", err)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil { return nil, fmt.Errorf("open activation lock: %w", err) }
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		_ = file.Close()
+		return nil, errors.New("activation lock is not a private regular file")
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock release activation: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
+}
+
+func activateLocked(baseDir, releaseID string) error {
 	if err := validateBase(baseDir); err != nil { return err }
 	if err := validateName(releaseID); err != nil { return err }
 	releasesRoot := filepath.Join(baseDir, "releases")
