@@ -4556,8 +4556,16 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
      FROM github_projects p
      JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(projectId, identity.organizationId).first<{
+     WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+           AND m.role IN ('ACCOUNT_OWNER', 'ACCOUNT_ADMIN')
+       ))
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{
     id: string; appCpuMillis: number; appMemoryMiB: number;
     appDiskMiB: number; appProcessLimit: number; accountDiskLimitBytes: number;
   }>();
@@ -4750,8 +4758,15 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
      LEFT JOIN application_usage_periods u
        ON u.organization_id = p.organization_id AND u.project_id = p.id AND u.period_start = ?
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(periodStart, periodStart, projectId, identity.organizationId).first<{
+     WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+       ))
+     LIMIT 1`,
+  ).bind(periodStart, periodStart, projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{
     id: string; buildMinutesLimit: number; buildSecondsUsed: number; hasUsageEvents: number;
   }>();
   if (!row) return c.json({ message: "GitHub project not found." }, 404);
@@ -6066,8 +6081,14 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
        ON s.project_id = p.id AND s.organization_id = p.organization_id
      LEFT JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id
      WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+       ))
      LIMIT 1`,
-  ).bind(projectId, identity.organizationId).first<Record<string, unknown>>();
+  ).bind(projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<Record<string, unknown>>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   return c.json({
     project: { id: project.id, repositoryFullName: project.repositoryFullName },
@@ -6108,8 +6129,11 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const project = await c.env.DB.prepare(
-    "SELECT id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
-  ).bind(c.req.param("projectId"), identity.organizationId).first<{ id: string }>();
+    "SELECT p.id FROM github_projects p WHERE p.id = ? AND p.organization_id = ? " +
+    "AND (? = 1 OR EXISTS (SELECT 1 FROM hosting_account_memberships m " +
+    "WHERE m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id " +
+    "AND m.user_id = ? AND m.status = 'ACTIVE')) LIMIT 1",
+  ).bind(c.req.param("projectId"), identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{ id: string }>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   const rows = await c.env.DB.prepare(
     `SELECT id, commit_sha AS commitSha, branch, trigger_type AS triggerType, status,
