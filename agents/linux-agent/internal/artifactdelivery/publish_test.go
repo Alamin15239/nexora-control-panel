@@ -56,6 +56,8 @@ func envelopeFor(t *testing.T, key *rsa.PrivateKey, expected deployenvelope.Expe
 		"project_id": expected.ProjectID,
 		"deployment_id": expected.DeploymentID,
 		"hosting_account_id": expected.HostingAccountID,
+		"domain_id": expected.DomainID,
+		"hostname": expected.Hostname,
 		"repository_id": expected.RepositoryID,
 		"commit_sha": expected.CommitSHA,
 		"artifact_sha256": hex.EncodeToString(digest[:]),
@@ -86,6 +88,8 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 		ProjectID: "project_test",
 		DeploymentID: "deployment_test",
 		HostingAccountID: "hosting_test",
+		DomainID: "domain_test",
+		Hostname: "www.example.test",
 		RepositoryID: "123456789",
 		CommitSHA: "0123456789abcdef0123456789abcdef01234567",
 	}
