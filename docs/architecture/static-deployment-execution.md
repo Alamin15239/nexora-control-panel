@@ -202,33 +202,28 @@ This change closes the raw-configuration injection surface at the installer API,
 
 ## Dedicated privileged static-vhost broker
 
-The publisher no longer needs direct access to Nginx configuration files or systemd. After an artifact has been verified and activated, it sends only the deployment's `domainId` to a dedicated Unix socket. The broker:
+The publisher does not write Nginx configuration or invoke systemctl. After it verifies and activates an artifact, it sends the exact signed deployment envelope to a dedicated Unix socket. The root broker independently verifies the same RS256 envelope before installing the vhost.
 
-- Runs as root in `nexora-static-vhostd.service`, separate from the general-purpose provisioning daemon.
+- Runs as root in `nexora-static-vhostd.service`, separate from the general provisioning daemon.
 - Authorizes the publisher using kernel `SO_PEERCRED` and the UID resolved for `nexora-runtime`.
-- Accepts one bounded JSON request containing only `domainId`; unknown JSON fields are rejected.
-- Loads the domain-to-hosting-account mapping from `/etc/nexora-static-vhost/domains.json`, requiring a root-owned, non-group/world-writable regular file in a root-owned non-writable directory. Symlink opens are rejected.
-- Validates every registry binding through the static-vhost renderer, rejects duplicate domain IDs, and never accepts a customer-provided document root or Nginx directives.
+- Accepts one bounded JSON request containing only `deploymentEnvelope`; unknown fields are rejected.
+- Loads issuer, audience and key ID from the root-owned `/etc/nexora-static-vhost/trust.json` and a pinned RSA public key at `/etc/nexora-static-vhost/deployment-envelope-public.pem`. Both files and their parent directory must be root-owned and not group/world writable; symlink opens are rejected.
+- Verifies the RS256 signature, key ID, issuer, audience, claim schema and expiry independently using the deployment-envelope verifier. It derives domain ID, canonical hostname and hosting-account ID only from verified signed claims.
 - Installs only the deterministic managed config under `/etc/nginx/conf.d`, then validates and reloads Nginx through fixed executable paths.
-- Limits concurrent broker requests and bounds request, response, registry, and connection sizes/timeouts.
+- Limits concurrent broker requests, command execution time, request/response size and connection time.
 
-The expected registry schema is versioned:
+The root-owned trust config schema is:
 
 ```json
 {
-  "version": 1,
-  "domains": [
-    {
-      "domainId": "domain_123",
-      "hostname": "www.example.test",
-      "hostingAccountId": "account_123"
-    }
-  ]
+  "issuer": "configured-deployment-envelope-issuer",
+  "audience": "configured-deployment-envelope-audience",
+  "keyId": "active-signing-key-id"
 }
 ```
 
-The file must be provisioned by a trusted root-owned control-plane/agent reconciliation path. Do not make it writable by the publisher or by customer accounts. The broker deliberately fails closed when the registry is missing or invalid.
+The matching public key is installed at the fixed path above. The signing private key remains in the Cloudflare Worker secret store. Because the broker verifies the short-lived deployment envelope itself, no separately mutable domain registry or registry synchronization process is required. The Worker must continue issuing envelopes only for deployments assigned to the authenticated runtime node and the verified project/domain/account relationship.
 
-The publisher service connects through `/run/nexora-static-vhost/vhost.sock`; the broker socket is group-readable/writable by `nexora-static`, but the broker independently verifies the publisher UID. The daemon unit is `agents/linux-agent/systemd/nexora-static-vhostd.service`.
+The publisher connects through `/run/nexora-static-vhost/vhost.sock`; the socket is group-accessible to `nexora-static`, but the broker independently verifies the publisher UID. The publisher passes the original envelope only in memory; it is not written to logs.
 
-**Integration status:** broker code, daemon unit, publisher request path, registry validation, and unit tests are now in the branch. The root-owned registry reconciliation from authoritative hosting-account/domain state, package installation/upgrade wiring, and disposable-VM end-to-end HTTP verification are still required. Do not enable the broker or customer static deployments on production until those are complete.
+**Integration status:** broker code, daemon unit, publisher-to-broker request path, pinned trust-file validation, independent signed-envelope verification, and CI build/unit coverage are in the branch. Package installation/upgrade wiring, provisioning the root trust files from the active deployment signing key, and disposable-VM end-to-end HTTP verification remain required. Do not enable the broker or customer static deployments on production until those are complete.
