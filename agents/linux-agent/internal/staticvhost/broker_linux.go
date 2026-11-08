@@ -3,6 +3,7 @@
 package staticvhost
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"syscall"
+	"sync"
 	"time"
 )
 
@@ -61,7 +64,7 @@ func LoadRootRegistry(path string) (map[string]Binding, error) {
 		return nil, errors.New("read static domain registry safely")
 	}
 	var doc registryFile
-	decoder := json.NewDecoder(bytesReader(raw))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("decode static domain registry: %w", err)
@@ -87,28 +90,7 @@ func LoadRootRegistry(path string) (map[string]Binding, error) {
 }
 
 func filepathIsCleanAbsolute(path string) bool {
-	return len(path) > 1 && path[0] == '/' && path[1:] != "" && !containsPathTraversal(path)
-}
-
-func containsPathTraversal(path string) bool {
-	for _, part := range splitPath(path) {
-		if part == "." || part == ".." || part == "" {
-			return true
-		}
-	}
-	return false
-}
-
-func splitPath(path string) []string {
-	var parts []string
-	start := 1
-	for i := 1; i <= len(path); i++ {
-		if i == len(path) || path[i] == '/' {
-			parts = append(parts, path[start:i])
-			start = i + 1
-		}
-	}
-	return parts
+	return filepath.IsAbs(path) && filepath.Clean(path) == path
 }
 
 // Serve handles one bounded request per Unix connection and authorizes the
@@ -117,13 +99,38 @@ func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, r
 	if listener == nil || registryPath == "" || configDir != "/etc/nginx/conf.d" {
 		return errors.New("static vhost broker configuration is invalid")
 	}
+	slots := make(chan struct{}, 4)
+	closed := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-closed:
+		}
+	}()
+	defer close(closed)
+	var workers sync.WaitGroup
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {
-			if ctx.Err() != nil { return nil }
+			if ctx.Err() != nil {
+				workers.Wait()
+				return nil
+			}
+			workers.Wait()
 			return fmt.Errorf("accept static vhost request: %w", err)
 		}
-		go handleBrokerRequest(ctx, conn, allowedUID, registryPath, configDir)
+		select {
+		case slots <- struct{}{}:
+			workers.Add(1)
+			go func(c *net.UnixConn) {
+				defer workers.Done()
+				defer func(){ <-slots }()
+				handleBrokerRequest(ctx, c, allowedUID, registryPath, configDir)
+			}(conn)
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
@@ -146,7 +153,7 @@ func handleBrokerRequest(ctx context.Context, conn *net.UnixConn, allowedUID uin
 	payload := make([]byte, size)
 	if _, err := io.ReadFull(conn, payload); err != nil { return }
 	var request brokerRequest
-	decoder := json.NewDecoder(bytesReader(payload))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		writeBrokerResponse(conn, brokerResponse{Error:"invalid request"})
@@ -197,8 +204,7 @@ func RequestInstall(ctx context.Context, socketPath, domainID string) error {
 	if err != nil { return err }
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-	if _, err := conn.Write(header[:]); err != nil { return err }
-	if _, err := conn.Write(payload); err != nil { return err }
+	if err := writeBrokerFrame(conn, header[:], payload); err != nil { return err }
 	if _, err := io.ReadFull(conn, header[:]); err != nil { return fmt.Errorf("read static vhost broker response: %w", err) }
 	size := binary.BigEndian.Uint32(header[:])
 	if size == 0 || size > 1024 { return errors.New("invalid static vhost broker response") }
@@ -209,6 +215,18 @@ func RequestInstall(ctx context.Context, socketPath, domainID string) error {
 	if !response.OK {
 		if response.Error == "" { response.Error = "broker rejected request" }
 		return errors.New(response.Error)
+	}
+	return nil
+}
+
+func writeBrokerFrame(w io.Writer, header, payload []byte) error {
+	for _, part := range [][]byte{header, payload} {
+		for len(part) > 0 {
+			n, err := w.Write(part)
+			if err != nil { return err }
+			if n == 0 { return io.ErrShortWrite }
+			part = part[n:]
+		}
 	}
 	return nil
 }
