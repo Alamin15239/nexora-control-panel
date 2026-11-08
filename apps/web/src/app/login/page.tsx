@@ -37,7 +37,8 @@ export default function LoginPage() {
         return;
       }
       if (!response.ok) throw new Error(data.message || "Unable to sign in.");
-      const destination = data.platformRole ? "/" : "/customer";
+      const selectedPlanId = new URLSearchParams(window.location.search).get("planId");
+      const destination = data.platformRole ? "/" : selectedPlanId ? `/store?planId=${encodeURIComponent(selectedPlanId)}` : "/customer";
       router.replace(destination);
       router.refresh();
     } catch (caught) {
@@ -74,7 +75,7 @@ export default function LoginPage() {
           {message && <p role="status" className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-sm text-blue-800">{message}</p>}
           <button disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-700/20 transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60">{busy ? "Signing in…" : "Sign in securely"}{!busy && <ArrowRight size={17}/>}</button>
         </form>
-        <div className="mt-7 border-t border-slate-100 pt-6 text-center"><p className="text-sm text-slate-500">New to Nexora? <Link href="/signup" className="font-semibold text-blue-700 hover:text-blue-800">Create an account</Link></p></div>
+        <div className="mt-7 border-t border-slate-100 pt-6 text-center"><p className="text-sm text-slate-500">New to Nexora? <Link href={new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("planId") ? `/signup?planId=${encodeURIComponent(new URLSearchParams(window.location.search).get("planId")!)}` : "/signup"} className="font-semibold text-blue-700 hover:text-blue-800">Create an account</Link></p></div>
         <p className="mt-7 text-center text-[11px] leading-5 text-slate-400">Your account only sees hosting resources assigned to it by the platform administrator.</p>
       </div>
     </section>
