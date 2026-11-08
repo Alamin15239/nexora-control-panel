@@ -49,7 +49,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   // Normalize trailing slashes and treat auth routes as public by path segment.
   // This prevents the workspace guard from bouncing recovery URLs back to /login.
-  const normalizedPathname = (pathname || "/").replace(/\\/+$/, "") || "/";
+  const normalizedPathname = (pathname || "/").replace(/\/+$/, "") || "/";
   const isPublicAuthRoute = ["/login", "/signup", "/forgot-password", "/reset-password"]
     .some(route => normalizedPathname === route || normalizedPathname.startsWith(`${route}/`));
   const isCustomerRoute = normalizedPathname === "/customer" || normalizedPathname.startsWith("/customer/");
