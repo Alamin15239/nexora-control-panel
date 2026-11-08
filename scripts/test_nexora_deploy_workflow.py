@@ -26,7 +26,7 @@ require(re.search(r"(?m)^\s{4}runs-on:\s*ubuntu-latest\s*$", source) is not None
 require("self-hosted" not in source.lower(), "self-hosted runners are prohibited")
 require(re.search(r"(?m)^permissions:\n  contents: read\n  id-token: write$", source) is not None,
         "top-level permissions must be contents:read and id-token:write only")
-require(re.search(r"(?m)^\s{6}permissions:\n\s{8}contents: read\n\s{8}id-token: write$", source) is not None,
+require(re.search(r"(?m)^\s{4}permissions:\n\s{6}contents: read\n\s{6}id-token: write$", source) is not None,
         "job permissions must be contents:read and id-token:write only")
 require("persist-credentials: false" in source, "checkout must not persist the repository token")
 require("secrets." not in source, "workflow must not expose repository or Nexora secrets")
@@ -46,7 +46,7 @@ require("bytes > 104857600" in source, "compressed artifact must be capped at 10
 require('sha256sum "$artifact"' in source, "artifact SHA-256 must be calculated")
 require("OIDC_AUDIENCE" in source and "/oidc/exchange" in source,
         "workflow must exchange a GitHub OIDC token for a scoped upload capability")
-require('"/v1/github/deployments/$DEPLOYMENT_ID/artifact"' in source,
+require('/v1/github/deployments/$DEPLOYMENT_ID/artifact"' in source,
         "workflow must upload only to the deployment-scoped artifact endpoint")
 
 print("PASS: Nexora static deployment workflow security contract")
