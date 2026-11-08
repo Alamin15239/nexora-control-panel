@@ -1941,6 +1941,31 @@ app.delete("/v1/users/:id", async (c) => {
   return c.json({ success: true, message: "User removed from this workspace and active sessions revoked. Their Nexora login may remain active in other workspaces." });
 });
 
+app.delete("/v1/hosting-accounts/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare(
+    "SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account || account.status === "DELETED") return c.json({ message: "Hosting account not found." }, 404);
+  if (account.status !== "PENDING") return c.json({ message: "This account has progressed beyond the safe pre-provisioning stage. Active or partially provisioned Linux accounts require the agent-backed deprovisioning workflow; no data has been changed." }, 409);
+  const jobs = await c.env.DB.prepare(
+    "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' ORDER BY requested_at DESC LIMIT 1",
+  ).bind(account.id).first<{ id: string; status: string }>();
+  if (jobs && jobs.status !== "QUEUED" && jobs.status !== "CANCELLED") {
+    return c.json({ message: "The provisioning job is already running or finished. Wait for it to stop or complete before deletion." }, 409);
+  }
+  const now = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE provisioning_jobs SET status = 'CANCELLED', finished_at = ? WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' AND status = 'QUEUED'").bind(now, account.id),
+    c.env.DB.prepare("UPDATE hosting_account_memberships SET status = 'REVOKED', updated_at = ? WHERE hosting_account_id = ? AND organization_id = ?").bind(now, account.id, identity.organizationId),
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'DELETED', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'PENDING'").bind(now, account.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.cancelled_before_provisioning', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, account.id, JSON.stringify({ username: account.username })),
+  ]);
+  return c.json({ deleted: true, message: "Unprovisioned hosting account removed. No Linux account or website data was present to delete." });
+});
+
 app.get("/v1/hosting-accounts", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
