@@ -239,9 +239,9 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   useEffect(() => { if (connected) void loadRepositories(); }, [connected, loadRepositories]);
   useEffect(() => {
     const status = new URLSearchParams(window.location.search).get("github");
-    if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", "/github-deployments"); void load(); }
-    else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", "/github-deployments"); }
-    else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", "/github-deployments"); }
+    if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
+    else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
+    else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
   }, [load]);
 
   async function connectGithub() {
@@ -314,7 +314,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
           {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
-          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><RuntimeProjectSettings projectId={project.id}/></div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
+          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div>{!customerMode && <RuntimeProjectSettings projectId={project.id}/ >}</div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
         </div>
       </>}
       <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback will remain disabled until Nexora installs and verifies the isolated rootless build worker.</p></div>
