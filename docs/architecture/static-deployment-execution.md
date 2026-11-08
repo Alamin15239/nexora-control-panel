@@ -54,7 +54,7 @@ The authenticated publisher must:
 4. Validate the entire gzip/tar archive before filesystem changes; reject traversal, absolute paths, duplicate paths, links, special files, excessive entry counts, and expanded-size violations.
 5. Extract into a new private staging directory with normalized permissions.
 6. Activate an immutable versioned release through an atomic pointer switch. Failed validation or extraction must leave the active release untouched.
-7. Report activation using the node's signed identity. A successful activation is not the same as a successful HTTP health check.
+7. Install or validate the deterministic Nginx vhost through the dedicated root broker, which independently verifies the signed deployment envelope. Only after Nginx validation and reload succeed does the publisher send the node-signed activation acknowledgement. A successful activation is not the same as a successful HTTP health check.
 
 Rollback must switch to a previously verified immutable release and must be audited. Retention and deletion must never remove the currently active release.
 
