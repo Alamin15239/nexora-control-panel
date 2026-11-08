@@ -115,15 +115,17 @@ func TestBrokerRejectsInvalidEnvelopeFromAuthorizedPublisher(t *testing.T) {
 }
 
 
-func makeBrokerEnvelope(t *testing.T, key *rsa.PrivateKey, now time.Time) string {
+func makeBrokerEnvelope(t *testing.T, key *rsa.PrivateKey, now time.Time, overrides ...Binding) string {
 	t.Helper()
+	binding := Binding{DomainID:"domain_test", HostingAccountID:"hosting_test", Hostname:"www.example.test"}
+	if len(overrides) > 0 { binding = overrides[0] }
 	header, err := json.Marshal(map[string]string{"alg":"RS256","typ":"JWT","kid":"broker-test"})
 	if err != nil { t.Fatal(err) }
 	claims, err := json.Marshal(map[string]any{
 		"iss":"trusted-issuer", "aud":"static-deployments",
 		"organization_id":"org_test", "project_id":"project_test",
-		"deployment_id":"deployment_test", "hosting_account_id":"hosting_test",
-		"domain_id":"domain_test", "hostname":"www.example.test",
+		"deployment_id":"deployment_test", "hosting_account_id":binding.HostingAccountID,
+		"domain_id":binding.DomainID, "hostname":binding.Hostname,
 		"repository_id":"123456789", "commit_sha":"0123456789abcdef0123456789abcdef01234567",
 		"artifact_sha256":strings.Repeat("a",64), "artifact_bytes":128,
 		"jti":"0123456789abcdef0123456789abcdef",
@@ -173,6 +175,36 @@ func TestBrokerInstallsOnlyBindingFromVerifiedEnvelope(t *testing.T) {
 	}
 	_ = listener.Close()
 	<-serverDone
+}
+
+func TestBrokerRejectsSignedDomainNotPresentInRootRegistry(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil { t.Fatal(err) }
+	now := time.Now().UTC().Truncate(time.Second)
+	token := makeBrokerEnvelope(t, key, now, Binding{
+		DomainID:"domain_test", HostingAccountID:"hosting_test", Hostname:"attacker.example.test",
+	})
+	socketPath := filepath.Join(t.TempDir(), "broker.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name:socketPath, Net:"unix"})
+	if err != nil { t.Fatal(err) }
+	trust := testBrokerTrust(t, "broker-test", &key.PublicKey)
+	called := false
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.AcceptUnix()
+		if acceptErr != nil { return }
+		handleBrokerRequestWithInstaller(context.Background(), conn, uint32(os.Getuid()), "/etc/nginx/conf.d", trust,
+			func(_ string, _ Binding) error { called = true; return nil })
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := RequestInstall(ctx, socketPath, token); err == nil || !strings.Contains(err.Error(), "not authorized") {
+		t.Fatalf("expected root registry rejection, got %v", err)
+	}
+	_ = listener.Close()
+	<-serverDone
+	if called { t.Fatal("mismatched signed claims reached the Nginx installer") }
 }
 
 func TestBrokerRejectsExpiredEnvelopeWithoutInstalling(t *testing.T) {
