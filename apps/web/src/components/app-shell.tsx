@@ -59,7 +59,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (pathname === "/login" || pathname === "/customer" || pathname.startsWith("/customer/")) {
+    if (["/login", "/signup", "/forgot-password", "/reset-password"].includes(pathname) || pathname === "/customer" || pathname.startsWith("/customer/")) {
       setAccessChecking(false);
       return;
     }
@@ -92,7 +92,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     })).filter(group => group.items.length > 0);
   }, [search]);
 
-  if (pathname === "/login" || pathname === "/customer" || pathname.startsWith("/customer/")) return <>{children}</>;
+  if (["/login", "/signup", "/forgot-password", "/reset-password"].includes(pathname) || pathname === "/customer" || pathname.startsWith("/customer/")) return <>{children}</>;
   if (accessChecking) return <main className="grid min-h-screen place-items-center bg-slate-50"><p className="text-sm text-slate-500">Checking workspace access…</p></main>;
 
   const isActive = (href: string) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
