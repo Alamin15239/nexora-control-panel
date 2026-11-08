@@ -32,7 +32,7 @@ func (execRunner) Run(name string, args ...string) error {
 // InstallBinding is the only supported installation API. It accepts a validated
 // domain/account binding and renders the vhost locally; callers cannot supply
 // arbitrary Nginx directives or a filesystem filename.
-func InstallBinding(configDir string, binding Binding, ownerUID uint32, runner CommandRunner) error {
+func installBinding(configDir string, binding Binding, ownerUID uint32, runner CommandRunner) error {
 	filename, err := ConfigName(binding.DomainID)
 	if err != nil {
 		return err
@@ -162,5 +162,5 @@ func InstallAsRoot(configDir string, binding Binding) error {
 	if os.Geteuid() != 0 {
 		return errors.New("static vhost installation requires root")
 	}
-	return InstallBinding(configDir, binding, 0, execRunner{})
+	return installBinding(configDir, binding, 0, execRunner{})
 }
