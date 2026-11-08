@@ -1823,7 +1823,7 @@ app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
 app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const account = await c.env.DB.prepare(
     "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
@@ -1842,7 +1842,7 @@ app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
 app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -1888,7 +1888,7 @@ app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
 app.delete("/v1/hosting-accounts/:id/memberships/:userId", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const accountId = c.req.param("id");
   const userId = c.req.param("userId");
   const account = await c.env.DB.prepare(
@@ -1933,7 +1933,7 @@ app.get("/v1/platform/customers", async (c) => {
 app.get("/v1/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const result = await c.env.DB.prepare(
     `SELECT u.id, u.email, u.display_name AS displayName, u.status AS userStatus,
             m.role, m.created_at AS joinedAt,
@@ -1948,7 +1948,7 @@ app.get("/v1/users", async (c) => {
 app.delete("/v1/users/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const userId = c.req.param("id");
   if (userId === identity.id) return c.json({ message: "You cannot remove your own active login." }, 409);
   const target = await c.env.DB.prepare(
@@ -1973,7 +1973,7 @@ app.delete("/v1/users/:id", async (c) => {
 app.delete("/v1/hosting-accounts/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const account = await c.env.DB.prepare(
     "SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; status: string }>();
