@@ -191,8 +191,8 @@ must be completed before this installer is invoked in production.
 
 ## Static vhost installer trust boundary update
 
-The Linux static-vhost installer now exposes a binding-only API:
-- `InstallBinding` derives the Nginx filename from the domain ID and renders the complete server block through the trusted `staticvhost.Render` function.
+The Linux static-vhost installer now enforces a binding-only API:
+- `installBinding` derives the Nginx filename from the domain ID and renders the complete server block through the trusted `staticvhost.Render` function.
 - `InstallAsRoot` accepts a `Binding`, not raw Nginx text or a caller-selected filename. It still requires the caller to authenticate its IPC peer and resolve the binding from root-owned account/domain state.
 - The filesystem installer is package-private. It continues to enforce the managed filename pattern, directory ownership and write permissions, lock-file no-follow semantics, atomic replacement, `nginx -t`, reload, and restoration on failure.
 - Tests verify the installed bytes exactly match renderer output and reject an invalid hostname before invoking Nginx or systemd.
