@@ -105,8 +105,9 @@ async function proxy(
     if (!sameOrigin) return NextResponse.json({ message: "Cross-origin request rejected" }, { status: 403 });
   }
 
+  const publicStoreRead = method === "GET" && path.length === 2 && path[0] === "store" && path[1] === "plans";
   const token = request.cookies.get(COOKIE_NAME)?.value;
-  if (!token) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
+  if (!token && !publicStoreRead) return NextResponse.json({ message: "Not authenticated" }, { status: 401 });
 
   try {
     const apiUrl = new URL(`/v1/${path.map(encodeURIComponent).join("/")}`, DEFAULT_API_BASE);
@@ -119,7 +120,7 @@ async function proxy(
     const upstream = await apiService.fetch(new Request(apiUrl, {
       method,
       headers: {
-        authorization: `Bearer ${token}`,
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(method !== "GET" ? { "content-type": "application/json" } : {}),
       },
       ...(method !== "GET" && method !== "DELETE" ? { body: await request.text() } : {}),
