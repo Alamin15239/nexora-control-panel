@@ -21,7 +21,7 @@ import (
 
 func testBrokerTrust(t *testing.T, keyID string, key *rsa.PublicKey) BrokerTrust {
 	t.Helper()
-	registry, err := NewBindingRegistry(
+	registry, err := newBindingRegistry(
 		[]brokerAccountRecord{{HostingAccountID:"hosting_test", LinuxUsername:"nexoratest", LinuxUID:uint32(os.Getuid()+1)}},
 		[]brokerDomainRecord{{DomainID:"domain_test", HostingAccountID:"hosting_test", Hostname:"www.example.test"}},
 	)
