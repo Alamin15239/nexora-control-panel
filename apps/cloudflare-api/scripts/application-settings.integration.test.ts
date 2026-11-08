@@ -355,6 +355,13 @@ const validSettings = {
   processLimit: 128,
 };
 
+test("customer MEMBER identity cannot access WHM server inventory", async () => {
+  const db = new TestD1(identity("MEMBER"));
+  const response = await worker.fetch(request("GET", "/v1/servers"), environment(db), {} as ExecutionContext);
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
+});
+
 test("settings PUT rejects unauthenticated requests with 401", async () => {
   const db = new TestD1(null);
   const response = await worker.fetch(request("PUT", "/v1/applications/projects/project-a/settings", validSettings, false), environment(db), {} as ExecutionContext);

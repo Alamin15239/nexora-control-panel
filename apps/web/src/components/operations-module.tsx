@@ -327,6 +327,7 @@ export default function OperationsModule({ module }: { module: string }) {
       </div>
       {module === "settings" && <EmailNotificationSettings/>}
       <div className="rounded-2xl border border-blue-100/80 bg-gradient-to-br from-blue-50/80 to-indigo-50/50 p-6"><div className="flex gap-3"><span className="rounded-xl bg-white p-2 text-blue-700"><LockKeyhole size={19}/></span><div><h2 className="text-sm font-semibold">Infrastructure status</h2><p className="mt-1 text-sm leading-6 text-slate-600">{config.note}</p></div></div></div>
+      {module === "security" && <div className="flex flex-wrap gap-3 text-sm"><Link href="/user-management" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50">Manage workspace users</Link></div>}
       <div className="flex flex-wrap gap-3 text-sm"><Link href="/servers" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50"><Server size={14} className="mr-2 inline"/>Server management</Link><Link href="/hosting-accounts" className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-50">Hosting accounts</Link></div>
     </section>
   </main>;

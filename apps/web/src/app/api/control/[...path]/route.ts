@@ -12,9 +12,14 @@ const COOKIE_NAME = "nexora_session";
 function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELETE" | "PUT"): boolean {
   if (parts.length === 2 && parts[0] === "customer" && parts[1] === "hosting-accounts") return method === "GET";
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "memberships") return method === "GET" || method === "POST";
+  if (parts.length === 4 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "memberships" && /^[0-9a-f-]{36}$/i.test(parts[3])) return method === "DELETE";
+  if (parts.length === 2 && parts[0] === "platform" && parts[1] === "customers") return method === "GET";
+  if (parts.length === 1 && parts[0] === "users") return method === "GET";
+  if (parts.length === 2 && parts[0] === "users" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 4 && parts[0] === "customer" && parts[1] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "overview") return method === "GET";
   if (parts.length === 4 && parts[0] === "customer" && parts[1] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[2]) && ["domains", "databases"].includes(parts[3])) return method === "GET";
   if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
+  if (parts.length === 2 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
   if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
       /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "settings") return method === "GET" || method === "PUT";

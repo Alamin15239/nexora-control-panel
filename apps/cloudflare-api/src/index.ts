@@ -302,6 +302,38 @@ async function bearerIdentity(request: Request, db: D1Database) {
   }>();
 }
 
+/**
+ * Customer logins (MEMBER) are confined to the account-scoped cPanel API.
+ * All WHM/control-plane routes are denied by default for customer identities.
+ * Customer endpoints independently verify hosting_account_memberships, while
+ * internal node endpoints use their own signed/operator authentication.
+ */
+app.use("/v1/*", async (c, next) => {
+  const path = c.req.path;
+  if (
+    path === "/v1/health" ||
+    path === "/v1/health/ready" ||
+    path === "/v1/health/schema" ||
+    path.startsWith("/v1/auth/") ||
+    path.startsWith("/v1/customer/") ||
+    path.startsWith("/v1/applications/") ||
+    path.startsWith("/v1/internal/") ||
+    path.startsWith("/v1/agent/") ||
+    path === "/v1/github/callback" ||
+    path.startsWith("/v1/github/deployments/")
+  ) {
+    await next();
+    return;
+  }
+
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role === "MEMBER") {
+    return c.json({ message: "Customer accounts cannot access WHM administration." }, 403);
+  }
+  await next();
+});
+
 app.get("/v1/health", (c) =>
   c.json({ service: "nexora-api", status: "ok", runtime: "cloudflare-workers" }),
 );
@@ -1846,6 +1878,115 @@ app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
   } catch {
     return c.json({ message: "Unable to assign hosting account access." }, 409);
   }
+});
+
+app.delete("/v1/hosting-accounts/:id/memberships/:userId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const userId = c.req.param("userId");
+  const account = await c.env.DB.prepare(
+    "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(accountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found." }, 404);
+  const membership = await c.env.DB.prepare(
+    "SELECT id FROM hosting_account_memberships WHERE hosting_account_id = ? AND organization_id = ? AND user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(accountId, identity.organizationId, userId).first<{ id: string }>();
+  if (!membership) return c.json({ message: "Active customer access was not found." }, 404);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_account_memberships SET status = 'REVOKED', updated_at = ? WHERE id = ?").bind(new Date().toISOString(), membership.id),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.member_revoked', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ userId })),
+  ]);
+  return c.json({ success: true, message: "Customer access revoked for this hosting account." });
+});
+
+app.get("/v1/platform/customers", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  // Platform-wide customer data is restricted to the platform OWNER, not ordinary workspace admins.
+  if (identity.role !== "OWNER") return c.json({ message: "Platform owner access required." }, 403);
+
+  const result = await c.env.DB.prepare(
+    `SELECT u.id AS userId, u.email, u.display_name AS displayName,
+            u.status AS userStatus, u.created_at AS registeredAt,
+            o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
+            o.status AS organizationStatus, m.role AS organizationRole,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status != 'DELETED') AS hostingAccounts,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status = 'ACTIVE') AS activeHostingAccounts,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status = 'PENDING') AS pendingHostingAccounts
+     FROM users u
+     JOIN memberships m ON m.user_id = u.id
+     JOIN organizations o ON o.id = m.organization_id
+     WHERE m.role = 'MEMBER'
+     ORDER BY u.created_at DESC, u.email COLLATE NOCASE`,
+  ).all();
+  return c.json({ customers: result.results ?? [] });
+});
+
+app.get("/v1/users", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const result = await c.env.DB.prepare(
+    `SELECT u.id, u.email, u.display_name AS displayName, u.status AS userStatus,
+            m.role, m.created_at AS joinedAt,
+            (SELECT COUNT(*) FROM hosting_account_memberships hm WHERE hm.user_id = u.id AND hm.organization_id = m.organization_id AND hm.status = 'ACTIVE') AS hostingAccounts
+     FROM memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.organization_id = ?
+     ORDER BY CASE m.role WHEN 'OWNER' THEN 0 WHEN 'ADMIN' THEN 1 ELSE 2 END, u.email COLLATE NOCASE`,
+  ).bind(identity.organizationId).all();
+  return c.json({ users: result.results ?? [] });
+});
+
+app.delete("/v1/users/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const userId = c.req.param("id");
+  if (userId === identity.id) return c.json({ message: "You cannot remove your own active login." }, 409);
+  const target = await c.env.DB.prepare(
+    "SELECT u.id, u.email, m.role FROM users u JOIN memberships m ON m.user_id = u.id WHERE u.id = ? AND m.organization_id = ? LIMIT 1",
+  ).bind(userId, identity.organizationId).first<{ id: string; email: string; role: Role }>();
+  if (!target) return c.json({ message: "Workspace user not found." }, 404);
+  if (target.role === "OWNER" || target.role === "ADMIN") {
+    const admins = await c.env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM memberships WHERE organization_id = ? AND role IN ('OWNER', 'ADMIN')",
+    ).bind(identity.organizationId).first<{ count: number }>();
+    if ((admins?.count ?? 0) <= 1) return c.json({ message: "The last active administrator cannot be removed. Promote another administrator first." }, 409);
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM hosting_account_memberships WHERE user_id = ? AND organization_id = ?").bind(userId, identity.organizationId),
+    c.env.DB.prepare("DELETE FROM memberships WHERE user_id = ? AND organization_id = ?").bind(userId, identity.organizationId),
+    c.env.DB.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND organization_id = ? AND revoked_at IS NULL").bind(new Date().toISOString(), userId, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'workspace.user_removed', 'user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, userId, JSON.stringify({ email: target.email, role: target.role })),
+  ]);
+  return c.json({ success: true, message: "User removed from this workspace and active sessions revoked. Their Nexora login may remain active in other workspaces." });
+});
+
+app.delete("/v1/hosting-accounts/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  const account = await c.env.DB.prepare(
+    "SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account || account.status === "DELETED") return c.json({ message: "Hosting account not found." }, 404);
+  if (account.status !== "PENDING") return c.json({ message: "This account has progressed beyond the safe pre-provisioning stage. Active or partially provisioned Linux accounts require the agent-backed deprovisioning workflow; no data has been changed." }, 409);
+  const jobs = await c.env.DB.prepare(
+    "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' ORDER BY requested_at DESC LIMIT 1",
+  ).bind(account.id).first<{ id: string; status: string }>();
+  if (jobs && jobs.status !== "QUEUED" && jobs.status !== "CANCELLED") {
+    return c.json({ message: "The provisioning job is already running or finished. Wait for it to stop or complete before deletion." }, 409);
+  }
+  const now = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE provisioning_jobs SET status = 'CANCELLED', finished_at = ? WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' AND status = 'QUEUED'").bind(now, account.id),
+    c.env.DB.prepare("UPDATE hosting_account_memberships SET status = 'REVOKED', updated_at = ? WHERE hosting_account_id = ? AND organization_id = ?").bind(now, account.id, identity.organizationId),
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'DELETED', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'PENDING'").bind(now, account.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.cancelled_before_provisioning', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, account.id, JSON.stringify({ username: account.username })),
+  ]);
+  return c.json({ deleted: true, message: "Unprovisioned hosting account removed. No Linux account or website data was present to delete." });
 });
 
 app.get("/v1/hosting-accounts", async (c) => {
