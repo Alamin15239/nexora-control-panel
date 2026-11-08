@@ -5040,40 +5040,61 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
   const nonce = c.req.header("x-nexora-node-nonce") ?? "";
-  const signature = c.req.header("x-nexora-node-signature") ?? "";
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
-    return c.json({ message: "Node identity is required." }, 401);
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node heartbeat proof." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Heartbeat requests must use application/json." }, 415);
   }
   const rawBody = await c.req.text();
-  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Heartbeat body is empty or exceeds 2048 bytes." }, 413);
+  }
   const node = await c.env.DB.prepare(
     "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
     "JOIN application_node_pools p ON p.id = n.node_pool_id " +
-    "WHERE n.node_identity = ? AND n.status IN ('online', 'draining') AND p.status = 'ready' " +
-    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+    "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
-  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
-    return c.json({ message: "Invalid node identity or signature." }, 401);
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Runtime node identity or heartbeat signature is not authorized." }, 401);
   }
   let input: unknown;
-  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
-  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid heartbeat JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
   const body = input as Record<string, unknown>;
   if (Object.keys(body).some((key) => key !== "agentVersion") ||
-      typeof body.agentVersion !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
-    return c.json({ message: "Invalid heartbeat payload." }, 400);
+      typeof body.agentVersion !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid runtime heartbeat payload." }, 400);
   }
   const nonceResult = await c.env.DB.prepare(
     "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
     "VALUES (?, ?, datetime('now', '+10 minutes'))",
   ).bind(node.id, nonce).run();
-  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime heartbeat nonce has already been used." }, 409);
+  }
   const result = await c.env.DB.prepare(
     "UPDATE application_nodes SET agent_version = ?, last_heartbeat_at = datetime('now'), " +
     "last_signature_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE id = ? AND status IN ('online', 'draining')",
-  ).bind(body.agentVersion, node.id).run();
-  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node is no longer authorized." }, 409);
+    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+    "AND revoked_at IS NULL AND signing_public_key = ? " +
+    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+  ).bind(body.agentVersion, node.id, nodeIdentity, node.signingPublicKey).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime node is no longer eligible to heartbeat." }, 409);
+  }
   return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
 });
 
