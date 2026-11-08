@@ -251,11 +251,13 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s is routed by Nginx but activation acknowledgement failed: %v\n", release.DeploymentID, err)
 				continue
 			}
-			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, release.HealthCheckPath, 5*time.Second)
+			healthCheckPath := release.HealthCheckPath
+			if healthCheckPath == "" { healthCheckPath = "/" }
+			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
 			healthAck, healthErr := artifactclient.ReportHealthCheck(ctx, httpClient, nodeArtifactConfig, artifactclient.HealthCheckReport{
 				DeploymentID: result.DeploymentID,
 				ArtifactSHA256: result.ArtifactSHA256,
-				ProbePath: release.HealthCheckPath,
+				ProbePath: healthCheckPath,
 				HealthStatus: string(probe.Status),
 				HTTPStatus: probe.HTTPStatus,
 				DurationMs: probe.DurationMs,
