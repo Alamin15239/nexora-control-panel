@@ -94,6 +94,30 @@ func TestActivateRejectsWritableReleaseDirectory(t *testing.T) {
 	}
 }
 
+
+func TestActivateIgnoresAbandonedPredictableTemporaryPath(t *testing.T) {
+	base := testLayout(t)
+	if err := os.Mkdir(filepath.Join(base, "releases", "release-1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Older activation attempts used this predictable path. A crash could
+	// leave it behind and block all future attempts for the same release ID.
+	stale := filepath.Join(base, ".current-release-1")
+	if err := os.WriteFile(stale, []byte("abandoned"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Activate(base, "release-1"); err != nil {
+		t.Fatalf("stale temporary path blocked activation: %v", err)
+	}
+	target, err := os.Readlink(filepath.Join(base, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != filepath.Join("releases", "release-1") {
+		t.Fatalf("unexpected active target %q", target)
+	}
+}
+
 func TestRollbackOnlySwitchesExpectedFailedReleaseAndIsIdempotent(t *testing.T) {
 	base := testLayout(t)
 	for _, id := range []string{"release-old", "release-failed", "release-newer"} {
