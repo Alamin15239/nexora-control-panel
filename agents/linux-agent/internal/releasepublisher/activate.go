@@ -100,6 +100,9 @@ func Rollback(baseDir, failedReleaseID, previousReleaseID string) error {
 	if err != nil { return err }
 	defer unlock()
 
+	if err := validateReleaseDirectory(baseDir, previousReleaseID); err != nil {
+		return fmt.Errorf("previous rollback target is not safe: %w", err)
+	}
 	active := filepath.Join(baseDir, "current")
 	currentTarget, err := os.Readlink(active)
 	if err != nil {
@@ -147,12 +150,7 @@ func activateLocked(baseDir, releaseID string) error {
 	if err := validateName(releaseID); err != nil { return err }
 	releasesRoot := filepath.Join(baseDir, "releases")
 	if err := validateChildDirectory(releasesRoot); err != nil { return err }
-	releasePath := filepath.Join(releasesRoot, releaseID)
-	info, err := os.Lstat(releasePath)
-	if err != nil { return fmt.Errorf("inspect target release: %w", err) }
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
-		return errors.New("target release must be a real directory not writable by group or others")
-	}
+	if err := validateReleaseDirectory(baseDir, releaseID); err != nil { return err }
 
 	active := filepath.Join(baseDir, "current")
 	if currentInfo, statErr := os.Lstat(active); statErr == nil {
@@ -178,6 +176,16 @@ func activateLocked(baseDir, releaseID string) error {
 	}
 	if err := syncDirectory(baseDir); err != nil {
 		return fmt.Errorf("sync active release directory: %w", err)
+	}
+	return nil
+}
+
+func validateReleaseDirectory(baseDir, releaseID string) error {
+	releasePath := filepath.Join(baseDir, "releases", releaseID)
+	info, err := os.Lstat(releasePath)
+	if err != nil { return fmt.Errorf("inspect target release: %w", err) }
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return errors.New("target release must be a real directory not writable by group or others")
 	}
 	return nil
 }
