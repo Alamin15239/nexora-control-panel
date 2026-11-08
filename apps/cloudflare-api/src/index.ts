@@ -318,6 +318,7 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/health/schema" ||
     path.startsWith("/v1/auth/") ||
     path.startsWith("/v1/customer/") ||
+    path.startsWith("/v1/store/") ||
     path.startsWith("/v1/applications/") ||
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
@@ -1826,7 +1827,12 @@ app.post("/v1/hosting-plans", async (c) => {
   const appDiskMiB = input.appDiskMiB === undefined ? 2048 : Number(input.appDiskMiB);
   const appProcessLimit = input.appProcessLimit === undefined ? 128 : Number(input.appProcessLimit);
   const appBuildMinutesMonth = input.appBuildMinutesMonth === undefined ? 300 : Number(input.appBuildMinutesMonth);
+  const priceSarMinor = input.priceSarMinor === "" || input.priceSarMinor == null ? null : Number(input.priceSarMinor);
+  const billingPeriod = input.billingPeriod === "yearly" ? "yearly" : "monthly";
+  const publicEnabled = input.publicEnabled === true ? 1 : 0;
   if (!name || name.length > 80) return c.json({ message: "Plan name is required (maximum 80 characters)" }, 400);
+  if (priceSarMinor !== null && (!Number.isSafeInteger(priceSarMinor) || priceSarMinor < 100 || priceSarMinor > 100000000)) return c.json({ message: "Price must be at least SAR 1.00 and no more than SAR 1,000,000.00." }, 400);
+  if (publicEnabled && priceSarMinor === null) return c.json({ message: "Set a price before publishing this plan." }, 400);
   if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
   if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
   if (![websiteLimit, databaseLimit, mailboxLimit].every((v) => Number.isInteger(v) && v >= 0 && v <= 10000)) {
@@ -1848,7 +1854,7 @@ app.post("/v1/hosting-plans", async (c) => {
           app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
-        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth),
+        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth, priceSarMinor, billingPeriod, publicEnabled),
       c.env.DB.prepare(
         "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_plan.create', 'hosting_plan', ?)",
       ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
@@ -1857,7 +1863,7 @@ app.post("/v1/hosting-plans", async (c) => {
       bandwidth_limit_bytes: bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
       website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit,
       app_cpu_millis: appCpuMillis, app_memory_mib: appMemoryMiB, app_disk_mib: appDiskMiB,
-      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1 } }, 201);
+      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1, price_sar_minor: priceSarMinor, billing_period: billingPeriod, public_enabled: publicEnabled } }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/UNIQUE constraint failed: hosting_plans.organization_id, hosting_plans.name/i.test(message)) {
@@ -1867,6 +1873,26 @@ app.post("/v1/hosting-plans", async (c) => {
   }
 });
 
+
+
+app.post("/v1/hosting-plans/:id/store-settings", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  let input:Record<string,unknown>;
+  try { input=await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const price=input.priceSarMinor===""||input.priceSarMinor==null?null:Number(input.priceSarMinor);
+  const period=input.billingPeriod==="yearly"?"yearly":"monthly";
+  const publish=input.publicEnabled===true?1:0;
+  if (price!==null&&(!Number.isSafeInteger(price)||price<100||price>100000000)) return c.json({message:"Price must be between SAR 1.00 and SAR 1,000,000.00."},400);
+  if (publish&&price===null) return c.json({message:"A price is required before publishing this plan."},400);
+  const result=await c.env.DB.prepare("UPDATE hosting_plans SET price_sar_minor=?,billing_period=?,public_enabled=? WHERE id=? AND organization_id=?")
+    .bind(price,period,publish,c.req.param("id"),identity.organizationId).run();
+  if ((result.meta?.changes??0)!==1) return c.json({message:"Hosting plan not found."},404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id,organization_id,actor_user_id,action,resource_type,resource_id,metadata) VALUES (?,?,?,'hosting_plan.store_settings_updated','hosting_plan',?,?)")
+    .bind(crypto.randomUUID(),identity.organizationId,identity.id,c.req.param("id"),JSON.stringify({priceSarMinor:price,billingPeriod:period,publicEnabled:publish===1})).run();
+  return c.json({saved:true});
+});
 
 app.post("/v1/hosting-plans/:id/website-limit", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
