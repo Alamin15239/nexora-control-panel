@@ -50,7 +50,8 @@ func TestInstallRestoresPreviousConfigWhenReloadFails(t *testing.T) {
 	dir,uid:=testConfigDir(t);path:=filepath.Join(dir,validName());old:=config("    server_name old.example.test;")
 	if err:=os.WriteFile(path,[]byte(old),0644);err!=nil{t.Fatal(err)}
 	runner:=&fakeRunner{failAt:"/usr/bin/systemctl reload nginx"}
-	if err:=install(dir,validName(),config("    server_name new.example.test;"),uid,runner);err==nil{t.Fatal("expected reload failure")}
+	err := install(dir,validName(),config("    server_name new.example.test;"),uid,runner)
+	if err == nil || !strings.Contains(err.Error(),"recovery reload failed") { t.Fatalf("expected recovery reload failure to be surfaced, got %v",err) }
 	got,err:=os.ReadFile(path);if err!=nil{t.Fatal(err)}
 	if string(got)!=old{t.Fatalf("previous config not restored: %q",got)}
 	if len(runner.calls)!=4{t.Fatalf("expected validation, failed reload, recovery validation and reload; got %#v",runner.calls)}
