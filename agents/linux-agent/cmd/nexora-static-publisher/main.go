@@ -30,6 +30,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
@@ -268,8 +269,31 @@ func run(configPath string) error {
 				continue
 			}
 			if healthAck.RollbackRequired {
-				fmt.Fprintf(os.Stderr, "deployment %s is unhealthy; control plane requested rollback to deployment %s on node %s (automatic rollback is not enabled)\n",
-					release.DeploymentID, *healthAck.RollbackTargetDeploymentID, *healthAck.RollbackTargetNodeID)
+				if healthAck.RollbackTargetDeploymentID == nil || healthAck.RollbackTargetNodeID == nil {
+					fmt.Fprintf(os.Stderr, "deployment %s is unhealthy; rollback guidance is incomplete and no local change was made\n", release.DeploymentID)
+					continue
+				}
+				if *healthAck.RollbackTargetNodeID != cfg.NodeIdentity {
+					fmt.Fprintf(os.Stderr, "deployment %s requires rollback on node %s; this publisher is %s and will not modify a different node's release store\n",
+						release.DeploymentID, *healthAck.RollbackTargetNodeID, cfg.NodeIdentity)
+					continue
+				}
+				if !releasepublisher.IsReleaseID(*healthAck.RollbackTargetDeploymentID) {
+					fmt.Fprintf(os.Stderr, "deployment %s received an invalid rollback target; refusing local rollback\n", release.DeploymentID)
+					continue
+				}
+				if err := releasepublisher.Rollback(baseDir, result.ReleaseID, *healthAck.RollbackTargetDeploymentID); err != nil {
+					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback failed safely: %v\n", release.DeploymentID, err)
+					continue
+				}
+				rollbackProbe := staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
+				if rollbackProbe.Status != runtimehealth.Healthy {
+					fmt.Fprintf(os.Stderr, "deployment %s rolled back to %s but previous release health probe failed: status=%d failure=%s\n",
+						release.DeploymentID, *healthAck.RollbackTargetDeploymentID, rollbackProbe.HTTPStatus, rollbackProbe.FailureCode)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back to %s; previous release is serving and healthy\n",
+					release.DeploymentID, *healthAck.RollbackTargetDeploymentID)
 				continue
 			}
 			if probe.Status != runtimehealth.Healthy {
