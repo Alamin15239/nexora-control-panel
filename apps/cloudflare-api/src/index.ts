@@ -3860,7 +3860,7 @@ app.get("/v1/github/callback", async (c) => {
     catch { return c.text("GitHub connection was not completed.", 503); }
   }
   const code = c.req.query("code") ?? "";
-  if (!/^[A-Za-z0-9.\\-_]{1,200}$/.test(code)) return c.text("Invalid GitHub OAuth callback.", 400);
+  if (!/^[A-Za-z0-9._-]{1,200}$/.test(code)) return c.text("Invalid GitHub OAuth callback.", 400);
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_APP_CLIENT_SECRET || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) return c.text("GitHub OAuth is not configured.", 503);
   if (!(await consumeState())) return c.text("GitHub authorization state has already been used.", 400);
   try {
