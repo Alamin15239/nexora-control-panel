@@ -1918,7 +1918,6 @@ app.get("/v1/platform/customers", async (c) => {
      FROM users u
      JOIN memberships m ON m.user_id = u.id
      JOIN organizations o ON o.id = m.organization_id
-     WHERE m.role = 'MEMBER'
      ORDER BY u.created_at DESC, u.email COLLATE NOCASE`,
   ).all();
   return c.json({ customers: result.results ?? [] });
