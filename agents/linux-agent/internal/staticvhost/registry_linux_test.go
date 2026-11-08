@@ -16,7 +16,7 @@ func validRegistryEntries() ([]brokerAccountRecord, []brokerDomainRecord) {
 
 func TestNewBindingRegistryAcceptsConsistentAccountAndDomainMappings(t *testing.T) {
 	accounts, domains := validRegistryEntries()
-	registry, err := NewBindingRegistry(accounts, domains)
+	registry, err := newBindingRegistry(accounts, domains)
 	if err != nil { t.Fatal(err) }
 	if err := registry.Validate(Binding{DomainID:"domain_a", HostingAccountID:"hosting_a", Hostname:"www.a.example.test"}); err != nil {
 		t.Fatalf("valid root-owned mapping was rejected: %v", err)
@@ -25,7 +25,7 @@ func TestNewBindingRegistryAcceptsConsistentAccountAndDomainMappings(t *testing.
 
 func TestBindingRegistryRejectsSignedClaimMismatches(t *testing.T) {
 	accounts, domains := validRegistryEntries()
-	registry, err := NewBindingRegistry(accounts, domains)
+	registry, err := newBindingRegistry(accounts, domains)
 	if err != nil { t.Fatal(err) }
 	tests := []struct{name string; binding Binding}{
 		{"unknown domain", Binding{DomainID:"domain_missing", HostingAccountID:"hosting_a", Hostname:"www.a.example.test"}},
@@ -64,7 +64,7 @@ func TestNewBindingRegistryRejectsDuplicateOrInvalidLinuxIdentities(t *testing.T
 		t.Run(tc.name, func(t *testing.T) {
 			a, d := validRegistryEntries()
 			a, d = tc.mutate(a, d)
-			if _, err := NewBindingRegistry(a, d); err == nil {
+			if _, err := newBindingRegistry(a, d); err == nil {
 				t.Fatal("accepted invalid Linux account mapping")
 			}
 		})
@@ -75,17 +75,17 @@ func TestNewBindingRegistryRejectsUnknownAccountAndInvalidDomain(t *testing.T) {
 	t.Run("unknown account", func(t *testing.T) {
 		a, d := validRegistryEntries()
 		d[0].HostingAccountID = "hosting_missing"
-		if _, err := NewBindingRegistry(a, d); err == nil { t.Fatal("accepted a domain for an unknown account") }
+		if _, err := newBindingRegistry(a, d); err == nil { t.Fatal("accepted a domain for an unknown account") }
 	})
 	t.Run("invalid hostname", func(t *testing.T) {
 		a, d := validRegistryEntries()
 		d[0].Hostname = "example.test; include /etc/passwd;"
-		if _, err := NewBindingRegistry(a, d); err == nil { t.Fatal("accepted an unsafe hostname") }
+		if _, err := newBindingRegistry(a, d); err == nil { t.Fatal("accepted an unsafe hostname") }
 	})
 	t.Run("duplicate domain id", func(t *testing.T) {
 		a, d := validRegistryEntries()
 		d = append(d, d[0])
-		if _, err := NewBindingRegistry(a, d); err == nil { t.Fatal("accepted duplicate domain identity") }
+		if _, err := newBindingRegistry(a, d); err == nil { t.Fatal("accepted duplicate domain identity") }
 	})
 }
 
