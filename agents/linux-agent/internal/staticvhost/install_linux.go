@@ -28,7 +28,22 @@ func (execRunner) Run(name string, args ...string) error {
 // Nginx configuration, then reloads Nginx. On failure it restores the previous
 // file (or removes the new file) and makes a best-effort validation/reload of
 // the restored configuration.
-func Install(configDir, filename, content string, ownerUID uint32, runner CommandRunner) error {
+// InstallBinding is the only supported installation API. It accepts a validated
+// domain/account binding and renders the vhost locally; callers cannot supply
+// arbitrary Nginx directives or a filesystem filename.
+func InstallBinding(configDir string, binding Binding, ownerUID uint32, runner CommandRunner) error {
+	filename, err := ConfigName(binding.DomainID)
+	if err != nil {
+		return err
+	}
+	content, err := Render(binding)
+	if err != nil {
+		return err
+	}
+	return install(configDir, filename, content, ownerUID, runner)
+}
+
+func install(configDir, filename, content string, ownerUID uint32, runner CommandRunner) error {
 	if runner == nil { return errors.New("Nginx command runner is required") }
 	if uint32(os.Geteuid()) != ownerUID { return errors.New("installer effective UID does not match config ownership") }
 	if !managedConfigName.MatchString(filename) { return errors.New("invalid managed Nginx config filename") }
@@ -122,9 +137,12 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
-// InstallAsRoot is the production entry point; callers must separately
-// authenticate the IPC peer and resolve the binding from the root-owned registry.
-func InstallAsRoot(configDir, filename, content string) error {
-	if os.Geteuid() != 0 { return errors.New("static vhost installation requires root") }
-	return Install(configDir, filename, content, 0, execRunner{})
+// InstallAsRoot is the production entry point. The caller must authenticate
+// the IPC peer and resolve binding from a root-owned account/domain registry.
+// It deliberately accepts no raw Nginx text or caller-selected filename.
+func InstallAsRoot(configDir string, binding Binding) error {
+	if os.Geteuid() != 0 {
+		return errors.New("static vhost installation requires root")
+	}
+	return InstallBinding(configDir, binding, 0, execRunner{})
 }
