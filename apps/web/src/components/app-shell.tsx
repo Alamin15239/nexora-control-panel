@@ -66,7 +66,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (isPublicAuthRoute || isCustomerRoute) {
+    if (isPublicAuthRoute) {
       setAccessChecking(false);
       return;
     }
@@ -79,7 +79,12 @@ export default function AppShell({ children }: { children: ReactNode }) {
       })
       .then(user => {
         if (!active) return;
-        if (user.role === "MEMBER") {
+        const isPlatformAdministrator = Boolean(user.platformRole);
+        if (isPlatformAdministrator && isCustomerRoute) {
+          router.replace("/");
+          return;
+        }
+        if (!isPlatformAdministrator && !isCustomerRoute) {
           router.replace("/customer");
           return;
         }
@@ -99,8 +104,10 @@ export default function AppShell({ children }: { children: ReactNode }) {
     })).filter(group => group.items.length > 0);
   }, [search]);
 
-  if (isPublicAuthRoute || isCustomerRoute) return <>{children}</>;
+  if (isPublicAuthRoute) return <>{children}</>;
   if (accessChecking) return <main className="grid min-h-screen place-items-center bg-slate-50"><p className="text-sm text-slate-500">Checking workspace access…</p></main>;
+
+  if (isCustomerRoute) return <>{children}</>;
 
   const isActive = (href: string) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
   const activeLabel = navigation.flatMap(group => group.items).find(item => isActive(item.href))?.label ?? "Workspace";

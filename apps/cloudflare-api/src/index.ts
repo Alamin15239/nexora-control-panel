@@ -31,6 +31,7 @@ type Bindings = {
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
+type PlatformRole = "PLATFORM_OWNER" | "PLATFORM_ADMIN";
 
 const app = new Hono<{ Bindings: Bindings }>();
 const SESSION_SECONDS = 12 * 60 * 60;
@@ -288,17 +289,18 @@ async function bearerIdentity(request: Request, db: D1Database) {
   return db.prepare(
     `SELECT u.id, u.email, u.display_name AS displayName,
             o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
-            m.role
+            m.role, pm.role AS platformRole
      FROM auth_sessions s
      JOIN users u ON u.id = s.user_id
      JOIN memberships m ON m.user_id = u.id AND m.organization_id = s.organization_id
      JOIN organizations o ON o.id = s.organization_id
+     LEFT JOIN platform_memberships pm ON pm.user_id = u.id AND pm.status = 'ACTIVE'
      WHERE s.token_hash = ? AND s.revoked_at IS NULL
        AND s.expires_at > ? AND u.status = 'ACTIVE' AND o.status = 'ACTIVE'
      LIMIT 1`,
   ).bind(tokenHash, new Date().toISOString()).first<{
     id: string; email: string; displayName: string | null;
-    organizationId: string; organizationName: string; organizationSlug: string; role: Role;
+    organizationId: string; organizationName: string; organizationSlug: string; role: Role; platformRole: PlatformRole | null;
   }>();
 }
 
@@ -328,7 +330,7 @@ app.use("/v1/*", async (c, next) => {
 
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (identity.role === "MEMBER") {
+  if (!identity.platformRole) {
     return c.json({ message: "Customer accounts cannot access WHM administration." }, 403);
   }
   await next();
@@ -348,7 +350,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -418,12 +420,12 @@ app.post("/v1/auth/register", async (c) => {
         .bind(userId, email, passwordHash, name),
       c.env.DB.prepare("INSERT INTO organizations (id, name, slug, status) VALUES (?, ?, ?, 'ACTIVE')")
         .bind(organizationId, organizationName, slug),
-      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'MEMBER')")
+      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'OWNER')")
         .bind(membershipId, userId, organizationId),
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.register', 'organization', ?)")
         .bind(crypto.randomUUID(), organizationId, userId, organizationId),
     ]);
-    const session = await issueSession(c.env.DB, userId, organizationId, "MEMBER");
+    const session = await issueSession(c.env.DB, userId, organizationId, "OWNER");
     return c.json({
       user: { id: userId, email, displayName: name },
       organization: { id: organizationId, name: organizationName, slug },
@@ -564,10 +566,11 @@ app.post("/v1/auth/login", async (c) => {
   ).bind(email).first<{ id: string; email: string; passwordHash: string | null; displayName: string | null; status: string }>();
 
   const membership = user?.status === "ACTIVE" ? await c.env.DB.prepare(
-    `SELECT m.organization_id AS organizationId, m.role
+    `SELECT m.organization_id AS organizationId, m.role, pm.role AS platformRole
      FROM memberships m JOIN organizations o ON o.id = m.organization_id
+     LEFT JOIN platform_memberships pm ON pm.user_id = m.user_id AND pm.status = 'ACTIVE'
      WHERE m.user_id = ? AND o.status = 'ACTIVE' AND (o.id = ? OR o.slug = ?) LIMIT 1`,
-  ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: Role }>() : null;
+  ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: Role; platformRole: PlatformRole | null }>() : null;
 
   const passwordValid = await verifyPassword(password, user?.passwordHash ?? null);
   if (!user || user.status !== "ACTIVE" || !membership || !passwordValid) {
@@ -597,6 +600,7 @@ app.post("/v1/auth/login", async (c) => {
   return c.json({
     user: { id: user.id, email: user.email, displayName: user.displayName },
     customerAccess: Boolean(customerAccess),
+    platformRole: membership.platformRole,
     ...session,
   });
 });
@@ -655,6 +659,7 @@ app.get("/v1/auth/me", async (c) => {
     displayName: identity.displayName,
     organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
     role: identity.role,
+    platformRole: identity.platformRole,
     customerAccess: Boolean(customerAccess),
   });
 });
@@ -705,7 +710,7 @@ app.get("/v1/dns-records", async (c) => {
     return c.json({
       zone: c.env.CLOUDFLARE_ZONE_NAME ?? null,
       records,
-      canManage: canManageServers(identity.role),
+      canManage: Boolean(identity.platformRole),
     });
   } catch (error) {
     return c.json({ message: error instanceof Error ? error.message : "Unable to load DNS records." }, 502);
@@ -715,7 +720,7 @@ app.get("/v1/dns-records", async (c) => {
 app.post("/v1/dns-records", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
@@ -734,7 +739,7 @@ app.post("/v1/dns-records", async (c) => {
 app.patch("/v1/dns-records/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
@@ -753,7 +758,7 @@ app.patch("/v1/dns-records/:id", async (c) => {
 app.delete("/v1/dns-records/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const id = c.req.param("id");
   try {
     const records = await listDnsRecords(c.env);
@@ -911,7 +916,7 @@ app.get("/v1/incidents", async (c) => {
 app.post("/v1/incidents/:id/acknowledge", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) {
+  if (!Boolean(identity.platformRole)) {
     return c.json({ message: "Administrator access required" }, 403);
   }
 
@@ -958,14 +963,14 @@ app.get("/v1/notification-settings", async (c) => {
     updatedAt: row?.updatedAt ?? null,
     providerConfigured: Boolean(c.env.RESEND_API_KEY && c.env.EMAIL_FROM),
     sender: c.env.EMAIL_FROM ?? null,
-    canManage: canManageServers(identity.role),
+    canManage: Boolean(identity.platformRole),
   });
 });
 
 app.post("/v1/notification-settings", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) {
+  if (!Boolean(identity.platformRole)) {
     return c.json({ message: "Administrator access required" }, 403);
   }
 
@@ -1023,7 +1028,7 @@ app.post("/v1/notification-settings", async (c) => {
 app.post("/v1/notification-settings/test", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) {
+  if (!Boolean(identity.platformRole)) {
     return c.json({ message: "Administrator access required" }, 403);
   }
   if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) {
@@ -1131,7 +1136,7 @@ app.post("/v1/notification-settings/test", async (c) => {
 app.post("/v1/servers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -1164,7 +1169,7 @@ app.post("/v1/servers", async (c) => {
 app.post("/v1/servers/:id/enrollment-token", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   const serverId = c.req.param("id");
   const server = await c.env.DB.prepare(
@@ -1618,7 +1623,7 @@ app.get("/v1/hosting-plans", async (c) => {
 app.post("/v1/hosting-plans", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
   catch { return c.json({ message: "Invalid JSON request" }, 400); }
@@ -1679,7 +1684,7 @@ app.post("/v1/hosting-plans", async (c) => {
 app.post("/v1/hosting-plans/:id/website-limit", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -1818,7 +1823,7 @@ app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
 app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const account = await c.env.DB.prepare(
     "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
@@ -1837,7 +1842,7 @@ app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
 app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -1883,7 +1888,7 @@ app.post("/v1/hosting-accounts/:id/memberships", async (c) => {
 app.delete("/v1/hosting-accounts/:id/memberships/:userId", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const accountId = c.req.param("id");
   const userId = c.req.param("userId");
   const account = await c.env.DB.prepare(
@@ -1905,7 +1910,9 @@ app.get("/v1/platform/customers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   // Platform-wide customer data is restricted to the platform OWNER, not ordinary workspace admins.
-  if (identity.role !== "OWNER") return c.json({ message: "Platform owner access required." }, 403);
+  if (identity.platformRole !== "PLATFORM_OWNER" && identity.platformRole !== "PLATFORM_ADMIN") {
+    return c.json({ message: "Platform administrator access required." }, 403);
+  }
 
   const result = await c.env.DB.prepare(
     `SELECT u.id AS userId, u.email, u.display_name AS displayName,
@@ -1926,7 +1933,7 @@ app.get("/v1/platform/customers", async (c) => {
 app.get("/v1/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const result = await c.env.DB.prepare(
     `SELECT u.id, u.email, u.display_name AS displayName, u.status AS userStatus,
             m.role, m.created_at AS joinedAt,
@@ -1941,7 +1948,7 @@ app.get("/v1/users", async (c) => {
 app.delete("/v1/users/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const userId = c.req.param("id");
   if (userId === identity.id) return c.json({ message: "You cannot remove your own active login." }, 409);
   const target = await c.env.DB.prepare(
@@ -1966,7 +1973,7 @@ app.delete("/v1/users/:id", async (c) => {
 app.delete("/v1/hosting-accounts/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
   const account = await c.env.DB.prepare(
     "SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; status: string }>();
@@ -2010,7 +2017,7 @@ app.get("/v1/hosting-accounts", async (c) => {
 app.post("/v1/hosting-accounts", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -2101,7 +2108,7 @@ function validManagedRelativePath(value: string, allowRoot = false): boolean {
 app.post("/v1/hosting-accounts/:id/files", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const rawBody = await c.req.text();
   if (rawBody.length > 400000) return c.json({ message: "File operation request exceeds the 400 KB limit" }, 413);
   let input: Record<string, unknown>;
@@ -2142,7 +2149,7 @@ app.post("/v1/hosting-accounts/:id/files", async (c) => {
 app.get("/v1/file-manager/jobs/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const job = await c.env.DB.prepare(
     `SELECT j.id, j.status, j.operation, j.error_message AS errorMessage, j.result_payload AS resultPayload,
             j.requested_at AS requestedAt, j.finished_at AS finishedAt
@@ -2161,7 +2168,7 @@ app.get("/v1/file-manager/jobs/:id", async (c) => {
 app.get("/v1/hosting-accounts/:id/backups", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string }>();
   if (!account) return c.json({ message: "Active hosting account not found" }, 404);
   const result = await c.env.DB.prepare("SELECT id, status, archive_name AS archiveName, size_bytes AS sizeBytes, sha256, database_names_json AS databaseNamesJson, error_message AS errorMessage, created_at AS createdAt, completed_at AS completedAt, staged_at AS stagedAt FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? ORDER BY created_at DESC LIMIT 100").bind(account.id, identity.organizationId).all<{ id: string; status: string; archiveName: string | null; sizeBytes: number | null; sha256: string | null; databaseNamesJson: string; errorMessage: string | null; createdAt: string; completedAt: string | null; stagedAt: string | null }>();
@@ -2172,7 +2179,7 @@ app.get("/v1/hosting-accounts/:id/backups", async (c) => {
 app.post("/v1/hosting-accounts/:id/backups", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const account = await c.env.DB.prepare("SELECT id, username, server_id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; server_id: string }>();
   if (!account) return c.json({ message: "Active hosting account not found" }, 404);
   const databases = await c.env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE' ORDER BY name LIMIT 20").bind(account.id, identity.organizationId).all<{ name: string }>();
@@ -2194,7 +2201,7 @@ app.post("/v1/hosting-accounts/:id/backups", async (c) => {
 app.post("/v1/backups/:id/restore", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId, a.username, b.sha256 AS sha256 FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string; username: string; sha256: string | null }>();
   if (!backup) return c.json({ message: "Available backup not found" }, 404);
   if (!backup.sha256 || !/^[a-f0-9]{64}$/.test(backup.sha256)) return c.json({ message: "Backup integrity metadata is missing or invalid; restore is blocked." }, 409);
@@ -2211,7 +2218,7 @@ app.post("/v1/backups/:id/restore", async (c) => {
 app.delete("/v1/backups/:id", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const backup = await c.env.DB.prepare("SELECT b.id, b.hosting_account_id AS accountId FROM hosting_backups b JOIN hosting_accounts a ON a.id = b.hosting_account_id WHERE b.id = ? AND b.organization_id = ? AND b.status = 'AVAILABLE' AND a.status = 'ACTIVE' LIMIT 1").bind(c.req.param("id"), identity.organizationId).first<{ id: string; accountId: string }>();
   if (!backup) return c.json({ message: "Available backup not found" }, 404);
   const jobId = crypto.randomUUID();
@@ -2301,7 +2308,7 @@ app.get("/v1/domains", async (c) => {
 app.post("/v1/domains", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const accountId = typeof input.accountId === "string" ? input.accountId : "";
@@ -2427,7 +2434,7 @@ async function saveCloudflareHostnameState(
 app.post("/v1/domains/:id/cloudflare-hostname", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const domain = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.cloudflare_custom_hostname_id AS hostnameId,
             a.organization_id AS organizationId
@@ -2500,7 +2507,7 @@ app.get("/v1/domains/:id/cloudflare-hostname", async (c) => {
 app.post("/v1/domains/:id/cloudflare-hostname/revalidate", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   const domain = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.cloudflare_custom_hostname_id AS hostnameId,
@@ -2553,7 +2560,7 @@ app.post("/v1/domains/:id/cloudflare-hostname/revalidate", async (c) => {
 app.post("/v1/domains/:id/retry", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   const domainId = c.req.param("id");
   const domain = await c.env.DB.prepare(
@@ -2620,7 +2627,7 @@ app.get("/v1/databases", async (c) => {
 app.post("/v1/databases", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -2676,7 +2683,7 @@ app.post("/v1/databases", async (c) => {
 app.post("/v1/databases/:id/delete", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const database = await c.env.DB.prepare(
     `SELECT d.id, d.name, d.status, d.hosting_account_id AS accountId,
             a.username AS accountUsername, a.server_id AS serverId
@@ -2782,7 +2789,7 @@ app.get("/v1/databases/:id/users", async (c) => {
 app.post("/v1/databases/:id/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   try { databaseSecretKey(c.env); } catch { return c.json({ message: "Secure credential delivery is not configured. No user was created." }, 503); }
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
@@ -2842,7 +2849,7 @@ app.post("/v1/databases/:id/users", async (c) => {
 app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const user = await c.env.DB.prepare(
     `SELECT u.id, u.username, u.status, d.name AS databaseName, d.hosting_account_id AS accountId, a.username AS accountUsername
      FROM hosting_database_users u
@@ -2890,7 +2897,7 @@ app.post("/v1/databases/:id/users/:userId/revoke", async (c) => {
 app.get("/v1/databases/:id/users/:userId/secret", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let secret: { ciphertext: string; iv: string } | null;
   try {
     secret = await c.env.DB.prepare(
@@ -3591,7 +3598,7 @@ app.get("/v1/github/connection", async (c) => {
 app.post("/v1/github/connect", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) {
     return c.json({ message: "GitHub App credentials, callback URL, and token encryption key must be configured first." }, 503);
   }
@@ -3670,7 +3677,7 @@ app.get("/v1/github/callback", async (c) => {
 app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   const connection = await c.env.DB.prepare(
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
@@ -3702,7 +3709,7 @@ app.get("/v1/github/repositories", async (c) => {
 app.post("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const hostingAccountId = typeof input.hostingAccountId === "string" ? input.hostingAccountId : "";
@@ -3807,7 +3814,7 @@ async function verifyGitHubActionsOidc(env: Bindings, token: string): Promise<Re
 app.put("/v1/github/projects/:projectId/workflow-trust", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
 
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); }
@@ -4087,7 +4094,7 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
 app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   if (!c.env.GITHUB_APP_ID || !c.env.GITHUB_APP_PRIVATE_KEY) {
     return c.json({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
   }
@@ -4306,7 +4313,7 @@ app.get("/v1/applications/runtime-profiles", async (c) => {
 app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
 
   const projectId = c.req.param("projectId");
   const project = await c.env.DB.prepare(
@@ -5886,7 +5893,7 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
 app.delete("/v1/github/connection", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!canManageServers(identity.role)) return c.json({ message: "Administrator access required" }, 403);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
   if (c.env.GITHUB_APP_CLIENT_ID && c.env.GITHUB_APP_CLIENT_SECRET) {
     try {
       const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
