@@ -57,6 +57,7 @@ type PendingRelease struct {
 	Hostname string `json:"hostname"`
 	RepositoryID string `json:"repositoryId"`
 	CommitSHA string `json:"commitSha"`
+	HealthCheckPath string `json:"healthCheckPath"`
 }
 type PendingResponse struct {
 	NodeIdentity string `json:"nodeIdentity"`
@@ -250,11 +251,11 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s is routed by Nginx but activation acknowledgement failed: %v\n", release.DeploymentID, err)
 				continue
 			}
-			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, 5*time.Second)
+			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, release.HealthCheckPath, 5*time.Second)
 			healthAck, healthErr := artifactclient.ReportHealthCheck(ctx, httpClient, nodeArtifactConfig, artifactclient.HealthCheckReport{
 				DeploymentID: result.DeploymentID,
 				ArtifactSHA256: result.ArtifactSHA256,
-				ProbePath: "/",
+				ProbePath: release.HealthCheckPath,
 				HealthStatus: string(probe.Status),
 				HTTPStatus: probe.HTTPStatus,
 				DurationMs: probe.DurationMs,
