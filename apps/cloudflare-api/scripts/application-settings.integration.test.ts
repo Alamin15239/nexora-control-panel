@@ -362,6 +362,30 @@ test("customer MEMBER identity cannot access WHM server inventory", async () => 
   assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
 });
 
+test("customer OWNER identity cannot dispatch production deployments before platform enablement", async () => {
+  const db = new TestD1(identity("OWNER"));
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { message: "Administrator access required" });
+  assert.equal(db.writes, 0);
+});
+
+test("customer ADMIN identity cannot dispatch production deployments before platform enablement", async () => {
+  const db = new TestD1(identity("ADMIN"));
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { message: "Administrator access required" });
+  assert.equal(db.writes, 0);
+});
+
 test("settings PUT rejects unauthenticated requests with 401", async () => {
   const db = new TestD1(null);
   const response = await worker.fetch(request("PUT", "/v1/applications/projects/project-a/settings", validSettings, false), environment(db), {} as ExecutionContext);
