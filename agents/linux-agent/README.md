@@ -108,6 +108,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-publisher ./cmd/nexora-static-publisher
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
 ```
 
 ### Operator preparation (not performed by CI)
@@ -124,3 +125,27 @@ The service is not enabled by default. Before installing it, the operator must:
 Example config: `config.static-publisher.example.json`. Install a completed, owner-only configuration at `/etc/nexora-static-publisher/node.json`, and place the node key and public trust key in the configured paths. Install `systemd/nexora-static-publisher.service`, then use `systemd-analyze verify` before enabling the unit.
 
 **Do not enable this service on the existing VirtualBox development VM or any customer node yet.** The publisher is a controlled static-file activation component, not a complete production release service. External HTTP health probes, rollback orchestration, web-server routing, account quota enforcement, production tenant-isolation tests, and live Cloudflare/D1/R2 configuration verification remain release gates. The runtime OCI execution loop remains disabled.
+
+
+## Static Nginx vhost broker (privileged boundary)
+
+The static publisher does not write Nginx configuration and does not invoke systemctl. After a signed static artifact is activated, it requests installation by sending only the deployment's domain ID to `/run/nexora-static-vhost/vhost.sock`.
+
+The separate root-owned `nexora-static-vhostd` daemon:
+- accepts only the UID resolved for `nexora-runtime` using kernel Unix peer credentials;
+- reads the authoritative domain-to-hosting-account mapping from `/etc/nexora-static-vhost/domains.json`;
+- accepts no customer hostname, account ID, document root, filename, or Nginx text from the publisher;
+- renders the narrow static-only vhost and installs it under `/etc/nginx/conf.d`, then runs `nginx -t` and reloads Nginx;
+- exposes its socket to the `nexora-static` group (the UID check remains mandatory even when group access succeeds).
+
+Build:
+
+```sh
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
+```
+
+Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install `domains.json` root:root mode 0640 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The publisher configuration may specify `static_vhost_socket`; if omitted, the compiled default socket path is used.
+
+Registry contents must be reconciled from authoritative hosting-account and verified-domain state by a trusted root-owned agent path. Never grant write access to the publisher, web server, or customer accounts. The broker intentionally fails closed if the registry is missing or invalid. That reconciliation writer and its atomic update protocol are not yet implemented.
+
+Do not enable either static deployment service on a customer or production node yet. Package installation/upgrade wiring, automatic registry reconciliation, disposable-VM HTTP routing tests, post-deploy health reporting, and rollback orchestration remain acceptance gates.
