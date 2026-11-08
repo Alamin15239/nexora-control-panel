@@ -316,6 +316,7 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/health/schema" ||
     path.startsWith("/v1/auth/") ||
     path.startsWith("/v1/customer/") ||
+    path.startsWith("/v1/applications/") ||
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
     path === "/v1/github/callback" ||
