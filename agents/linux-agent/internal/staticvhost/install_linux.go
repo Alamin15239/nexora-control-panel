@@ -115,11 +115,6 @@ func atomicWrite(dir, filename string, data []byte, ownerUID uint32) error {
 	if err := os.Rename(tmpPath, filepath.Join(dir, filename)); err != nil { return fmt.Errorf("atomically publish Nginx config: %w", err) }
 	return syncDirectory(dir)
 }
-func (f *os.File) Close() error {
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	return f.Close()
-}
-
 func syncDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil { return err }
