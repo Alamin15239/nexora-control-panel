@@ -51,6 +51,8 @@ type PendingRelease struct {
 	OrganizationID string `json:"organizationId"`
 	ProjectID string `json:"projectId"`
 	HostingAccountID string `json:"hostingAccountId"`
+	DomainID string `json:"domainId"`
+	Hostname string `json:"hostname"`
 	RepositoryID string `json:"repositoryId"`
 	CommitSHA string `json:"commitSha"`
 }
@@ -214,6 +216,7 @@ func run(configPath string) error {
 				Issuer: cfg.DeploymentEnvelopeIssuer, Audience: cfg.DeploymentEnvelopeAudience,
 				OrganizationID: release.OrganizationID, ProjectID: release.ProjectID,
 				DeploymentID: release.DeploymentID, HostingAccountID: release.HostingAccountID,
+				DomainID: release.DomainID, Hostname: release.Hostname,
 				RepositoryID: release.RepositoryID, CommitSHA: strings.ToLower(release.CommitSHA),
 			}
 			result, publishErr := artifactdelivery.FetchAndPublish(ctx, artifactdelivery.Config{
