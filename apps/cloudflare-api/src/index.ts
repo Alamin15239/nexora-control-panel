@@ -1289,7 +1289,7 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
     `SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
             d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes,
             d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId,
-            dom.id AS domainId, dom.name AS hostname, p.github_repository_id AS repositoryId
+            dom.id AS domainId, lower(dom.name) AS hostname, p.github_repository_id AS repositoryId
      FROM github_deployments d
      JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id
      JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id AND h.status = 'ACTIVE'
@@ -5233,7 +5233,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   const rows = await c.env.DB.prepare(
     "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
-    "dom.id AS domainId, dom.name AS hostname, " +
+    "dom.id AS domainId, lower(dom.name) AS hostname, " +
     "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha " +
     "FROM application_releases r " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
@@ -5361,7 +5361,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "r.artifact_digest AS releaseArtifactDigest, r.artifact_bytes AS releaseArtifactBytes, " +
     "d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes, " +
     "d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId, " +
-    "dom.id AS domainId, dom.name AS hostname, p.github_repository_id AS repositoryId FROM application_releases r " +
+    "dom.id AS domainId, lower(dom.name) AS hostname, p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
