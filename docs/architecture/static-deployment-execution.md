@@ -87,3 +87,14 @@ Before enabling customer deployments:
 - Keep automatic push webhooks disabled until signature verification, replay protection, queue idempotency, and end-to-end tests are complete.
 
 **Current safety posture:** building and artifact staging are separate from publication. Do not merge a workflow change into production, enable runtime profiles, enroll the current VM as a publisher, or advertise production deployment availability until these gates pass.
+
+## Health-check and rollback integration status
+
+The health-check API contract and the Go loopback probe/report primitives exist, and the release publisher can atomically activate a previously verified immutable release by release ID. These pieces are not yet wired into one operational lifecycle:
+
+- `nexora-static-publisher` currently downloads, validates, and activates an artifact, then reports activation. It does not execute a post-activation HTTP health probe or submit a health-check report.
+- `nexora-runtime-node` currently heartbeats and polls desired state while explicitly rejecting execution-enabled snapshots. It does not start workloads, call `runtimehealth.ProbeAndReport`, or consume rollback guidance.
+- An unhealthy health-check report marks the release failed and returns the previous deployment/node as rollback guidance. The API does not issue a rollback command, and the runtime node does not perform a rollback. The workload row is metadata; updating it is not proof that the serving release was switched back.
+- `releasepublisher.Activate` is only a local atomic symlink-switch primitive. It is not yet connected to a signed, idempotent rollback request or an acknowledgement/audit lifecycle.
+
+Consequently, do not treat `health_checking` as a completed deployment, do not claim automatic rollback, and do not enable customer deployment execution. The next implementation phase must define and test the static-site HTTP probe target and the signed rollback command/acknowledgement protocol before wiring either into the publisher or runtime supervisor.
