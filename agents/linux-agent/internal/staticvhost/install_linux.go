@@ -65,8 +65,9 @@ func Install(configDir, filename, content string, ownerUID uint32, runner Comman
 	}
 	if err := atomicWrite(configDir, filename, []byte(content), ownerUID); err != nil { return err }
 	if err := runner.Run("/usr/sbin/nginx", "-t"); err != nil {
-		restore()
-		return fmt.Errorf("Nginx configuration validation failed: %w", err)
+		restoreErr := restore()
+		if restoreErr != nil { return fmt.Errorf("Nginx validation failed: %v; restoring previous config failed: %w", err, restoreErr) }
+		return fmt.Errorf("Nginx configuration validation failed; previous config restored: %w", err)
 	}
 	if err := runner.Run("/usr/bin/systemctl", "reload", "nginx"); err != nil {
 		restoreErr := restore()
@@ -84,7 +85,9 @@ func atomicWrite(dir, filename string, data []byte, ownerUID uint32) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0644); err != nil { tmp.Close(); return err }
-	if err := tmp.Chown(int(ownerUID), 0); err != nil { tmp.Close(); return err }
+	ownerGID := uint32(0)
+	if ownerUID != 0 { ownerGID = uint32(os.Getgid()) }
+	if err := tmp.Chown(int(ownerUID), int(ownerGID)); err != nil { tmp.Close(); return err }
 	if _, err := tmp.Write(data); err != nil { tmp.Close(); return err }
 	if err := tmp.Sync(); err != nil { tmp.Close(); return err }
 	if err := tmp.Close(); err != nil { return err }
