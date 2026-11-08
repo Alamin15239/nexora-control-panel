@@ -104,7 +104,7 @@ async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeIn
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Deployment envelope identity is invalid");
   }
   if (input.hostname !== input.hostname.toLowerCase() || input.hostname.length > 253 ||
-      !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(input.hostname)) {
+      !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(input.hostname)) {
     throw new Error("Deployment envelope hostname is invalid");
   }
   if (!/^[1-9][0-9]{0,19}$/.test(input.repositoryId)) throw new Error("Deployment repository ID is invalid");
@@ -1289,10 +1289,12 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
     `SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
             d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes,
             d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId,
-            p.github_repository_id AS repositoryId
+            dom.id AS domainId, dom.name AS hostname, p.github_repository_id AS repositoryId
      FROM github_deployments d
      JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id
-     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id AND h.status = 'ACTIVE'
+     JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = h.id
+                                  ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1)
      WHERE d.id = ? AND d.organization_id = ? AND h.server_id = ?
        AND d.status = 'building' AND d.artifact_key IS NOT NULL
        AND d.artifact_bytes IS NOT NULL AND d.artifact_sha256 IS NOT NULL
@@ -1306,6 +1308,8 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
     artifactBytes: number;
     artifactSha256: string;
     hostingAccountId: string;
+    domainId: string;
+    hostname: string;
     repositoryId: string;
   }>();
   if (!deployment) return c.json({ message: "No staged artifact is available for this server deployment." }, 404);
