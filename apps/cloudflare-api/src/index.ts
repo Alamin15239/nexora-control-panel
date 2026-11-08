@@ -4286,9 +4286,8 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
       ).bind(crypto.randomUUID(), JSON.stringify({ bytes: receivedBytes }), token.deploymentId,
         token.organizationId, artifactSHA256, receivedBytes),
     ]);
-    if (Number(updates[0]?.meta?.changes ?? 0) !== 1) {
-      await c.env.ARTIFACTS.delete(objectKey);
-      return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
+    if (updates.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("Artifact metadata, application release state, and release audit event were not committed together");
     }
     return c.json({
       received: true,
@@ -4301,17 +4300,20 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), artifact_key = NULL, " +
+        "artifact_bytes = NULL, artifact_sha256 = NULL, log_excerpt = 'Artifact upload failed.' " +
+        "WHERE id = ? AND organization_id = ? AND status = 'building'",
       ).bind(token.deploymentId, token.organizationId),
       c.env.DB.prepare(
         "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'artifact_upload_failed', " +
         "failure_message_redacted = 'Build artifact upload failed.', updated_at = datetime('now') " +
-        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+        "WHERE deployment_id = ? AND organization_id = ? AND state IN ('building','artifact_uploaded')",
       ).bind(token.deploymentId, token.organizationId),
       c.env.DB.prepare(
         "INSERT INTO application_release_events " +
         "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
-        "SELECT ?, organization_id, id, 'building', 'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
+        "SELECT ?, organization_id, id, CASE WHEN artifact_digest IS NULL THEN 'building' ELSE 'artifact_uploaded' END, " +
+        "'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
         "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'failed' " +
         "AND failure_code = 'artifact_upload_failed' " +
         "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'artifact_upload_failed')",
