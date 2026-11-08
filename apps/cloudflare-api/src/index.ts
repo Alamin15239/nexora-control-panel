@@ -289,17 +289,18 @@ async function bearerIdentity(request: Request, db: D1Database) {
   return db.prepare(
     `SELECT u.id, u.email, u.display_name AS displayName,
             o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
-            m.role
+            m.role, pm.role AS platformRole
      FROM auth_sessions s
      JOIN users u ON u.id = s.user_id
      JOIN memberships m ON m.user_id = u.id AND m.organization_id = s.organization_id
      JOIN organizations o ON o.id = s.organization_id
+     LEFT JOIN platform_memberships pm ON pm.user_id = u.id AND pm.status = 'ACTIVE'
      WHERE s.token_hash = ? AND s.revoked_at IS NULL
        AND s.expires_at > ? AND u.status = 'ACTIVE' AND o.status = 'ACTIVE'
      LIMIT 1`,
   ).bind(tokenHash, new Date().toISOString()).first<{
     id: string; email: string; displayName: string | null;
-    organizationId: string; organizationName: string; organizationSlug: string; role: Role;
+    organizationId: string; organizationName: string; organizationSlug: string; role: Role; platformRole: PlatformRole | null;
   }>();
 }
 
