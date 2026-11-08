@@ -8,7 +8,7 @@ Requires=nginx.service
 [Service]
 Type=simple
 User=root
-Group=root
+Group=nexora-static
 RuntimeDirectory=nexora-static-vhost
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=no
