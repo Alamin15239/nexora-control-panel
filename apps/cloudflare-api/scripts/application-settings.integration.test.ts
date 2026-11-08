@@ -347,6 +347,31 @@ async function signedNodeRequest(body: unknown, privateKey: CryptoKey, nonce = "
   });
 }
 
+async function signedApplicationNodeRequest(body: unknown, privateKey: CryptoKey, nonce: string, path: string) {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const rawBody = JSON.stringify(body);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
+  const digestHex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const canonical = [
+    "NEXORA-APPLICATION-NODE-V1", "builder-a", timestamp, nonce, "POST", path, digestHex,
+  ].join("\\n");
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" }, privateKey, new TextEncoder().encode(canonical),
+  ));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": "builder-a",
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+    body: rawBody,
+  });
+}
+
 function request(method: string, path: string, body?: unknown, authenticated = true) {
   const headers = new Headers();
   if (authenticated) headers.set("authorization", "Bearer " + "a".repeat(64));
@@ -671,8 +696,8 @@ test("signed runtime heartbeat updates agent version for eligible online nodes",
   db.node.signingPublicKey = pair.publicKeyHex;
   db.node.status = "online";
   const response = await worker.fetch(
-    await signedNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
-      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    await signedApplicationNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
+      "/internal/v1/application-nodes/heartbeat"),
     environment(db), {} as ExecutionContext,
   );
   assert.equal(response.status, 200);
@@ -686,8 +711,8 @@ test("signed node heartbeat rejects unexpected fields", async () => {
   db.node.signingPublicKey = pair.publicKeyHex;
   db.node.status = "online";
   const response = await worker.fetch(
-    await signedNodeRequest({ agentVersion: "0.2.0", status: "online" }, pair.privateKey, "8".repeat(32),
-      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    await signedApplicationNodeRequest({ agentVersion: "0.2.0", status: "online" }, pair.privateKey, "8".repeat(32),
+      "/internal/v1/application-nodes/heartbeat"),
     environment(db), {} as ExecutionContext,
   );
   assert.equal(response.status, 400);
