@@ -3,6 +3,7 @@
 package staticvhost
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"syscall"
+	"time"
 )
 
 var managedConfigName = regexp.MustCompile(`^nexora-static-[a-f0-9]{32}\.conf$`)
@@ -22,7 +24,9 @@ type CommandRunner interface {
 
 type execRunner struct{}
 func (execRunner) Run(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Run()
 }
 
 // installBinding accepts a validated domain/account binding and renders the
