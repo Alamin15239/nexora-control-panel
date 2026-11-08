@@ -5,7 +5,6 @@ package staticvhost
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -120,6 +119,5 @@ func probeHTTPAt(ctx context.Context, hostname, address string, timeout time.Dur
 	default:
 		result.FailureCode = "invalid_response"
 	}
-	_ = fmt.Sprintf("%d",result.HTTPStatus)
 	return finish()
 }
