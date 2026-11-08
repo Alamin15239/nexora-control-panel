@@ -31,7 +31,7 @@ func TestListenSocketRefusesExistingRegularFile(t *testing.T) {
 	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	path := filepath.Join(t.TempDir(), "vhost.sock")
 	if err := os.WriteFile(path, []byte("preserve"), 0600); err != nil { t.Fatal(err) }
-	if listener, err := listenSocket(path, os.Getgid()); err == nil {
+	if listener, err := listenSocket(path); err == nil {
 		if listener != nil { _ = listener.Close() }
 		t.Fatal("replaced an existing regular file")
 	}
@@ -47,7 +47,7 @@ func TestListenSocketRefusesExistingSymlink(t *testing.T) {
 	path := filepath.Join(dir, "vhost.sock")
 	if err := os.WriteFile(target, []byte("preserve"), 0600); err != nil { t.Fatal(err) }
 	if err := os.Symlink(target, path); err != nil { t.Fatal(err) }
-	if listener, err := listenSocket(path, os.Getgid()); err == nil {
+	if listener, err := listenSocket(path); err == nil {
 		if listener != nil { _ = listener.Close() }
 		t.Fatal("replaced an existing symlink")
 	}
@@ -62,7 +62,7 @@ func TestListenSocketRefusesExistingUnixSocket(t *testing.T) {
 	original, err := net.ListenUnix("unix", &net.UnixAddr{Name:path, Net:"unix"})
 	if err != nil { t.Fatal(err) }
 	defer original.Close()
-	if listener, err := listenSocket(path, os.Getgid()); err == nil {
+	if listener, err := listenSocket(path); err == nil {
 		if listener != nil { _ = listener.Close() }
 		t.Fatal("replaced an existing Unix socket")
 	}
