@@ -220,12 +220,13 @@ func run(configPath string) error {
 				DomainID: release.DomainID, Hostname: release.Hostname,
 				RepositoryID: release.RepositoryID, CommitSHA: strings.ToLower(release.CommitSHA),
 			}
+			nodeArtifactConfig := artifactclient.Config{
+				ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity,
+				PrivateKey: nodeKey, Purpose: "validate",
+			}
 			result, publishErr := artifactdelivery.FetchAndPublish(ctx, artifactdelivery.Config{
 				HTTPClient: httpClient,
-				ArtifactClient: artifactclient.Config{
-					ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity,
-					PrivateKey: nodeKey, Purpose: "validate",
-				},
+				ArtifactClient: nodeArtifactConfig,
 				Expected: expected,
 				TrustedSigningKeys: map[string]*rsa.PublicKey{cfg.DeploymentSigningKeyID: signingKey},
 				BaseDir: baseDir,
@@ -237,10 +238,18 @@ func run(configPath string) error {
 				continue
 			}
 			if err := staticvhost.RequestInstall(ctx, "", result.SignedEnvelope); err != nil {
-				fmt.Fprintf(os.Stderr, "deployment %s activated but vhost installation failed: %v\n", release.DeploymentID, err)
+				fmt.Fprintf(os.Stderr, "deployment %s release is staged but vhost installation failed: %v\n", release.DeploymentID, err)
 				continue
 			}
-			fmt.Printf("static release activated and served: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
+			if err := artifactclient.ReportActivated(ctx, httpClient, nodeArtifactConfig, artifactclient.ActivationReport{
+				DeploymentID: result.DeploymentID,
+				ReleaseID: result.ReleaseID,
+				ArtifactSHA256: result.ArtifactSHA256,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s is serving but activation acknowledgement failed: %v\n", release.DeploymentID, err)
+				continue
+			}
+			fmt.Printf("static release activated and serving: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
 				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)		}
 	}
 	poll()
