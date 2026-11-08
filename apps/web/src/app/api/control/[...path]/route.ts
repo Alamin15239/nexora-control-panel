@@ -18,6 +18,7 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 4 && parts[0] === "customer" && parts[1] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "overview") return method === "GET";
   if (parts.length === 4 && parts[0] === "customer" && parts[1] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[2]) && ["domains", "databases"].includes(parts[3])) return method === "GET";
   if (parts.length === 1 && ["servers", "hosting-plans", "hosting-accounts", "domains", "databases"].includes(parts[0])) return true;
+  if (parts.length === 2 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
   if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
       /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "settings") return method === "GET" || method === "PUT";
