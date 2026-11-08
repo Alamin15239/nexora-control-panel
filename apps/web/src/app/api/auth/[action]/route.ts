@@ -318,11 +318,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     ).bind(email).first<{ id: string; email: string; passwordHash: string | null; displayName: string | null; status: string }>();
     const membershipsResult = user?.status === "ACTIVE" ? await db.prepare(
       `SELECT m.organization_id AS organizationId, o.name AS organizationName,
-              o.slug AS organizationSlug, m.role
+              o.slug AS organizationSlug, m.role, pm.role AS platformRole
        FROM memberships m JOIN organizations o ON o.id = m.organization_id
+       LEFT JOIN platform_memberships pm ON pm.user_id = m.user_id AND pm.status = 'ACTIVE'
        WHERE m.user_id = ? AND o.status = 'ACTIVE'
        ORDER BY m.created_at ASC`,
-    ).bind(user.id).all<{ organizationId: string; organizationName: string; organizationSlug: string; role: AuthRole }>() : { results: [] };
+    ).bind(user.id).all<{ organizationId: string; organizationName: string; organizationSlug: string; role: AuthRole; platformRole: "PLATFORM_OWNER" | "PLATFORM_ADMIN" | null }>() : { results: [] };
     const memberships = membershipsResult.results ?? [];
     const passwordValid = await verifyPassword(password, user?.passwordHash ?? null);
     if (!user || user.status !== "ACTIVE" || !passwordValid) {
