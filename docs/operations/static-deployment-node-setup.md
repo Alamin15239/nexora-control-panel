@@ -34,6 +34,8 @@ sudo install -o root -g root -m 0600 trust.json \
   /etc/nexora-static-vhost/trust.json
 sudo install -o root -g root -m 0644 nexora-deployment-envelope-public.pem \
   /etc/nexora-static-vhost/deployment-envelope-public.pem
+sudo install -o root -g root -m 0600 bindings.json \
+  /etc/nexora-static-vhost/bindings.json
 ```
 
 The trust JSON must use the exact Worker values:
@@ -45,6 +47,10 @@ The trust JSON must use the exact Worker values:
   "keyId": "YOUR_ACTIVE_KEY_ID"
 }
 ```
+
+The broker also requires a separate root-owned `bindings.json` registry. Start from `agents/linux-agent/config.static-vhost-bindings.example.json`, but replace every example value using the authoritative hosting-account and domain records on the node. Each hosting account maps to exactly one existing non-system Linux username and UID (UID 1000 or greater); each domain maps to exactly one hosting-account ID and its canonical lowercase hostname. Do not copy values from a deployment request or customer artifact. Keep account IDs, domain IDs, usernames, and UIDs unique. The broker rejects missing, duplicate, unknown, or mismatched mappings and will not install a vhost when the signed envelope does not exactly match this file.
+
+The file is deliberately a local operator-managed trust anchor. Provision and update it only through an authenticated root-level configuration-management process; do not expose a customer API for editing it. After changing it, verify ownership and permissions and restart the broker during a controlled maintenance window.
 
 The publisher also needs the same public key. Install a read-only copy at the path in `config.static-publisher.example.json`:
 
@@ -81,7 +87,8 @@ sudo systemd-analyze verify /etc/systemd/system/nexora-static-publisher.service
 sudo stat -c '%U:%G:%a %n' \
   /etc/nexora-static-vhost \
   /etc/nexora-static-vhost/trust.json \
-  /etc/nexora-static-vhost/deployment-envelope-public.pem
+  /etc/nexora-static-vhost/deployment-envelope-public.pem \
+  /etc/nexora-static-vhost/bindings.json
 ```
 
 Expected trust permissions are root-owned, directory `750` or stricter, trust JSON `600`, and public PEM `644` or stricter. The broker refuses symlinked or group/world-writable trust files.
