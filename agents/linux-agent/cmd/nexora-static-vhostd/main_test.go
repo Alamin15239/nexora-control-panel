@@ -11,6 +11,7 @@ import (
 )
 
 func TestListenSocketSetsRootBoundaryPermissions(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	path := filepath.Join(t.TempDir(), "vhost.sock")
 	listener, err := listenSocket(path, os.Getgid())
 	if err != nil { t.Fatal(err) }
@@ -27,6 +28,7 @@ func TestListenSocketSetsRootBoundaryPermissions(t *testing.T) {
 }
 
 func TestListenSocketRefusesExistingRegularFile(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	path := filepath.Join(t.TempDir(), "vhost.sock")
 	if err := os.WriteFile(path, []byte("preserve"), 0600); err != nil { t.Fatal(err) }
 	if listener, err := listenSocket(path, os.Getgid()); err == nil {
@@ -39,6 +41,7 @@ func TestListenSocketRefusesExistingRegularFile(t *testing.T) {
 }
 
 func TestListenSocketRefusesExistingSymlink(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target")
 	path := filepath.Join(dir, "vhost.sock")
@@ -54,6 +57,7 @@ func TestListenSocketRefusesExistingSymlink(t *testing.T) {
 }
 
 func TestListenSocketRefusesExistingUnixSocket(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	path := filepath.Join(t.TempDir(), "vhost.sock")
 	original, err := net.ListenUnix("unix", &net.UnixAddr{Name:path, Net:"unix"})
 	if err != nil { t.Fatal(err) }
