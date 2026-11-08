@@ -3,10 +3,13 @@
 package staticvhost
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeRegistryFixture(t *testing.T, body string) string {
@@ -72,5 +75,38 @@ func TestLoadRootRegistryRejectsGroupWritableDirectory(t *testing.T) {
 	if err := os.Chmod(dir, 0770); err != nil { t.Fatal(err) }
 	if _, err := LoadRootRegistry(path); err == nil {
 		t.Fatal("accepted group-writable registry directory")
+	}
+}
+
+
+func TestBrokerRejectsUnexpectedPeerUIDBeforeRegistryAccess(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "broker.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil { t.Fatal(err) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	allowedUID := uint32(os.Getuid()) + 1
+	go func() { done <- Serve(ctx, listener, allowedUID, "/missing/registry.json", "/etc/nginx/conf.d") }()
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer requestCancel()
+	if err := RequestInstall(requestCtx, socketPath, "domain_123"); err == nil {
+		t.Fatal("broker accepted a peer with an unexpected UID")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil { t.Fatal(err) }
+	case <-time.After(2*time.Second):
+		t.Fatal("broker did not stop after cancellation")
+	}
+}
+
+func TestRequestInstallRejectsEmptyOrOversizedDomainID(t *testing.T) {
+	ctx := context.Background()
+	if err := RequestInstall(ctx, "/unused/socket", ""); err == nil {
+		t.Fatal("accepted an empty domain ID")
+	}
+	if err := RequestInstall(ctx, "/unused/socket", strings.Repeat("x", 129)); err == nil {
+		t.Fatal("accepted an oversized domain ID")
 	}
 }
