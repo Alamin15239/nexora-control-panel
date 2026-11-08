@@ -114,9 +114,13 @@ func install(configDir, filename, content string, ownerUID uint32, runner Comman
 		if restoreErr != nil {
 			return fmt.Errorf("Nginx reload failed: %v; restoring previous config failed: %w", err, restoreErr)
 		}
-		_ = runner.Run("/usr/sbin/nginx", "-t")
-		_ = runner.Run("/usr/bin/systemctl", "reload", "nginx")
-		return fmt.Errorf("Nginx reload failed; previous config restored: %w", err)
+		if validationErr := runner.Run("/usr/sbin/nginx", "-t"); validationErr != nil {
+			return fmt.Errorf("Nginx reload failed: %v; previous config restored but validation failed: %w", err, validationErr)
+		}
+		if reloadErr := runner.Run("/usr/bin/systemctl", "reload", "nginx"); reloadErr != nil {
+			return fmt.Errorf("Nginx reload failed: %v; previous config restored but recovery reload failed: %w", err, reloadErr)
+		}
+		return fmt.Errorf("Nginx reload failed; previous config restored and reloaded: %w", err)
 	}
 	return nil
 }
