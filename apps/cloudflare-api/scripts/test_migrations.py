@@ -172,6 +172,37 @@ must_reject(
     "UPDATE application_releases SET assigned_node_id=NULL WHERE id='release-a'",
     (),
 )
+db.execute("""INSERT INTO application_nodes
+(id,node_pool_id,node_identity,enrollment_key_hash,node_role,status,signing_public_key,enrollment_consumed_at,last_heartbeat_at)
+VALUES ('runtime-node-c','pool-runtime','runtime-c',?,'runtime','online',?,datetime('now'),datetime('now'))""",
+    ("f" * 64, "e" * 64))
+must_reject(
+    "release cannot be reassigned to another otherwise eligible runtime node",
+    "UPDATE application_releases SET assigned_node_id='runtime-node-c' WHERE id='release-a'",
+    (),
+)
+must_reject(
+    "release execution tenant and project binding is immutable",
+    "UPDATE application_releases SET project_id='project-b' WHERE id='release-a'",
+    (),
+)
+must_reject(
+    "release source commit is immutable",
+    "UPDATE application_releases SET source_commit_sha=? WHERE id='release-a'",
+    ("b" * 40,),
+)
+db.execute("UPDATE application_releases SET artifact_digest=?, artifact_bytes=128 WHERE id='release-a'",
+           ("c" * 64,))
+must_reject(
+    "release artifact digest cannot be replaced",
+    "UPDATE application_releases SET artifact_digest=? WHERE id='release-a'",
+    ("d" * 64,),
+)
+must_reject(
+    "release artifact size cannot be changed after acceptance",
+    "UPDATE application_releases SET artifact_bytes=256 WHERE id='release-a'",
+    (),
+)
 
 must_reject(
     "signing key retirement cannot be changed twice",
