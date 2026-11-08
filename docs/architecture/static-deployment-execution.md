@@ -187,3 +187,14 @@ the static publisher runs as `nexora-runtime`; granting the publisher access to
 the general-purpose provisioning helper would be an unacceptable privilege
 expansion. A separate narrow broker/helper and root-owned domain/account registry
 must be completed before this installer is invoked in production.
+
+
+## Static vhost installer trust boundary update
+
+The Linux static-vhost installer now exposes a binding-only API:
+- `InstallBinding` derives the Nginx filename from the domain ID and renders the complete server block through the trusted `staticvhost.Render` function.
+- `InstallAsRoot` accepts a `Binding`, not raw Nginx text or a caller-selected filename. It still requires the caller to authenticate its IPC peer and resolve the binding from root-owned account/domain state.
+- The filesystem installer is package-private. It continues to enforce the managed filename pattern, directory ownership and write permissions, lock-file no-follow semantics, atomic replacement, `nginx -t`, reload, and restoration on failure.
+- Tests verify the installed bytes exactly match renderer output and reject an invalid hostname before invoking Nginx or systemd.
+
+This change closes the raw-configuration injection surface at the installer API, but it does **not** complete the privileged broker. No unprivileged publisher may call the root installer directly. The separate broker, peer-credential policy for `nexora-runtime`, root-owned immutable hosting-account/domain registry, fixed Nginx config directory, and disposable-VM HTTP integration test remain required before enabling static serving.
