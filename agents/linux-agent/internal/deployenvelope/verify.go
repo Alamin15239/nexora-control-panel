@@ -30,39 +30,7 @@ var (
 	hex32Pattern = regexp.MustCompile("^[a-f0-9]{32}$")
 	digestPattern = regexp.MustCompile("^[a-f0-9]{64}$")
 	commitPattern = regexp.MustCompile("^[a-f0-9]{40}$")
-	hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?// Package deployenvelope verifies short-lived deployment authorization tokens.
-// It is intentionally independent of the IPC and filesystem layers.
-package deployenvelope
-
-import (
-	"crypto"
-	"crypto/rsa"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"regexp"
-	"strings"
-	"time"
-)
-
-const (
-	maxTokenBytes = 8 << 10
-	maxArtifactBytes = 100 << 20
-	maxLifetime = 5 * time.Minute
-	clockSkew = 30 * time.Second
-)
-
-var (
-	kidPattern = regexp.MustCompile("^[A-Za-z0-9._-]{1,64}$")
-	idPattern = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
-	hex32Pattern = regexp.MustCompile("^[a-f0-9]{32}$")
-	digestPattern = regexp.MustCompile("^[a-f0-9]{64}$")
-	commitPattern = regexp.MustCompile("^[a-f0-9]{40}$")
-)
+	hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 	repositoryIDPattern = regexp.MustCompile("^[1-9][0-9]{0,19}$")
 )
 
