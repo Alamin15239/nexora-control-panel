@@ -382,7 +382,7 @@ test("customer ADMIN identity cannot dispatch production deployments before plat
     {} as ExecutionContext,
   );
   assert.equal(response.status, 403);
-  assert.deepEqual(await response.json(), { message: "Administrator access required" });
+  assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
   assert.equal(db.writes, 0);
 });
 
