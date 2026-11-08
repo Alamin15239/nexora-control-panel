@@ -198,3 +198,37 @@ The Linux static-vhost installer now enforces a binding-only API:
 - Tests verify the installed bytes exactly match renderer output and reject an invalid hostname before invoking Nginx or systemd.
 
 This change closes the raw-configuration injection surface at the installer API, but it does **not** complete the privileged broker. No unprivileged publisher may call the root installer directly. The separate broker, peer-credential policy for `nexora-runtime`, root-owned immutable hosting-account/domain registry, fixed Nginx config directory, and disposable-VM HTTP integration test remain required before enabling static serving.
+
+
+## Dedicated privileged static-vhost broker
+
+The publisher no longer needs direct access to Nginx configuration files or systemd. After an artifact has been verified and activated, it sends only the deployment's `domainId` to a dedicated Unix socket. The broker:
+
+- Runs as root in `nexora-static-vhostd.service`, separate from the general-purpose provisioning daemon.
+- Authorizes the publisher using kernel `SO_PEERCRED` and the UID resolved for `nexora-runtime`.
+- Accepts one bounded JSON request containing only `domainId`; unknown JSON fields are rejected.
+- Loads the domain-to-hosting-account mapping from `/etc/nexora-static-vhost/domains.json`, requiring a root-owned, non-group/world-writable regular file in a root-owned non-writable directory. Symlink opens are rejected.
+- Validates every registry binding through the static-vhost renderer, rejects duplicate domain IDs, and never accepts a customer-provided document root or Nginx directives.
+- Installs only the deterministic managed config under `/etc/nginx/conf.d`, then validates and reloads Nginx through fixed executable paths.
+- Limits concurrent broker requests and bounds request, response, registry, and connection sizes/timeouts.
+
+The expected registry schema is versioned:
+
+```json
+{
+  "version": 1,
+  "domains": [
+    {
+      "DomainID": "domain_123",
+      "Hostname": "www.example.test",
+      "HostingAccountID": "account_123"
+    }
+  ]
+}
+```
+
+The file must be provisioned by a trusted root-owned control-plane/agent reconciliation path. Do not make it writable by the publisher or by customer accounts. The broker deliberately fails closed when the registry is missing or invalid.
+
+The publisher service connects through `/run/nexora-static-vhost/vhost.sock`; the broker socket is group-readable/writable by `nexora-static`, but the broker independently verifies the publisher UID. The daemon unit is `agents/linux-agent/systemd/nexora-static-vhostd.service`.
+
+**Integration status:** broker code, daemon unit, publisher request path, registry validation, and unit tests are now in the branch. The root-owned registry reconciliation from authoritative hosting-account/domain state, package installation/upgrade wiring, and disposable-VM end-to-end HTTP verification are still required. Do not enable the broker or customer static deployments on production until those are complete.
