@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"os/user"
+	"strconv"
 )
 
 const brokerBindingRegistryPath = "/etc/nexora-static-vhost/bindings.json"
@@ -55,7 +57,23 @@ func LoadRootBindingRegistry() (*BindingRegistry, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, errors.New("account/domain registry contains trailing data")
 	}
-	return newBindingRegistry(document.Accounts, document.Domains)
+	registry, err := newBindingRegistry(document.Accounts, document.Domains)
+	if err != nil {
+		return nil, err
+	}
+	// The root-owned file is authoritative, but its UID mapping must still
+	// agree with the host's current NSS account database at broker startup.
+	for _, account := range registry.accounts {
+		hostAccount, lookupErr := user.Lookup(account.LinuxUsername)
+		if lookupErr != nil {
+			return nil, fmt.Errorf("hosting account %q has no matching Linux user: %w", account.HostingAccountID, lookupErr)
+		}
+		hostUID, parseErr := strconv.ParseUint(hostAccount.Uid, 10, 32)
+		if parseErr != nil || uint32(hostUID) != account.LinuxUID {
+			return nil, fmt.Errorf("hosting account %q Linux UID does not match the root-owned registry", account.HostingAccountID)
+		}
+	}
+	return registry, nil
 }
 
 // newBindingRegistry validates the complete registry before it can be used.
@@ -70,6 +88,7 @@ func newBindingRegistry(accounts []brokerAccountRecord, domains []brokerDomainRe
 	}
 	usernames := make(map[string]struct{}, len(accounts))
 	uids := make(map[uint32]struct{}, len(accounts))
+	hostnames := make(map[string]struct{}, len(domains))
 	for _, account := range accounts {
 		if !accountIDPattern.MatchString(account.HostingAccountID) ||
 			!linuxUsernamePattern.MatchString(account.LinuxUsername) ||
@@ -109,6 +128,10 @@ func newBindingRegistry(accounts []brokerAccountRecord, domains []brokerDomainRe
 		if _, err := Render(binding); err != nil {
 			return nil, fmt.Errorf("domain registry contains an invalid canonical binding: %w", err)
 		}
+		if _, exists := hostnames[domain.Hostname]; exists {
+			return nil, errors.New("domain registry contains a duplicate hostname")
+		}
+		hostnames[domain.Hostname] = struct{}{}
 		registry.domains[domain.DomainID] = domain
 	}
 	return registry, nil
