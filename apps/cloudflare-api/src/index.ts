@@ -5196,7 +5196,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
