@@ -47,6 +47,12 @@ const navigation = [
 export default function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  // Normalize trailing slashes and treat auth routes as public by path segment.
+  // This prevents the workspace guard from bouncing recovery URLs back to /login.
+  const normalizedPathname = (pathname || "/").replace(/\\/+$/, "") || "/";
+  const isPublicAuthRoute = ["/login", "/signup", "/forgot-password", "/reset-password"]
+    .some(route => normalizedPathname === route || normalizedPathname.startsWith(`${route}/`));
+  const isCustomerRoute = normalizedPathname === "/customer" || normalizedPathname.startsWith("/customer/");
   const [accessChecking, setAccessChecking] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -59,7 +65,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (["/login", "/signup", "/forgot-password", "/reset-password"].includes(pathname) || pathname === "/customer" || pathname.startsWith("/customer/")) {
+    if (isPublicAuthRoute || isCustomerRoute) {
       setAccessChecking(false);
       return;
     }
@@ -82,7 +88,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
         if (active) router.replace("/login");
       });
     return () => { active = false; };
-  }, [pathname, router]);
+  }, [isPublicAuthRoute, isCustomerRoute, pathname, router]);
 
   const filteredNavigation = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -92,7 +98,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     })).filter(group => group.items.length > 0);
   }, [search]);
 
-  if (["/login", "/signup", "/forgot-password", "/reset-password"].includes(pathname) || pathname === "/customer" || pathname.startsWith("/customer/")) return <>{children}</>;
+  if (isPublicAuthRoute || isCustomerRoute) return <>{children}</>;
   if (accessChecking) return <main className="grid min-h-screen place-items-center bg-slate-50"><p className="text-sm text-slate-500">Checking workspace access…</p></main>;
 
   const isActive = (href: string) => href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
