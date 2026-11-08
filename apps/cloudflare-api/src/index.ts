@@ -323,6 +323,8 @@ app.use("/v1/*", async (c, next) => {
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
     path === "/v1/github/callback" ||
+    path === "/v1/github/connection" || path === "/v1/github/connect" ||
+    path === "/v1/github/repositories" || path === "/v1/github/projects" ||
     path.startsWith("/v1/github/deployments/")
   ) {
     await next();
@@ -3778,12 +3780,12 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
   return data.token;
 }
 
-function githubDashboardRedirect(env: Bindings, status: string): string {
+function githubDashboardRedirect(env: Bindings, status: string, customer = false): string {
   const base = env.DASHBOARD_URL ?? "";
   let url: URL;
   try { url = new URL(base); } catch { throw new Error("Dashboard URL is not configured"); }
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Dashboard URL must be an HTTPS origin");
-  url.pathname = "/github-deployments";
+  url.pathname = customer ? "/customer/deploy" : "/github-deployments";
   url.search = new URLSearchParams({ github: status }).toString();
   url.hash = "";
   return url.toString();
@@ -3812,7 +3814,7 @@ app.get("/v1/github/connection", async (c) => {
 app.post("/v1/github/connect", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) {
     return c.json({ message: "GitHub App credentials, callback URL, and token encryption key must be configured first." }, 503);
   }
@@ -3891,7 +3893,7 @@ app.get("/v1/github/callback", async (c) => {
 app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   const connection = await c.env.DB.prepare(
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
@@ -3923,7 +3925,7 @@ app.get("/v1/github/repositories", async (c) => {
 app.post("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const hostingAccountId = typeof input.hostingAccountId === "string" ? input.hostingAccountId : "";
@@ -3937,7 +3939,11 @@ app.post("/v1/github/projects", async (c) => {
   if (!hostingAccountId || !Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(rootDirectory) || rootDirectory.startsWith("/") || rootDirectory.split("/").includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(outputDirectory) || outputDirectory.startsWith("/") || outputDirectory.split("/").includes("..") || !["auto", "static", "vite", "react", "vue", "astro", "next-static"].includes(framework)) {
     return c.json({ message: "Invalid repository, branch, directory, framework, or hosting account configuration." }, 400);
   }
-  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>();
+  const account = identity.platformRole
+    ? await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>()
+    : await c.env.DB.prepare(
+        `SELECT a.id FROM hosting_accounts a JOIN hosting_account_memberships m ON m.hosting_account_id = a.id AND m.organization_id = a.organization_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE' AND m.user_id = ? AND m.status = 'ACTIVE' LIMIT 1`,
+      ).bind(hostingAccountId, identity.organizationId, identity.id).first<{ id: string }>();
   if (!account) return c.json({ message: "Choose an active hosting account in this workspace." }, 404);
   const connection = await c.env.DB.prepare("SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1").bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect GitHub first." }, 409);
@@ -3965,12 +3971,13 @@ app.post("/v1/github/projects", async (c) => {
 app.get("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  const result = await c.env.DB.prepare(
-    `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName,
-            production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory,
-            framework, auto_deploy AS autoDeploy, status, created_at AS createdAt
-     FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
-  ).bind(identity.organizationId).all();
+  const result = identity.platformRole
+    ? await c.env.DB.prepare(
+        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
+      ).bind(identity.organizationId).all()
+    : await c.env.DB.prepare(
+        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
+      ).bind(identity.organizationId, identity.id).all();
   return c.json({ projects: result.results ?? [] });
 });
 
