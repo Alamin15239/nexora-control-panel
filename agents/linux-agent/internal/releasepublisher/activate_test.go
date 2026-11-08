@@ -133,3 +133,22 @@ func TestRollbackRejectsUnsafeActivationLock(t *testing.T) {
 		t.Fatal("symlink activation lock was accepted")
 	}
 }
+
+func TestRollbackIdempotentRetryStillValidatesPreviousRelease(t *testing.T) {
+	t.Run("missing previous release", func(t *testing.T) {
+		base := testLayout(t)
+		if err := os.Symlink(filepath.Join("releases", "release-old"), filepath.Join(base, "current")); err != nil { t.Fatal(err) }
+		if err := Rollback(base, "release-failed", "release-old"); err == nil {
+			t.Fatal("idempotent rollback accepted a missing previous release")
+		}
+	})
+	t.Run("symlink previous release", func(t *testing.T) {
+		base := testLayout(t)
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(base, "releases", "release-old")); err != nil { t.Fatal(err) }
+		if err := os.Symlink(filepath.Join("releases", "release-old"), filepath.Join(base, "current")); err != nil { t.Fatal(err) }
+		if err := Rollback(base, "release-failed", "release-old"); err == nil {
+			t.Fatal("idempotent rollback accepted a symlink previous release")
+		}
+	})
+}
