@@ -129,14 +129,16 @@ Example config: `config.static-publisher.example.json`. Install a completed, own
 
 ## Static Nginx vhost broker (privileged boundary)
 
-The static publisher does not write Nginx configuration and does not invoke systemctl. After a signed static artifact is activated, it requests installation by sending only the deployment's domain ID to `/run/nexora-static-vhost/vhost.sock`.
+The static publisher does not write Nginx configuration or invoke systemctl. After a signed static artifact is activated, it sends the original signed deployment envelope to `/run/nexora-static-vhost/vhost.sock`. The root broker independently verifies that envelope before deriving the domain/account binding.
 
 The separate root-owned `nexora-static-vhostd` daemon:
 - accepts only the UID resolved for `nexora-runtime` using kernel Unix peer credentials;
-- reads the authoritative domain-to-hosting-account mapping from `/etc/nexora-static-vhost/domains.json`;
-- accepts no customer hostname, account ID, document root, filename, or Nginx text from the publisher;
+- loads issuer, audience and key ID from `/etc/nexora-static-vhost/trust.json` and a pinned RSA public key at `/etc/nexora-static-vhost/deployment-envelope-public.pem`;
+- requires root ownership, non-group/world-writable trust files and directory, and rejects symlink opens;
+- independently verifies the RS256 signature, key ID, issuer, audience, claim structure and expiry;
+- derives hostname, domain ID and hosting-account ID only from signed claims; the publisher cannot supply arbitrary paths or Nginx text;
 - renders the narrow static-only vhost and installs it under `/etc/nginx/conf.d`, then runs `nginx -t` and reloads Nginx;
-- exposes its socket to the `nexora-static` group (the UID check remains mandatory even when group access succeeds).
+- exposes its socket to the `nexora-static` group, while independently checking the connecting UID.
 
 Build:
 
@@ -144,8 +146,6 @@ Build:
 go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
 ```
 
-Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install `domains.json` root:root mode 0640 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The socket path is compiled into the publisher; customer or node configuration cannot redirect privileged requests to another Unix socket.
+Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install the trust JSON from `config.static-vhost.example.json` as root:root mode 0600; install the matching deployment-envelope public key as root:root mode 0644 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The signing private key remains only in the Cloudflare Worker secret store. The socket path is compiled into the publisher and cannot be redirected through customer configuration.
 
-Registry contents must be reconciled from authoritative hosting-account and verified-domain state by a trusted root-owned agent path. Never grant write access to the publisher, web server, or customer accounts. The broker intentionally fails closed if the registry is missing or invalid. That reconciliation writer and its atomic update protocol are not yet implemented.
-
-Do not enable either static deployment service on a customer or production node yet. Package installation/upgrade wiring, automatic registry reconciliation, disposable-VM HTTP routing tests, post-deploy health reporting, and rollback orchestration remain acceptance gates.
+Do not enable either static deployment service on a customer or production node yet. Package installation/upgrade wiring, trust-file provisioning/rotation, disposable-VM HTTP routing tests, post-deploy health reporting, and rollback orchestration remain acceptance gates.
