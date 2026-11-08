@@ -182,7 +182,7 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	result, err := FetchAndPublish(context.Background(), config, expected.DeploymentID)
 	if err != nil { t.Fatal(err) }
 	if !activationReported { t.Fatal("release activation acknowledgement was not submitted") }
-	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) {
+	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) || result.SignedEnvelope != token {
 		t.Fatalf("unexpected publication result: %+v", result)
 	}
 	published, err := os.ReadFile(filepath.Join(base,"releases",expected.DeploymentID,"public","index.html"))
