@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { ensureSaasDnsRecord } from "./cloudflare-dns";
 import { createDnsRecord, deleteDnsRecord, listDnsRecords, updateDnsRecord } from "./dns-records";
 import { pruneFailedDeploymentArtifacts } from "./artifact-retention";
+import { isRuntimeAssignmentAdmitted } from "./runtime-admission";
 
 type Bindings = {
   DB: D1Database;
@@ -4375,15 +4376,8 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
     assignedNodeId: string | null;
   }>();
-  // Fail closed: a missing settings row is not permission to dispatch a build.
-  // Every deployment must be bound to an enabled runtime and an approved isolated pool/node.
-  if (!runtimeAssignment || (
-    runtimeAssignment.runtimeEnabled !== 1 ||
-    !runtimeAssignment.nodePoolId ||
-    runtimeAssignment.poolStatus !== "ready" ||
-    !["rootless", "microvm"].includes(runtimeAssignment.isolationLevel ?? "") ||
-    !runtimeAssignment.assignedNodeId
-  )) {
+  // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
+  if (!isRuntimeAssignmentAdmitted(runtimeAssignment)) {
     return c.json({
       message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
