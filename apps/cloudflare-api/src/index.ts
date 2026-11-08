@@ -331,7 +331,7 @@ app.use("/v1/*", async (c, next) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   if (!identity.platformRole) {
-    return c.json({ message: "Nexora platform administrator access required." }, 403);
+    return c.json({ message: "Customer accounts cannot access WHM administration." }, 403);
   }
   await next();
 });
@@ -4313,7 +4313,7 @@ app.get("/v1/applications/runtime-profiles", async (c) => {
 app.put("/v1/applications/projects/:projectId/settings", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
 
   const projectId = c.req.param("projectId");
   const project = await c.env.DB.prepare(
