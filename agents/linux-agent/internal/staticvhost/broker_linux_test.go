@@ -19,6 +19,16 @@ import (
 	"time"
 )
 
+func testBrokerTrust(t *testing.T, keyID string, key *rsa.PublicKey) BrokerTrust {
+	t.Helper()
+	registry, err := NewBindingRegistry(
+		[]brokerAccountRecord{{HostingAccountID:"hosting_test", LinuxUsername:"nexoratest", LinuxUID:uint32(os.Getuid()+1)}},
+		[]brokerDomainRecord{{DomainID:"domain_test", HostingAccountID:"hosting_test", Hostname:"www.example.test"}},
+	)
+	if err != nil { t.Fatal(err) }
+	return BrokerTrust{Issuer:"trusted-issuer", Audience:"static-deployments", KeyID:keyID, PublicKey:key, Registry:registry}
+}
+
 func TestBrokerRejectsUnexpectedPeerUIDBeforeEnvelopeValidation(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "broker.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
@@ -26,7 +36,7 @@ func TestBrokerRejectsUnexpectedPeerUIDBeforeEnvelopeValidation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	allowedUID := uint32(os.Getuid()) + 1
-	trust := BrokerTrust{Issuer:"trusted-issuer", Audience:"static-deployments", KeyID:"key-1", PublicKey:&rsa.PublicKey{N:big.NewInt(17), E:65537}}
+	trust := testBrokerTrust(t, "key-1", &rsa.PublicKey{N:big.NewInt(17), E:65537})
 	go func() { done <- Serve(ctx, listener, allowedUID, "/etc/nginx/conf.d", trust) }()
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer requestCancel()
@@ -136,7 +146,7 @@ func TestBrokerInstallsOnlyBindingFromVerifiedEnvelope(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(),"broker.sock")
 	listener, err := net.ListenUnix("unix",&net.UnixAddr{Name:socketPath,Net:"unix"})
 	if err != nil { t.Fatal(err) }
-	trust := BrokerTrust{Issuer:"trusted-issuer",Audience:"static-deployments",KeyID:"broker-test",PublicKey:&key.PublicKey}
+	trust := testBrokerTrust(t, "broker-test", &key.PublicKey)
 	called := make(chan Binding,1)
 	serverDone := make(chan struct{})
 	go func(){
