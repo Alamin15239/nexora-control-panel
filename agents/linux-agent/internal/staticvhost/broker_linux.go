@@ -1,0 +1,214 @@
+//go:build linux
+
+package staticvhost
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"syscall"
+	"time"
+)
+
+const (
+	maxBrokerRequest = 4096
+	brokerTimeout = 10 * time.Second
+)
+
+type registryFile struct {
+	Version int       `json:"version"`
+	Domains []Binding `json:"domains"`
+}
+
+type brokerRequest struct {
+	DomainID string `json:"domainId"`
+}
+
+type brokerResponse struct {
+	OK bool `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// LoadRootRegistry accepts only a root-owned, non-writable regular file.
+// The registry is the authority for hostname/account mapping; callers supply
+// only a domain ID and can never choose a hostname, account, path or Nginx text.
+func LoadRootRegistry(path string) (map[string]Binding, error) {
+	if path == "" || !filepathIsCleanAbsolute(path) {
+		return nil, errors.New("registry path must be absolute and clean")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open static domain registry: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat static domain registry: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || stat.Uid != 0 ||
+		info.Mode().Perm()&0022 != 0 || info.Size() <= 0 || info.Size() > 1<<20 {
+		return nil, errors.New("static domain registry must be a bounded root-owned non-writable regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return nil, errors.New("read static domain registry safely")
+	}
+	var doc registryFile
+	decoder := json.NewDecoder(bytesReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("decode static domain registry: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("static domain registry contains trailing data")
+	}
+	if doc.Version != 1 || len(doc.Domains) > 100000 {
+		return nil, errors.New("unsupported or oversized static domain registry")
+	}
+	result := make(map[string]Binding, len(doc.Domains))
+	for _, binding := range doc.Domains {
+		if _, err := Render(binding); err != nil {
+			return nil, fmt.Errorf("invalid registry binding %q: %w", binding.DomainID, err)
+		}
+		if _, exists := result[binding.DomainID]; exists {
+			return nil, fmt.Errorf("duplicate static domain ID %q", binding.DomainID)
+		}
+		result[binding.DomainID] = binding
+	}
+	return result, nil
+}
+
+func filepathIsCleanAbsolute(path string) bool {
+	return len(path) > 1 && path[0] == '/' && path[1:] != "" && !containsPathTraversal(path)
+}
+
+func containsPathTraversal(path string) bool {
+	for _, part := range splitPath(path) {
+		if part == "." || part == ".." || part == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func splitPath(path string) []string {
+	var parts []string
+	start := 1
+	for i := 1; i <= len(path); i++ {
+		if i == len(path) || path[i] == '/' {
+			parts = append(parts, path[start:i])
+			start = i + 1
+		}
+	}
+	return parts
+}
+
+// Serve handles one bounded request per Unix connection and authorizes the
+// peer using kernel SO_PEERCRED before consulting the trusted registry.
+func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, registryPath, configDir string) error {
+	if listener == nil || registryPath == "" || configDir != "/etc/nginx/conf.d" {
+		return errors.New("static vhost broker configuration is invalid")
+	}
+	for {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			if ctx.Err() != nil { return nil }
+			return fmt.Errorf("accept static vhost request: %w", err)
+		}
+		go handleBrokerRequest(ctx, conn, allowedUID, registryPath, configDir)
+	}
+}
+
+func handleBrokerRequest(ctx context.Context, conn *net.UnixConn, allowedUID uint32, registryPath, configDir string) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(brokerTimeout))
+	raw, err := conn.SyscallConn()
+	if err != nil { return }
+	var credential *syscall.Ucred
+	var controlErr error
+	if err := raw.Control(func(fd uintptr) {
+		credential, controlErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil || controlErr != nil || credential == nil || credential.Uid != allowedUID {
+		return
+	}
+	var header [4]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil { return }
+	size := binary.BigEndian.Uint32(header[:])
+	if size == 0 || size > maxBrokerRequest { return }
+	payload := make([]byte, size)
+	if _, err := io.ReadFull(conn, payload); err != nil { return }
+	var request brokerRequest
+	decoder := json.NewDecoder(bytesReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeBrokerResponse(conn, brokerResponse{Error:"invalid request"})
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF || request.DomainID == "" {
+		writeBrokerResponse(conn, brokerResponse{Error:"invalid request"})
+		return
+	}
+	select { case <-ctx.Done(): return; default: }
+	registry, err := LoadRootRegistry(registryPath)
+	if err != nil {
+		writeBrokerResponse(conn, brokerResponse{Error:"trusted domain registry unavailable"})
+		return
+	}
+	binding, ok := registry[request.DomainID]
+	if !ok {
+		writeBrokerResponse(conn, brokerResponse{Error:"domain is not registered for static hosting"})
+		return
+	}
+	if err := InstallAsRoot(configDir, binding); err != nil {
+		writeBrokerResponse(conn, brokerResponse{Error:"Nginx vhost installation failed"})
+		return
+	}
+	writeBrokerResponse(conn, brokerResponse{OK:true})
+}
+
+func writeBrokerResponse(w io.Writer, response brokerResponse) {
+	payload, err := json.Marshal(response)
+	if err != nil || len(payload) > 1024 { return }
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+	_, _ = w.Write(header[:])
+	_, _ = w.Write(payload)
+}
+
+// RequestInstall asks the privileged broker to install the vhost for a domain
+// already present in the root-owned registry. It never transmits Nginx text.
+func RequestInstall(ctx context.Context, socketPath, domainID string) error {
+	if domainID == "" || len(domainID) > 128 { return errors.New("invalid domain ID") }
+	if socketPath == "" { socketPath = "/run/nexora-static-vhost/vhost.sock" }
+	conn, err := (&net.Dialer{Timeout: 3*time.Second}).DialContext(ctx, "unix", socketPath)
+	if err != nil { return fmt.Errorf("connect to static vhost broker: %w", err) }
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(brokerTimeout))
+	payload, err := json.Marshal(brokerRequest{DomainID:domainID})
+	if err != nil { return err }
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
+	if _, err := conn.Write(header[:]); err != nil { return err }
+	if _, err := conn.Write(payload); err != nil { return err }
+	if _, err := io.ReadFull(conn, header[:]); err != nil { return fmt.Errorf("read static vhost broker response: %w", err) }
+	size := binary.BigEndian.Uint32(header[:])
+	if size == 0 || size > 1024 { return errors.New("invalid static vhost broker response") }
+	responseBytes := make([]byte, size)
+	if _, err := io.ReadFull(conn, responseBytes); err != nil { return err }
+	var response brokerResponse
+	if err := json.Unmarshal(responseBytes, &response); err != nil { return err }
+	if !response.OK {
+		if response.Error == "" { response.Error = "broker rejected request" }
+		return errors.New(response.Error)
+	}
+	return nil
+}
