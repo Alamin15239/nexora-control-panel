@@ -28,6 +28,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
@@ -43,6 +44,7 @@ type Config struct {
 	DeploymentEnvelopeAudience string `json:"deployment_envelope_audience"`
 	PublisherRoot string `json:"publisher_root"`
 	ReplayDirectory string `json:"replay_directory"`
+	StaticVhostSocket string `json:"static_vhost_socket"`
 	PollIntervalSeconds int `json:"poll_interval_seconds"`
 }
 
@@ -235,9 +237,12 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
 				continue
 			}
-			fmt.Printf("static release activated: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
-				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)
-		}
+			if err := staticvhost.RequestInstall(ctx, cfg.StaticVhostSocket, release.DomainID); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s activated but vhost installation failed: %v\n", release.DeploymentID, err)
+				continue
+			}
+			fmt.Printf("static release activated and served: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
+				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)		}
 	}
 	poll()
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
