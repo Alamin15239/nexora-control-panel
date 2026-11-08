@@ -5225,10 +5225,14 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "JOIN application_nodes n ON n.id = r.assigned_node_id AND n.node_pool_id = r.node_pool_id " +
+    "JOIN application_node_pools pool ON pool.id = n.node_pool_id " +
     "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? AND r.state = 'artifact_uploaded' " +
     "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
-    "AND n.status = 'online' AND n.revoked_at IS NULL ORDER BY r.requested_at LIMIT 10",
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND pool.status = 'ready' AND pool.isolation_level IN ('rootless','microvm') " +
+    "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     deploymentId: string; organizationId: string; projectId: string;
     hostingAccountId: string; repositoryId: string; commitSha: string;
@@ -5387,8 +5391,12 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
   if (purpose === "publish" && release.state === "ready_to_publish") {
     const transition = await c.env.DB.prepare(
       "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
-      "WHERE id = ? AND state = 'ready_to_publish'",
-    ).bind(release.releaseId).run();
+      "WHERE id = ? AND state = 'ready_to_publish' AND node_pool_id = ? AND assigned_node_id = ? " +
+      "AND EXISTS (SELECT 1 FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+      "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+      "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+      "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+    ).bind(release.releaseId, release.nodePoolId, node.id, node.id, nodeIdentity, node.signingPublicKey).run();
     if (Number(transition.meta?.changes ?? 0) !== 1) {
       const latest = await c.env.DB.prepare("SELECT state FROM application_releases WHERE id = ? LIMIT 1")
         .bind(release.releaseId).first<{ state: string }>();
@@ -5397,9 +5405,18 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
       }
     }
   }
+  const stillEligible = await c.env.DB.prepare(
+    "SELECT n.id FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') LIMIT 1",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).first<{ id: string }>();
+  if (!stillEligible) return c.json({ message: "Runtime node or isolated pool became ineligible during artifact delivery." }, 409);
   await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'online'",
-  ).bind(node.id).run();
+    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+    "AND revoked_at IS NULL AND signing_public_key = ?",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
   return new Response(object.body, {
     status: 200,
     headers: {
