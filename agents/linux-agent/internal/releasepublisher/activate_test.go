@@ -1,8 +1,11 @@
 package releasepublisher
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -115,6 +118,54 @@ func TestActivateIgnoresAbandonedPredictableTemporaryPath(t *testing.T) {
 	}
 	if target != filepath.Join("releases", "release-1") {
 		t.Fatalf("unexpected active target %q", target)
+	}
+}
+
+
+func TestConcurrentActivationsRemainAtomicAndCleanTemporaryWorkspaces(t *testing.T) {
+	base := testLayout(t)
+	const count = 24
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("release-%02d", i)
+		if err := os.Mkdir(filepath.Join(base, "releases", id), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := make(chan struct{})
+	errs := make(chan error, count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("release-%02d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- Activate(base, id)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent activation failed: %v", err)
+		}
+	}
+	target, err := os.Readlink(filepath.Join(base, "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(target, filepath.Join("releases", "release-")) {
+		t.Fatalf("active target is not a managed release: %q", target)
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".activation-") {
+			t.Fatalf("activation workspace was not cleaned up: %q", entry.Name())
+		}
 	}
 }
 
