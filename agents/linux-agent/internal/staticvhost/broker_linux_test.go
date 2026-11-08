@@ -4,6 +4,8 @@ package staticvhost
 
 import (
 	"context"
+	"crypto/rsa"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,84 +14,18 @@ import (
 	"time"
 )
 
-func writeRegistryFixture(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "domains.json")
-	if err := os.WriteFile(path, []byte(body), 0600); err != nil { t.Fatal(err) }
-	if err := os.Chmod(dir, 0700); err != nil { t.Fatal(err) }
-	return path
-}
-
-func TestLoadRootRegistryRejectsNonCanonicalPaths(t *testing.T) {
-	for _, path := range []string{"", "relative/domains.json", "/etc/../etc/domains.json", "/etc//domains.json"} {
-		if _, err := LoadRootRegistry(path); err == nil {
-			t.Fatalf("accepted non-canonical registry path %q", path)
-		}
-	}
-}
-
-func TestLoadRootRegistryRequiresRootOwnedFile(t *testing.T) {
-	if os.Geteuid() != 0 { t.Skip("root ownership check requires root") }
-	path := writeRegistryFixture(t, `{"version":1,"domains":[{"DomainID":"domain_123","Hostname":"example.test","HostingAccountID":"account_123"}]}`)
-	got, err := LoadRootRegistry(path)
-	if err != nil { t.Fatal(err) }
-	if binding, ok := got["domain_123"]; !ok || binding.Hostname != "example.test" {
-		t.Fatalf("unexpected registry binding: %#v", got)
-	}
-}
-
-func TestLoadRootRegistryRejectsDuplicateDomainIDs(t *testing.T) {
-	if os.Geteuid() != 0 { t.Skip("root ownership check requires root") }
-	body := `{"version":1,"domains":[
-		{"DomainID":"domain_123","Hostname":"one.example.test","HostingAccountID":"account_123"},
-		{"DomainID":"domain_123","Hostname":"two.example.test","HostingAccountID":"account_123"}
-	]}`
-	_, err := LoadRootRegistry(writeRegistryFixture(t, body))
-	if err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("expected duplicate-domain rejection, got %v", err)
-	}
-}
-
-func TestLoadRootRegistryRejectsUnknownJSONFields(t *testing.T) {
-	if os.Geteuid() != 0 { t.Skip("root ownership check requires root") }
-	body := `{"version":1,"domains":[{"DomainID":"domain_123","Hostname":"example.test","HostingAccountID":"account_123","documentRoot":"/tmp"}]}`
-	if _, err := LoadRootRegistry(writeRegistryFixture(t, body)); err == nil {
-		t.Fatal("accepted untrusted documentRoot field")
-	}
-}
-
-func TestLoadRootRegistryRejectsInvalidBinding(t *testing.T) {
-	if os.Geteuid() != 0 { t.Skip("root ownership check requires root") }
-	body := `{"version":1,"domains":[{"DomainID":"domain_123","Hostname":"example.test; include /etc/passwd;","HostingAccountID":"account_123"}]}`
-	if _, err := LoadRootRegistry(writeRegistryFixture(t, body)); err == nil {
-		t.Fatal("accepted Nginx directive injection in registry hostname")
-	}
-}
-
-func TestLoadRootRegistryRejectsGroupWritableDirectory(t *testing.T) {
-	if os.Geteuid() != 0 { t.Skip("root ownership check requires root") }
-	dir := t.TempDir()
-	path := filepath.Join(dir, "domains.json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"domains":[]}`), 0600); err != nil { t.Fatal(err) }
-	if err := os.Chmod(dir, 0770); err != nil { t.Fatal(err) }
-	if _, err := LoadRootRegistry(path); err == nil {
-		t.Fatal("accepted group-writable registry directory")
-	}
-}
-
-
-func TestBrokerRejectsUnexpectedPeerUIDBeforeRegistryAccess(t *testing.T) {
+func TestBrokerRejectsUnexpectedPeerUIDBeforeEnvelopeValidation(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "broker.sock")
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
 	if err != nil { t.Fatal(err) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	allowedUID := uint32(os.Getuid()) + 1
-	go func() { done <- Serve(ctx, listener, allowedUID, "/missing/registry.json", "/etc/nginx/conf.d") }()
+	trust := BrokerTrust{Issuer:"trusted-issuer", Audience:"static-deployments", KeyID:"key-1", PublicKey:&rsa.PublicKey{N:big.NewInt(17), E:65537}}
+	go func() { done <- Serve(ctx, listener, allowedUID, "/etc/nginx/conf.d", trust) }()
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer requestCancel()
-	if err := RequestInstall(requestCtx, socketPath, "domain_123"); err == nil {
+	if err := RequestInstall(requestCtx, socketPath, "not-a-valid-jws"); err == nil {
 		t.Fatal("broker accepted a peer with an unexpected UID")
 	}
 	cancel()
@@ -101,12 +37,40 @@ func TestBrokerRejectsUnexpectedPeerUIDBeforeRegistryAccess(t *testing.T) {
 	}
 }
 
-func TestRequestInstallRejectsEmptyOrOversizedDomainID(t *testing.T) {
+func TestRequestInstallRejectsEmptyOrOversizedEnvelope(t *testing.T) {
 	ctx := context.Background()
 	if err := RequestInstall(ctx, "/unused/socket", ""); err == nil {
-		t.Fatal("accepted an empty domain ID")
+		t.Fatal("accepted an empty deployment envelope")
 	}
-	if err := RequestInstall(ctx, "/unused/socket", strings.Repeat("x", 129)); err == nil {
-		t.Fatal("accepted an oversized domain ID")
+	if err := RequestInstall(ctx, "/unused/socket", strings.Repeat("x", maxBrokerRequest)); err == nil {
+		t.Fatal("accepted an oversized deployment envelope")
+	}
+}
+
+func TestReadRootOwnedFileRejectsRelativePath(t *testing.T) {
+	if _, err := readRootOwnedFile("relative.json", 4096); err == nil {
+		t.Fatal("accepted a relative trust-file path")
+	}
+}
+
+func TestReadRootOwnedFileRejectsSymlink(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("root-owned trust file test requires root") }
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "trust.json")
+	if err := os.WriteFile(target, []byte("secret"), 0600); err != nil { t.Fatal(err) }
+	if err := os.Symlink(target, link); err != nil { t.Fatal(err) }
+	if _, err := readRootOwnedFile(link, 4096); err == nil {
+		t.Fatal("followed a symlinked trust file")
+	}
+}
+
+func TestReadRootOwnedFileRejectsGroupWritableFile(t *testing.T) {
+	if os.Geteuid() != 0 { t.Skip("root-owned trust file test requires root") }
+	path := filepath.Join(t.TempDir(), "trust.json")
+	if err := os.WriteFile(path, []byte("trusted"), 0600); err != nil { t.Fatal(err) }
+	if err := os.Chmod(path, 0660); err != nil { t.Fatal(err) }
+	if _, err := readRootOwnedFile(path, 4096); err == nil {
+		t.Fatal("accepted a group-writable trust file")
 	}
 }
