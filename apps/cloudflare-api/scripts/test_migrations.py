@@ -51,9 +51,12 @@ VALUES ('project-a','org-a','account-a','connection-a','repo-1','owner/repo')"""
 db.execute("""INSERT INTO github_deployments
 (id,organization_id,project_id,commit_sha,branch,trigger_type)
 VALUES ('deployment-a','org-a','project-a',?,'main','manual')""", ("a" * 40,))
+db.execute("""INSERT INTO hosting_accounts
+(id,organization_id,server_id,plan_id,username)
+VALUES ('account-other','org-a','server-a','plan-a','tenant-other')""")
 db.execute("""INSERT INTO github_projects
 (id,organization_id,hosting_account_id,github_connection_id,github_repository_id,repository_full_name)
-VALUES ('project-b','org-a','account-a','connection-a','repo-2','owner/other-repo')""")
+VALUES ('project-b','org-a','account-other','connection-a','repo-2','owner/other-repo')""")
 db.execute("""INSERT INTO github_deployments
 (id,organization_id,project_id,commit_sha,branch,trigger_type)
 VALUES ('deployment-b','org-a','project-b',?,'main','manual')""", ("b" * 40,))
