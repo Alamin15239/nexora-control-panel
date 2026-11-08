@@ -16,6 +16,10 @@ UMask=0077
 ExecStart=/usr/local/sbin/nexora-static-vhostd
 Restart=on-failure
 RestartSec=2
+LimitNOFILE=128
+TasksMax=32
+MemoryMax=128M
+CPUQuota=25%
 TimeoutStopSec=15
 KillMode=control-group
 
