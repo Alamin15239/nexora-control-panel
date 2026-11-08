@@ -20,6 +20,8 @@ func testExpected() Expected {
 		ProjectID: "project_123",
 		DeploymentID: "deployment_123",
 		HostingAccountID: "account_123",
+		DomainID: "domain_123",
+		Hostname: "www.example.test",
 		RepositoryID: "123456789",
 		CommitSHA: strings.Repeat("a", 40),
 	}
@@ -44,6 +46,7 @@ func validClaims(expected Expected, now time.Time) Claims {
 		Issuer: expected.Issuer, Audience: expected.Audience,
 		OrganizationID: expected.OrganizationID, ProjectID: expected.ProjectID,
 		DeploymentID: expected.DeploymentID, HostingAccountID: expected.HostingAccountID,
+		DomainID: expected.DomainID, Hostname: expected.Hostname,
 		RepositoryID: expected.RepositoryID, CommitSHA: expected.CommitSHA,
 		ArtifactSHA256: strings.Repeat("b", 64), ArtifactBytes: 1024,
 		JWTID: strings.Repeat("c", 32), IssuedAt: now.Unix(), ExpiresAt: now.Add(4*time.Minute).Unix(),
