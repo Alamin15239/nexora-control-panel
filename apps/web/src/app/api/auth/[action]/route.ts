@@ -101,7 +101,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
   if (!sameOrigin) return NextResponse.json({ message: "Cross-origin request rejected" }, { status: 403 });
 
   const { action } = await context.params;
-  if (!["login", "register", "logout"].includes(action)) {
+  if (!["login", "register", "logout", "forgot-password", "reset-password"].includes(action)) {
     return NextResponse.json({ message: "Not found" }, { status: 404 });
   }
 
@@ -134,6 +134,93 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     const db = await getDatabase();
     const email = normalizeEmail(input.email);
     const password = typeof input.password === "string" ? input.password : "";
+
+    if (action === "forgot-password") {
+      const generic = { message: "If the account exists, a password reset link will be sent." };
+      if (!validEmail(email)) return NextResponse.json(generic);
+      const user = await db.prepare(
+        "SELECT id, email, display_name AS displayName FROM users WHERE email = ? COLLATE NOCASE AND status = 'ACTIVE' LIMIT 1",
+      ).bind(email).first<{ id: string; email: string; displayName: string | null }>();
+      if (!user) return NextResponse.json(generic);
+
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const recent = await db.prepare(
+        "SELECT created_at AS createdAt FROM password_reset_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+      ).bind(user.id).first<{ createdAt: string }>();
+      if (recent && now.getTime() - Date.parse(recent.createdAt) < 60_000) return NextResponse.json(generic);
+
+      const token = randomHex(32);
+      const tokenHash = await sha256(token);
+      const expiresAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
+      await db.batch([
+        db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL").bind(nowIso, user.id),
+        db.prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
+          .bind(crypto.randomUUID(), user.id, tokenHash, expiresAt, nowIso),
+      ]);
+
+      const { env } = await getCloudflareContext({ async: true });
+      const mail = env as typeof env & { RESEND_API_KEY?: string; EMAIL_FROM?: string; DASHBOARD_URL?: string };
+      if (!mail.RESEND_API_KEY || !mail.EMAIL_FROM) {
+        console.error("[Nexora auth] Password reset email is not configured on the dashboard Worker");
+        return NextResponse.json({ message: "Password recovery email is temporarily unavailable. Contact your platform administrator." }, { status: 503 });
+      }
+      const baseUrl = (mail.DASHBOARD_URL || request.nextUrl.origin).replace(/\/$/, "");
+      const resetUrl = baseUrl + "/reset-password?token=" + encodeURIComponent(token);
+      const safeName = (user.displayName || "there").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char);
+      const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">
+        <h2>Reset your Nexora password</h2><p>Hello ${safeName},</p>
+        <p>We received a request to reset your Nexora Control password. This link expires in 30 minutes and can only be used once.</p>
+        <p><a href="${resetUrl}" style="display:inline-block;padding:12px 20px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>
+        <p>If you did not request this, ignore this email. Your password will not change.</p>
+      </div>`;
+      try {
+        const response = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${mail.RESEND_API_KEY}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ from: mail.EMAIL_FROM, to: [user.email], subject: "Reset your Nexora password", html }),
+        });
+        if (!response.ok) {
+          console.error("[Nexora auth] Resend rejected password reset:", response.status, (await response.text()).slice(0, 500));
+          return NextResponse.json({ message: "Password recovery email could not be sent. Please try again later." }, { status: 503 });
+        }
+      } catch (error) {
+        console.error("[Nexora auth] Password reset delivery failed:", error);
+        return NextResponse.json({ message: "Password recovery email could not be sent. Please try again later." }, { status: 503 });
+      }
+      return NextResponse.json(generic);
+    }
+
+    if (action === "reset-password") {
+      const token = typeof input.token === "string" ? input.token.trim() : "";
+      if (!/^[a-f0-9]{64}$/i.test(token)) {
+        return NextResponse.json({ message: "This reset link is invalid or has expired. Request a new one." }, { status: 400 });
+      }
+      if (password.length < 12 || password.length > 128) {
+        return NextResponse.json({ message: "Password must be between 12 and 128 characters" }, { status: 400 });
+      }
+      const tokenHash = await sha256(token);
+      const now = new Date().toISOString();
+      const reset = await db.prepare(
+        "SELECT id, user_id AS userId FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
+      ).bind(tokenHash, now).first<{ id: string; userId: string }>();
+      if (!reset) return NextResponse.json({ message: "This reset link is invalid or has expired. Request a new one." }, { status: 400 });
+      const claimed = await db.prepare(
+        "UPDATE password_reset_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?",
+      ).bind(now, reset.id, now).run() as { meta?: { changes?: number } };
+      if ((claimed.meta?.changes ?? 0) !== 1) {
+        return NextResponse.json({ message: "This reset link is invalid or has expired. Request a new one." }, { status: 400 });
+      }
+      const passwordHash = await hashPassword(password);
+      await db.batch([
+        db.prepare("UPDATE users SET password_hash = ? WHERE id = ? AND status = 'ACTIVE'").bind(passwordHash, reset.userId),
+        db.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, reset.userId),
+        db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL").bind(now, reset.userId),
+      ]);
+      const response = NextResponse.json({ success: true, message: "Your password has been reset. Sign in with your new password." });
+      clearSessionCookie(response);
+      return response;
+    }
 
     if (action === "register") {
       const name = typeof input.name === "string" ? input.name.trim() : "";
