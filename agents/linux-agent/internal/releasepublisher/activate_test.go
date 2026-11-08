@@ -93,3 +93,43 @@ func TestActivateRejectsWritableReleaseDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestRollbackOnlySwitchesExpectedFailedReleaseAndIsIdempotent(t *testing.T) {
+	base := testLayout(t)
+	for _, id := range []string{"release-old", "release-failed", "release-newer"} {
+		if err := os.Mkdir(filepath.Join(base, "releases", id), 0700); err != nil { t.Fatal(err) }
+	}
+	if err := Activate(base, "release-failed"); err != nil { t.Fatal(err) }
+	if err := Rollback(base, "release-failed", "release-old"); err != nil { t.Fatal(err) }
+	target, err := os.Readlink(filepath.Join(base, "current"))
+	if err != nil { t.Fatal(err) }
+	if target != filepath.Join("releases", "release-old") { t.Fatalf("rollback target = %q", target) }
+	if err := Rollback(base, "release-failed", "release-old"); err != nil {
+		t.Fatalf("retry of completed rollback should be idempotent: %v", err)
+	}
+}
+
+func TestRollbackRefusesToOverwriteANewerDeployment(t *testing.T) {
+	base := testLayout(t)
+	for _, id := range []string{"release-old", "release-failed", "release-newer"} {
+		if err := os.Mkdir(filepath.Join(base, "releases", id), 0700); err != nil { t.Fatal(err) }
+	}
+	if err := Activate(base, "release-newer"); err != nil { t.Fatal(err) }
+	if err := Rollback(base, "release-failed", "release-old"); err == nil {
+		t.Fatal("stale rollback unexpectedly replaced a newer active release")
+	}
+	target, err := os.Readlink(filepath.Join(base, "current"))
+	if err != nil { t.Fatal(err) }
+	if target != filepath.Join("releases", "release-newer") {
+		t.Fatalf("stale rollback changed active target to %q", target)
+	}
+}
+
+func TestRollbackRejectsUnsafeActivationLock(t *testing.T) {
+	base := testLayout(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(base, ".activation.lock")); err != nil { t.Fatal(err) }
+	if err := Rollback(base, "release-failed", "release-old"); err == nil {
+		t.Fatal("symlink activation lock was accepted")
+	}
+}
