@@ -31,6 +31,7 @@ type Bindings = {
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
+type PlatformRole = "PLATFORM_OWNER" | "PLATFORM_ADMIN";
 
 const app = new Hono<{ Bindings: Bindings }>();
 const SESSION_SECONDS = 12 * 60 * 60;
@@ -328,8 +329,8 @@ app.use("/v1/*", async (c, next) => {
 
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (identity.role === "MEMBER") {
-    return c.json({ message: "Customer accounts cannot access WHM administration." }, 403);
+  if (!identity.platformRole) {
+    return c.json({ message: "Nexora platform administrator access required." }, 403);
   }
   await next();
 });
@@ -418,12 +419,12 @@ app.post("/v1/auth/register", async (c) => {
         .bind(userId, email, passwordHash, name),
       c.env.DB.prepare("INSERT INTO organizations (id, name, slug, status) VALUES (?, ?, ?, 'ACTIVE')")
         .bind(organizationId, organizationName, slug),
-      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'MEMBER')")
+      c.env.DB.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'OWNER')")
         .bind(membershipId, userId, organizationId),
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.register', 'organization', ?)")
         .bind(crypto.randomUUID(), organizationId, userId, organizationId),
     ]);
-    const session = await issueSession(c.env.DB, userId, organizationId, "MEMBER");
+    const session = await issueSession(c.env.DB, userId, organizationId, "OWNER");
     return c.json({
       user: { id: userId, email, displayName: name },
       organization: { id: organizationId, name: organizationName, slug },
@@ -655,6 +656,7 @@ app.get("/v1/auth/me", async (c) => {
     displayName: identity.displayName,
     organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
     role: identity.role,
+    platformRole: identity.platformRole,
     customerAccess: Boolean(customerAccess),
   });
 });
@@ -1905,7 +1907,9 @@ app.get("/v1/platform/customers", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   // Platform-wide customer data is restricted to the platform OWNER, not ordinary workspace admins.
-  if (identity.role !== "OWNER") return c.json({ message: "Platform owner access required." }, 403);
+  if (identity.platformRole !== "PLATFORM_OWNER" && identity.platformRole !== "PLATFORM_ADMIN") {
+    return c.json({ message: "Platform administrator access required." }, 403);
+  }
 
   const result = await c.env.DB.prepare(
     `SELECT u.id AS userId, u.email, u.display_name AS displayName,
