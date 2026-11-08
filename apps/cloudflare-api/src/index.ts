@@ -5234,7 +5234,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
     "dom.id AS domainId, lower(dom.name) AS hostname, " +
-    "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha " +
+    "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha, " +
+    "COALESCE(s.health_check_path, '/') AS healthCheckPath " +
     "FROM application_releases r " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
@@ -5253,7 +5254,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     deploymentId: string; organizationId: string; projectId: string;
-    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string;
   }>();
   await c.env.DB.prepare(
     "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
