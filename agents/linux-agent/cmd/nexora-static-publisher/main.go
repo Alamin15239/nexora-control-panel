@@ -269,31 +269,17 @@ func run(configPath string) error {
 				continue
 			}
 			if healthAck.RollbackRequired {
-				if healthAck.RollbackTargetDeploymentID == nil || healthAck.RollbackTargetNodeID == nil {
-					fmt.Fprintf(os.Stderr, "deployment %s is unhealthy; rollback guidance is incomplete and no local change was made\n", release.DeploymentID)
+				rollbackProbe, rollbackErr := rollbackStaticRelease(baseDir, result.ReleaseID,
+					healthAck.RollbackTargetDeploymentID, healthAck.RollbackTargetNodeID,
+					cfg.NodeIdentity, func() runtimehealth.Result {
+						return staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
+					})
+				if rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback did not complete safely: %v\n", release.DeploymentID, rollbackErr)
 					continue
 				}
-				if *healthAck.RollbackTargetNodeID != cfg.NodeIdentity {
-					fmt.Fprintf(os.Stderr, "deployment %s requires rollback on node %s; this publisher is %s and will not modify a different node's release store\n",
-						release.DeploymentID, *healthAck.RollbackTargetNodeID, cfg.NodeIdentity)
-					continue
-				}
-				if !releasepublisher.IsReleaseID(*healthAck.RollbackTargetDeploymentID) {
-					fmt.Fprintf(os.Stderr, "deployment %s received an invalid rollback target; refusing local rollback\n", release.DeploymentID)
-					continue
-				}
-				if err := releasepublisher.Rollback(baseDir, result.ReleaseID, *healthAck.RollbackTargetDeploymentID); err != nil {
-					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback failed safely: %v\n", release.DeploymentID, err)
-					continue
-				}
-				rollbackProbe := staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
-				if rollbackProbe.Status != runtimehealth.Healthy {
-					fmt.Fprintf(os.Stderr, "deployment %s rolled back to %s but previous release health probe failed: status=%d failure=%s\n",
-						release.DeploymentID, *healthAck.RollbackTargetDeploymentID, rollbackProbe.HTTPStatus, rollbackProbe.FailureCode)
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back to %s; previous release is serving and healthy\n",
-					release.DeploymentID, *healthAck.RollbackTargetDeploymentID)
+				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back; previous release is serving and healthy (HTTP %d)\n",
+					release.DeploymentID, rollbackProbe.HTTPStatus)
 				continue
 			}
 			if probe.Status != runtimehealth.Healthy {
@@ -313,4 +299,33 @@ func run(configPath string) error {
 		case <-ticker.C: poll()
 		}
 	}
+}
+
+
+// rollbackStaticRelease performs a compare-and-switch rollback only when the
+// control plane's target belongs to this node. It verifies the restored release
+// through an injected serving-boundary probe before reporting success.
+func rollbackStaticRelease(baseDir, failedReleaseID string, targetDeploymentID, targetNodeID *string,
+	nodeIdentity string, probe func() runtimehealth.Result) (runtimehealth.Result, error) {
+	var empty runtimehealth.Result
+	if targetDeploymentID == nil || targetNodeID == nil {
+		return empty, errors.New("control plane rollback guidance is incomplete")
+	}
+	if nodeIdentity == "" || *targetNodeID != nodeIdentity {
+		return empty, errors.New("rollback target belongs to a different runtime node")
+	}
+	if !releasepublisher.IsReleaseID(*targetDeploymentID) || !releasepublisher.IsReleaseID(failedReleaseID) {
+		return empty, errors.New("rollback release identifier is invalid")
+	}
+	if probe == nil {
+		return empty, errors.New("rollback serving-boundary probe is required")
+	}
+	if err := releasepublisher.Rollback(baseDir, failedReleaseID, *targetDeploymentID); err != nil {
+		return empty, err
+	}
+	result := probe()
+	if result.Status != runtimehealth.Healthy || result.HTTPStatus < 200 || result.HTTPStatus > 299 || result.FailureCode != "" {
+		return result, fmt.Errorf("restored release failed HTTP verification: status=%d failure=%s", result.HTTPStatus, result.FailureCode)
+	}
+	return result, nil
 }
