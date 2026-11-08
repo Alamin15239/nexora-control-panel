@@ -165,7 +165,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
         console.error("[Nexora auth] Password reset email is not configured on the dashboard Worker");
         return NextResponse.json({ message: "Password recovery email is temporarily unavailable. Contact your platform administrator." }, { status: 503 });
       }
-      const baseUrl = (mail.DASHBOARD_URL || request.nextUrl.origin).replace(/\\/$/, "");
+      const baseUrl = (mail.DASHBOARD_URL || request.nextUrl.origin).replace(/\/$/, "");
       const resetUrl = baseUrl + "/reset-password?token=" + encodeURIComponent(token);
       const safeName = (user.displayName || "there").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char);
       const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">
