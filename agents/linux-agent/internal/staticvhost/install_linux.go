@@ -30,6 +30,7 @@ func (execRunner) Run(name string, args ...string) error {
 // the restored configuration.
 func Install(configDir, filename, content string, ownerUID uint32, runner CommandRunner) error {
 	if runner == nil { return errors.New("Nginx command runner is required") }
+	if uint32(os.Geteuid()) != ownerUID { return errors.New("installer effective UID does not match config ownership") }
 	if !managedConfigName.MatchString(filename) { return errors.New("invalid managed Nginx config filename") }
 	if len(content) == 0 || len(content) > 64<<10 || content[:min(len(content), len("# Managed by Nexora. Do not edit.\n"))] != "# Managed by Nexora. Do not edit.\n" {
 		return errors.New("configuration is not a bounded Nexora-rendered vhost")
@@ -85,9 +86,6 @@ func atomicWrite(dir, filename string, data []byte, ownerUID uint32) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if err := tmp.Chmod(0644); err != nil { tmp.Close(); return err }
-	ownerGID := uint32(0)
-	if ownerUID != 0 { ownerGID = uint32(os.Getgid()) }
-	if err := tmp.Chown(int(ownerUID), int(ownerGID)); err != nil { tmp.Close(); return err }
 	if _, err := tmp.Write(data); err != nil { tmp.Close(); return err }
 	if err := tmp.Sync(); err != nil { tmp.Close(); return err }
 	if err := tmp.Close(); err != nil { return err }
