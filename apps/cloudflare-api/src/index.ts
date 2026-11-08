@@ -566,10 +566,11 @@ app.post("/v1/auth/login", async (c) => {
   ).bind(email).first<{ id: string; email: string; passwordHash: string | null; displayName: string | null; status: string }>();
 
   const membership = user?.status === "ACTIVE" ? await c.env.DB.prepare(
-    `SELECT m.organization_id AS organizationId, m.role
+    `SELECT m.organization_id AS organizationId, m.role, pm.role AS platformRole
      FROM memberships m JOIN organizations o ON o.id = m.organization_id
+     LEFT JOIN platform_memberships pm ON pm.user_id = m.user_id AND pm.status = 'ACTIVE'
      WHERE m.user_id = ? AND o.status = 'ACTIVE' AND (o.id = ? OR o.slug = ?) LIMIT 1`,
-  ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: Role }>() : null;
+  ).bind(user.id, organizationKey, organizationKey).first<{ organizationId: string; role: Role; platformRole: PlatformRole | null }>() : null;
 
   const passwordValid = await verifyPassword(password, user?.passwordHash ?? null);
   if (!user || user.status !== "ACTIVE" || !membership || !passwordValid) {
@@ -599,6 +600,7 @@ app.post("/v1/auth/login", async (c) => {
   return c.json({
     user: { id: user.id, email: user.email, displayName: user.displayName },
     customerAccess: Boolean(customerAccess),
+    platformRole: membership.platformRole,
     ...session,
   });
 });
