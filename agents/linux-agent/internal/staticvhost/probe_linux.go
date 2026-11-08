@@ -26,7 +26,7 @@ func ProbeHTTP(ctx context.Context, hostname, path string, timeout time.Duration
 
 // probeHTTPAt keeps the destination injectable for tests. Production callers
 // use ProbeHTTP, whose destination is always the local IPv4 loopback listener.
-func probeHTTPAt(ctx context.Context, hostname, address string, timeout time.Duration) runtimehealth.Result {
+func probeHTTPAt(ctx context.Context, hostname, path, address string, timeout time.Duration) runtimehealth.Result {
 	started := time.Now()
 	result := runtimehealth.Result{Status: runtimehealth.Unhealthy}
 	finish := func() runtimehealth.Result {
