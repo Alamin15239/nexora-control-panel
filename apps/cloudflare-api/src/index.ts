@@ -79,6 +79,8 @@ type DeploymentEnvelopeInput = {
   projectId: string;
   deploymentId: string;
   hostingAccountId: string;
+  domainId: string;
+  hostname: string;
   repositoryId: string;
   commitSha: string;
   artifactSha256: string;
@@ -98,8 +100,12 @@ async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeIn
       !Number.isSafeInteger(input.artifactBytes) || input.artifactBytes < 1 || input.artifactBytes > 100 * 1024 * 1024) {
     throw new Error("Deployment envelope artifact claims are invalid");
   }
-  for (const value of [input.organizationId, input.projectId, input.deploymentId, input.hostingAccountId]) {
+  for (const value of [input.organizationId, input.projectId, input.deploymentId, input.hostingAccountId, input.domainId]) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Deployment envelope identity is invalid");
+  }
+  if (input.hostname !== input.hostname.toLowerCase() || input.hostname.length > 253 ||
+      !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(input.hostname)) {
+    throw new Error("Deployment envelope hostname is invalid");
   }
   if (!/^[1-9][0-9]{0,19}$/.test(input.repositoryId)) throw new Error("Deployment repository ID is invalid");
 
@@ -111,6 +117,8 @@ async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeIn
     project_id: input.projectId,
     deployment_id: input.deploymentId,
     hosting_account_id: input.hostingAccountId,
+    domain_id: input.domainId,
+    hostname: input.hostname,
     repository_id: input.repositoryId,
     commit_sha: input.commitSha,
     artifact_sha256: input.artifactSha256,
@@ -1323,6 +1331,8 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
       projectId: deployment.projectId,
       deploymentId: deployment.deploymentId,
       hostingAccountId: deployment.hostingAccountId,
+      domainId: deployment.domainId,
+      hostname: deployment.hostname,
       repositoryId: deployment.repositoryId,
       commitSha: deployment.commitSha,
       artifactSha256: deployment.artifactSha256,
@@ -5219,9 +5229,13 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   const rows = await c.env.DB.prepare(
     "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
+    "dom.id AS domainId, dom.name AS hostname, " +
     "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha " +
     "FROM application_releases r " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
+    "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
+    "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "JOIN application_nodes n ON n.id = r.assigned_node_id AND n.node_pool_id = r.node_pool_id " +
@@ -5235,7 +5249,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     deploymentId: string; organizationId: string; projectId: string;
-    hostingAccountId: string; repositoryId: string; commitSha: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string;
   }>();
   await c.env.DB.prepare(
     "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
@@ -5343,9 +5357,12 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "r.artifact_digest AS releaseArtifactDigest, r.artifact_bytes AS releaseArtifactBytes, " +
     "d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes, " +
     "d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId, " +
-    "p.github_repository_id AS repositoryId FROM application_releases r " +
+    "dom.id AS domainId, dom.name AS hostname, p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
+    "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
+    "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
@@ -5354,7 +5371,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     nodePoolId: string; state: string; releaseArtifactDigest: string | null;
     releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
     artifactBytes: number | null; artifactSha256: string | null;
-    hostingAccountId: string; repositoryId: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string;
   }>();
   if (!release) return c.json({ message: "No publishable release is assigned to this runtime node pool." }, 404);
   if (!release.artifactKey || !Number.isSafeInteger(release.artifactBytes) ||
@@ -5381,6 +5398,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     envelope = await signDeploymentEnvelope(c.env, {
       organizationId: release.organizationId, projectId: release.projectId,
       deploymentId: release.deploymentId, hostingAccountId: release.hostingAccountId,
+      domainId: release.domainId, hostname: release.hostname,
       repositoryId: release.repositoryId, commitSha: release.commitSha,
       artifactSha256: release.artifactSha256, artifactBytes: release.artifactBytes!,
     });
