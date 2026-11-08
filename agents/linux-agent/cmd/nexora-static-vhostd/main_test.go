@@ -13,7 +13,7 @@ import (
 func TestListenSocketSetsRootBoundaryPermissions(t *testing.T) {
 	if os.Geteuid() != 0 { t.Skip("socket ownership test requires root") }
 	path := filepath.Join(t.TempDir(), "vhost.sock")
-	listener, err := listenSocket(path, os.Getgid())
+	listener, err := listenSocket(path)
 	if err != nil { t.Fatal(err) }
 	defer listener.Close()
 	info, err := os.Lstat(path)
@@ -22,7 +22,7 @@ func TestListenSocketSetsRootBoundaryPermissions(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0660 { t.Fatalf("socket mode = %04o, want 0660", got) }
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok { t.Fatal("socket stat lacks ownership metadata") }
-	if stat.Uid != 0 || stat.Gid != uint32(os.Getgid()) {
+	if stat.Uid != 0 || stat.Gid != uint32(syscall.Getegid()) {
 		t.Fatalf("socket owner = %d:%d, want 0:%d", stat.Uid, stat.Gid, os.Getgid())
 	}
 }
