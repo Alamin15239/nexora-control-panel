@@ -37,7 +37,7 @@ export default function LoginPage() {
         return;
       }
       if (!response.ok) throw new Error(data.message || "Unable to sign in.");
-      const destination = data.role === "MEMBER" ? "/customer" : "/";
+      const destination = data.platformRole ? "/" : "/customer";
       router.replace(destination);
       router.refresh();
     } catch (caught) {
