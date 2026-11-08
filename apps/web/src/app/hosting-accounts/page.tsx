@@ -2,7 +2,7 @@
 
 import { Fragment, FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CircleAlert, Clock3, Globe2, Plus, RefreshCw, Server, Users, UserPlus } from "lucide-react";
+import { ArrowLeft, CircleAlert, Clock3, Globe2, Plus, RefreshCw, Server, Users, UserPlus, UserX, Trash2 } from "lucide-react";
 
 type ServerItem = { id: string; hostname: string; status: string };
 type PlanItem = { id: string; name: string; active: number; disk_limit_bytes: number; website_limit: number; database_limit: number; mailbox_limit: number };
@@ -95,6 +95,19 @@ export default function HostingAccountsPage() {
     finally { setMemberBusy(false); }
   }
 
+  async function revokeMember(accountId: string, member: AccountMember) {
+    if (!window.confirm(`Revoke ${member.email}'s access to this hosting account? Their Nexora login and access to other accounts will remain unchanged.`)) return;
+    setMemberBusy(true); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/control/hosting-accounts/${encodeURIComponent(accountId)}/memberships/${encodeURIComponent(member.userId)}`, { method: "DELETE" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || "Unable to revoke customer access.");
+      setNotice(data.message || "Customer access revoked.");
+      setMembers(current => current.map(item => item.userId === member.userId ? { ...item, status: "REVOKED" } : item));
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to revoke customer access."); }
+    finally { setMemberBusy(false); }
+  }
+
   const pending = accounts.filter(a => a.status === "PENDING").length;
   const active = accounts.filter(a => a.status === "ACTIVE").length;
 
@@ -125,7 +138,7 @@ export default function HostingAccountsPage() {
           {membershipAccountId===a.id && <tr key={a.id+"-members"}><td colSpan={7} className="bg-slate-50/70 px-5 py-5">
             <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
               <div><h3 className="text-sm font-semibold text-slate-800">Assigned customer users</h3><p className="mt-1 text-xs text-slate-500">Any active Nexora login can be assigned to this hosting account.</p>
-                {members.length===0?<p className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white p-4 text-xs text-slate-500">No members assigned yet, or no active members were returned.</p>:<div className="mt-3 space-y-2">{members.map(member=><div key={member.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5"><div><p className="text-xs font-semibold text-slate-800">{member.displayName||member.email}</p><p className="mt-0.5 text-[11px] text-slate-500">{member.email}</p></div><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold "+(member.status==="ACTIVE"?"bg-emerald-50 text-emerald-700":"bg-slate-100 text-slate-500")}>{member.role.replace("ACCOUNT_","")} · {member.status}</span></div>)}</div>}
+                {members.length===0?<p className="mt-4 rounded-xl border border-dashed border-slate-300 bg-white p-4 text-xs text-slate-500">No members assigned yet, or no active members were returned.</p>:<div className="mt-3 space-y-2">{members.map(member=><div key={member.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5"><div><p className="text-xs font-semibold text-slate-800">{member.displayName||member.email}</p><p className="mt-0.5 text-[11px] text-slate-500">{member.email}</p></div><div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold "+(member.status==="ACTIVE"?"bg-emerald-50 text-emerald-700":"bg-slate-100 text-slate-500")}>{member.role.replace("ACCOUNT_","")} · {member.status}</span>{member.status==="ACTIVE" && <button disabled={memberBusy} onClick={() => void revokeMember(a.id, member)} className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-2 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50" title="Revoke this account access"><UserX size={12}/> Revoke</button>}</div></div>)}</div>}
               </div>
               <form onSubmit={assignMember} className="rounded-xl border border-slate-200 bg-white p-4"><h3 className="text-sm font-semibold text-slate-800">Grant account access</h3><label className="mt-3 block text-xs font-medium text-slate-600">Customer Nexora login email<input required type="email" value={memberEmail} onChange={event=>setMemberEmail(event.target.value)} placeholder="customer@example.com" className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-500"/></label><label className="mt-3 block text-xs font-medium text-slate-600">Account role<select value={memberRole} onChange={event=>setMemberRole(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="ACCOUNT_OWNER">Account owner</option><option value="ACCOUNT_ADMIN">Account admin</option><option value="ACCOUNT_DEVELOPER">Developer</option><option value="ACCOUNT_READONLY">Read only</option></select></label><p className="mt-2 text-[11px] leading-5 text-slate-400">The customer must first register a Nexora login. You can then assign this hosting account even if their login belongs to a different workspace.</p><button disabled={memberBusy} className="mt-4 inline-flex items-center justify-center rounded-lg bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white disabled:opacity-50">{memberBusy?"Assigning…":"Grant access"}</button></form>
             </div>
