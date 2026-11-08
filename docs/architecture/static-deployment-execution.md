@@ -219,9 +219,9 @@ The expected registry schema is versioned:
   "version": 1,
   "domains": [
     {
-      "DomainID": "domain_123",
-      "Hostname": "www.example.test",
-      "HostingAccountID": "account_123"
+      "domainId": "domain_123",
+      "hostname": "www.example.test",
+      "hostingAccountId": "account_123"
     }
   ]
 }
