@@ -4348,6 +4348,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "p.isolation_level AS isolationLevel, " +
     "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key IS NOT NULL ORDER BY n.last_heartbeat_at DESC, n.id LIMIT 1) AS assignedNodeId " +
     "FROM application_project_settings s " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
@@ -5499,9 +5500,13 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
@@ -5671,9 +5676,13 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'health_checking', updated_at = datetime('now') " +
@@ -5869,9 +5878,13 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const commonNodeArgs = [node.id, nodeIdentity, node.signingPublicKey];
   const statements = healthStatus === "healthy" ? [
     c.env.DB.prepare(
