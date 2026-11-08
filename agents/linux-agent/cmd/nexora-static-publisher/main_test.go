@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 )
 
 func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
@@ -50,4 +53,73 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 	if len(releases)!=1 || releases[0].HealthCheckPath!="/healthz" {
 		t.Fatalf("configured health-check path was not preserved: %+v",releases)
 	}
+}
+
+
+func rollbackTestLayout(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	for _, name := range []string{"staging", "releases"} {
+		if err := os.Mkdir(filepath.Join(base, name), 0700); err != nil { t.Fatal(err) }
+	}
+	for _, id := range []string{"release_old", "release_new", "release_latest"} {
+		if err := os.Mkdir(filepath.Join(base, "releases", id), 0700); err != nil { t.Fatal(err) }
+	}
+	if err := os.Symlink(filepath.Join("releases", "release_new"), filepath.Join(base, "current")); err != nil { t.Fatal(err) }
+	return base
+}
+
+func TestRollbackStaticReleaseRestoresPreviousAndVerifiesServing(t *testing.T) {
+	base := rollbackTestLayout(t)
+	target, node := "release_old", "runtime-node-test"
+	probed := false
+	result, err := rollbackStaticRelease(base, "release_new", &target, &node, node, func() runtimehealth.Result {
+		probed = true
+		return runtimehealth.Result{Status:runtimehealth.Healthy,HTTPStatus:http.StatusOK}
+	})
+	if err != nil { t.Fatal(err) }
+	if !probed || result.Status != runtimehealth.Healthy { t.Fatalf("rollback serving probe did not pass: %+v",result) }
+	active, err := os.Readlink(filepath.Join(base,"current"))
+	if err != nil { t.Fatal(err) }
+	if active != filepath.Join("releases","release_old") { t.Fatalf("active release = %q",active) }
+}
+
+func TestRollbackStaticReleaseRejectsOtherNodeAndLeavesActiveUntouched(t *testing.T) {
+	base := rollbackTestLayout(t)
+	target, targetNode := "release_old", "different-node"
+	_, err := rollbackStaticRelease(base,"release_new",&target,&targetNode,"runtime-node-test",func() runtimehealth.Result {
+		t.Fatal("probe must not run for a cross-node rollback")
+		return runtimehealth.Result{}
+	})
+	if err == nil { t.Fatal("accepted rollback target on another node") }
+	active, readErr := os.Readlink(filepath.Join(base,"current"))
+	if readErr != nil { t.Fatal(readErr) }
+	if active != filepath.Join("releases","release_new") { t.Fatalf("active release changed: %q",active) }
+}
+
+func TestRollbackStaticReleaseRefusesStaleTargetAfterNewerActivation(t *testing.T) {
+	base := rollbackTestLayout(t)
+	if err := os.Remove(filepath.Join(base,"current")); err != nil { t.Fatal(err) }
+	if err := os.Symlink(filepath.Join("releases","release_latest"),filepath.Join(base,"current")); err != nil { t.Fatal(err) }
+	target, node := "release_old", "runtime-node-test"
+	_, err := rollbackStaticRelease(base,"release_new",&target,&node,node,func() runtimehealth.Result {
+		t.Fatal("probe must not run after stale compare-and-switch refusal")
+		return runtimehealth.Result{}
+	})
+	if err == nil { t.Fatal("stale rollback overwrote a newer active release") }
+	active, readErr := os.Readlink(filepath.Join(base,"current"))
+	if readErr != nil { t.Fatal(readErr) }
+	if active != filepath.Join("releases","release_latest") { t.Fatalf("newer release was overwritten: %q",active) }
+}
+
+func TestRollbackStaticReleaseRequiresHealthyRestoredProbe(t *testing.T) {
+	base := rollbackTestLayout(t)
+	target, node := "release_old", "runtime-node-test"
+	result, err := rollbackStaticRelease(base,"release_new",&target,&node,node,func() runtimehealth.Result {
+		return runtimehealth.Result{Status:runtimehealth.Unhealthy,HTTPStatus:http.StatusServiceUnavailable,FailureCode:"http_5xx"}
+	})
+	if err == nil || result.FailureCode != "http_5xx" { t.Fatalf("expected unhealthy restored probe, got %+v, %v",result,err) }
+	active, readErr := os.Readlink(filepath.Join(base,"current"))
+	if readErr != nil { t.Fatal(readErr) }
+	if active != filepath.Join("releases","release_old") { t.Fatalf("rollback target was not activated: %q",active) }
 }
