@@ -8,5 +8,6 @@
   "deployment_envelope_audience": "REPLACE_WITH_GITHUB_DEPLOYMENT_ENVELOPE_AUDIENCE",
   "publisher_root": "/var/lib/nexora-static",
   "replay_directory": "/var/lib/nexora-static/replay",
+  "static_vhost_socket": "/run/nexora-static-vhost/vhost.sock",
   "poll_interval_seconds": 30
 }
