@@ -78,7 +78,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
       })
       .then(user => {
         if (!active) return;
-        if (user.role === "MEMBER" || user.customerAccess) {
+        if (user.role === "MEMBER") {
           router.replace("/customer");
           return;
         }
