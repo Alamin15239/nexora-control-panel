@@ -437,31 +437,35 @@ app.post("/v1/auth/forgot-password", async (c) => {
       .bind(crypto.randomUUID(), user.id, tokenHash, expiresAt, nowIso),
   ]);
 
-  if (c.env.RESEND_API_KEY && c.env.EMAIL_FROM) {
-    const baseUrl = (c.env.DASHBOARD_URL || "https://web.nexoraedge.digital").replace(/\/$/, "");
-    const resetUrl = baseUrl + "/reset-password?token=" + encodeURIComponent(token);
-    const safeName = escapeEmailHtml(user.displayName || "there");
-    const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">
-      <h2>Reset your Nexora password</h2><p>Hello ${safeName},</p>
-      <p>We received a request to reset your Nexora Control password. Use the secure link below within 30 minutes.</p>
-      <p><a href="${resetUrl}" style="display:inline-block;padding:12px 20px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>
-      <p>If you did not request this, you can ignore this email. Your password will not change.</p>
-      <p style="font-size:12px;color:#64748b">This link can only be used once and expires in 30 minutes.</p>
-    </div>`;
-    try {
-      const response = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [user.email], subject: "Reset your Nexora password", html }),
-      });
-      if (!response.ok) {
-        console.error("Password reset email rejected:", response.status, (await response.text()).slice(0, 500));
-      }
-    } catch (error) {
-      console.error("Password reset email delivery failed:", error);
+  if (!c.env.RESEND_API_KEY || !c.env.EMAIL_FROM) {
+    console.error("Password reset requested but Resend is not configured on nexora-api");
+    return c.json({ message: "Password recovery email is temporarily unavailable. Contact your platform administrator." }, 503);
+  }
+
+  const baseUrl = (c.env.DASHBOARD_URL || "https://web.nexoraedge.digital").replace(/\/$/, "");
+  const resetUrl = baseUrl + "/reset-password?token=" + encodeURIComponent(token);
+  const safeName = escapeEmailHtml(user.displayName || "there");
+  const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033">
+    <h2>Reset your Nexora password</h2><p>Hello ${safeName},</p>
+    <p>We received a request to reset your Nexora Control password. Use the secure link below within 30 minutes.</p>
+    <p><a href="${resetUrl}" style="display:inline-block;padding:12px 20px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>
+    <p>If you did not request this, you can ignore this email. Your password will not change.</p>
+    <p style="font-size:12px;color:#64748b">This link can only be used once and expires in 30 minutes.</p>
+  </div>`;
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${c.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: c.env.EMAIL_FROM, to: [user.email], subject: "Reset your Nexora password", html }),
+    });
+    if (!response.ok) {
+      const details = (await response.text()).slice(0, 500);
+      console.error("Password reset email rejected:", response.status, details);
+      return c.json({ message: "Password recovery email could not be sent. Please check the email service configuration and try again." }, 503);
     }
-  } else {
-    console.error("Password reset requested but Resend is not configured");
+  } catch (error) {
+    console.error("Password reset email delivery failed:", error);
+    return c.json({ message: "Password recovery email could not be sent. Please try again later." }, 503);
   }
 
   return c.json(generic);
