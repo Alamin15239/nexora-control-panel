@@ -242,7 +242,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
     if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
     else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
     else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
-  }, [load]);
+  }, [load, customerMode]);
 
   async function connectGithub() {
     setBusy(true); setError("");
