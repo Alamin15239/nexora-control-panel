@@ -32,7 +32,8 @@ export default function SignupPage() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "Unable to create your account.");
-      router.replace("/customer");
+      const selectedPlanId = new URLSearchParams(window.location.search).get("planId");
+      router.replace(selectedPlanId ? `/store?planId=${encodeURIComponent(selectedPlanId)}` : "/customer");
       router.refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Something went wrong.");
@@ -58,7 +59,7 @@ export default function SignupPage() {
         <div className="mb-8 flex items-center gap-3 lg:hidden"><span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Cloud size={21}/></span><span className="font-semibold text-slate-950">Nexora <span className="text-blue-700">Control</span></span></div>
         <p className="text-sm font-semibold text-blue-700">Customer registration</p>
         <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Create your account</h2>
-        <p className="mt-2 text-sm leading-6 text-slate-500">Register your login details. Your hosting provider can then assign a hosting account and plan.</p>
+        <p className="mt-2 text-sm leading-6 text-slate-500">Create your secure customer login. Your selected hosting plan will be waiting when registration is complete.</p>
         <form onSubmit={submit} className="mt-7 space-y-4">
           <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Full name</span><span className="relative block"><UserRound className="absolute left-3.5 top-3.5 text-slate-400" size={17}/><input required maxLength={100} autoComplete="name" className={inputClass} placeholder="Your full name" value={form.name} onChange={event=>update("name",event.target.value)}/></span></label>
           <label className="block"><span className="mb-2 block text-xs font-semibold text-slate-700">Company or account name</span><span className="relative block"><Building2 className="absolute left-3.5 top-3.5 text-slate-400" size={17}/><input required maxLength={120} autoComplete="organization" className={inputClass} placeholder="Company or account name" value={form.organizationName} onChange={event=>update("organizationName",event.target.value)}/></span></label>
@@ -68,7 +69,7 @@ export default function SignupPage() {
           {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700">{error}</p>}
           <button disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 py-3.5 text-sm font-semibold text-white shadow-lg shadow-blue-700/20 transition hover:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60">{busy ? "Creating account…" : "Create customer account"}{!busy && <ArrowRight size={17}/>}</button>
         </form>
-        <div className="mt-6 border-t border-slate-100 pt-5 text-center"><p className="text-sm text-slate-500">Already have an account? <Link href="/login" className="font-semibold text-blue-700 hover:text-blue-800">Sign in</Link></p></div>
+        <div className="mt-6 border-t border-slate-100 pt-5 text-center"><p className="text-sm text-slate-500">Already have an account? <Link href={new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("planId") ? `/login?planId=${encodeURIComponent(new URLSearchParams(window.location.search).get("planId")!)}` : "/login"} className="font-semibold text-blue-700 hover:text-blue-800">Sign in</Link></p></div>
         <p className="mt-5 text-center text-[11px] leading-5 text-slate-400">Registration does not grant access to server administration or unassigned hosting resources.</p>
       </div>
     </section>
