@@ -665,11 +665,11 @@ test("per-node usage report rejects queued deployments", async () => {
 });
 
 
-test("signed node heartbeat updates agent version and accepts draining nodes", async () => {
+test("signed runtime heartbeat updates agent version for eligible online nodes", async () => {
   const db = new TestD1(null);
   const pair = await createNodeKeyPair();
   db.node.signingPublicKey = pair.publicKeyHex;
-  db.node.status = "draining";
+  db.node.status = "online";
   const response = await worker.fetch(
     await signedNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
       String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
