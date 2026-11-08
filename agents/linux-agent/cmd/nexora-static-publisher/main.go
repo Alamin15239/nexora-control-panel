@@ -44,7 +44,6 @@ type Config struct {
 	DeploymentEnvelopeAudience string `json:"deployment_envelope_audience"`
 	PublisherRoot string `json:"publisher_root"`
 	ReplayDirectory string `json:"replay_directory"`
-	StaticVhostSocket string `json:"static_vhost_socket"`
 	PollIntervalSeconds int `json:"poll_interval_seconds"`
 }
 
@@ -237,7 +236,7 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
 				continue
 			}
-			if err := staticvhost.RequestInstall(ctx, cfg.StaticVhostSocket, release.DomainID); err != nil {
+			if err := staticvhost.RequestInstall(ctx, "", release.DomainID); err != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s activated but vhost installation failed: %v\n", release.DeploymentID, err)
 				continue
 			}
