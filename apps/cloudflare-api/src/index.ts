@@ -1851,8 +1851,9 @@ app.post("/v1/hosting-plans", async (c) => {
       c.env.DB.prepare(
         `INSERT INTO hosting_plans
          (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit,
-          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active,
+          price_sar_minor, billing_period, public_enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
         websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth, priceSarMinor, billingPeriod, publicEnabled),
       c.env.DB.prepare(
