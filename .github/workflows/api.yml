@@ -10,6 +10,8 @@ on:
       - "pnpm-workspace.yaml"
       - ".github/workflows/api.yml"
       - ".github/workflows/deploy-api.yml"
+      - "docs/templates/nexora-deploy.yml"
+      - "scripts/test_nexora_deploy_workflow.py"
   pull_request:
     paths:
       - "apps/api/**"
@@ -46,6 +48,8 @@ jobs:
         run: pnpm --filter @nexora/api typecheck
       - name: Cloudflare API typecheck
         run: pnpm --filter @nexora/cloudflare-api typecheck
+      - name: Validate Nexora static deployment workflow security contract
+        run: python3 scripts/test_nexora_deploy_workflow.py
       - name: Validate Prisma schema
         env:
           DATABASE_URL: postgresql://nexora:nexora@localhost:5432/nexora
