@@ -4798,7 +4798,8 @@ app.get("/internal/v1/operator/application-node-pools", async (c) => {
     "SELECT p.id, p.name, p.environment, p.region, p.runtime_engine AS runtimeEngine, " +
     "p.isolation_level AS isolationLevel, " +
     "(SELECT COUNT(*) FROM application_nodes n WHERE n.node_pool_id = p.id AND n.node_role = 'runtime' " +
-    "AND n.status = 'online' AND n.revoked_at IS NULL AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
     "FROM application_node_pools p WHERE p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "ORDER BY p.environment, p.region, p.name",
   ).all<{
@@ -4858,6 +4859,7 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
     "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key IS NOT NULL) LIMIT 1",
   ).bind(body.nodePoolId).first<{ id: string }>();
   if (!pool) {
