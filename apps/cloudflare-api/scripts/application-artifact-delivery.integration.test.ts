@@ -33,6 +33,8 @@ class ArtifactD1 {
     artifactBytes: artifactBytes.byteLength,
     artifactSha256: "",
     hostingAccountId: "hosting-a",
+    domainId: "domain-a",
+    hostname: "www.example.test",
     repositoryId: "123456789",
     healthCheckPath: "/ready",
     previousActiveReleaseId: "previous-release",
