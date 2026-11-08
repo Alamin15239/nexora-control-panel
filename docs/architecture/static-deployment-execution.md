@@ -152,3 +152,14 @@ The existing provisioning IPC server authorizes the `nexora-agent` UID and invok
 
 The static publisher must not report a deployment as customer-visible or successful merely because the release symlink switched. The deployment remains nonterminal until the configured hostname returns the expected release identity/content through the real Nginx serving path and the signed health report is accepted by the control plane. A failed HTTP probe leaves the deployment failed and triggers no automatic rollback until the separate signed rollback command/acknowledgement lifecycle is complete.
 
+
+
+## Canonical static-domain binding and renderer (2026-11-08)
+
+The control plane now resolves the static deployment hostname from the hosting account's canonical `domains` rows. It selects the primary domain first, then the lexicographically first domain as a deterministic fallback. Both the pending-release assignment and artifact-delivery lookup require an ACTIVE hosting account and an existing domain; a release without either is not offered to the publisher.
+
+The five-minute RS256 deployment envelope now binds `domain_id` and the canonical lowercase `hostname` in addition to the existing project/account/repository/commit/artifact claims. The Linux publisher carries the same domain identity from its signed pending assignment into `deployenvelope.Expected`; the Go verifier rejects domain-ID or hostname rebinding and malformed hostnames. The artifact-delivery integration fixture asserts these claims.
+
+A new pure Go package, `internal/staticvhost`, renders a constrained static-only Nginx server block. It derives the document root from the validated hosting-account ID, hashes the immutable domain ID for a stable config filename, rejects hostname injection, disables directory listing, denies hidden files and PHP paths, and emits no FastCGI, proxy, include, alias, or customer-provided directives.
+
+**Important implementation boundary:** the renderer is not yet connected to the privileged provisioning IPC, does not install or atomically replace Nginx files, does not run `nginx -t` or reload Nginx, and does not establish Nginx read/traverse permissions for publisher releases. No live HTTP test has yet proved that activation changes the customer-visible response. Those are still mandatory gates; static publishing and customer deployment dispatch remain disabled until the privileged broker and end-to-end serving test are complete.
