@@ -66,13 +66,5 @@ func FetchAndPublish(ctx context.Context, config Config, deploymentID string) (a
 					ArchiveBytes: archive.Bytes,
 				})
 		},
-		OnPublished: func(callbackContext context.Context, claims deployenvelope.Claims) error {
-			return artifactclient.ReportActivated(callbackContext, config.HTTPClient, config.ArtifactClient,
-				artifactclient.ActivationReport{
-					DeploymentID: claims.DeploymentID,
-					ReleaseID: claims.DeploymentID,
-					ArtifactSHA256: claims.ArtifactSHA256,
-				})
-		},
 	})
 }

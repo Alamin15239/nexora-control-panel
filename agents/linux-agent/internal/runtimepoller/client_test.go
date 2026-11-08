@@ -48,6 +48,35 @@ func testClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) 
 	return client, server
 }
 
+func TestHeartbeatSignsExactPOSTAndSendsAgentVersion(t *testing.T) {
+	client, server := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != heartbeatPath {
+			t.Errorf("unexpected heartbeat request: %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("unexpected content type %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil { t.Fatal(err) }
+		if string(body) != "{\"agentVersion\":\"runtime-node\"}" {
+			t.Errorf("unexpected heartbeat body %q", body)
+		}
+		proof := appnodeauth.Proof{
+			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
+			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
+			Signature: r.Header.Get("X-Nexora-Node-Signature"),
+		}
+		if proof.Nonce == "" || proof.Signature == "" {
+			t.Error("heartbeat proof headers are missing")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if err := client.Heartbeat(context.Background(), "runtime-node"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPollSignsExactGETAndDecodesReadOnlySnapshot(t *testing.T) {
 	expected := testSnapshot()
 	client, server := testClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -30,6 +30,7 @@ var (
 	hex32Pattern = regexp.MustCompile("^[a-f0-9]{32}$")
 	digestPattern = regexp.MustCompile("^[a-f0-9]{64}$")
 	commitPattern = regexp.MustCompile("^[a-f0-9]{40}$")
+	hostnamePattern = regexp.MustCompile("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
 	repositoryIDPattern = regexp.MustCompile("^[1-9][0-9]{0,19}$")
 )
 
@@ -40,6 +41,8 @@ type Expected struct {
 	ProjectID string
 	DeploymentID string
 	HostingAccountID string
+	DomainID string
+	Hostname string
 	RepositoryID string
 	CommitSHA string
 }
@@ -51,6 +54,8 @@ type Claims struct {
 	ProjectID string `json:"project_id"`
 	DeploymentID string `json:"deployment_id"`
 	HostingAccountID string `json:"hosting_account_id"`
+	DomainID string `json:"domain_id"`
+	Hostname string `json:"hostname"`
 	RepositoryID string `json:"repository_id"`
 	CommitSHA string `json:"commit_sha"`
 	ArtifactSHA256 string `json:"artifact_sha256"`
@@ -77,6 +82,8 @@ func Verify(token string, keys map[string]*rsa.PublicKey, expected Expected, now
 		claims.ProjectID != expected.ProjectID ||
 		claims.DeploymentID != expected.DeploymentID ||
 		claims.HostingAccountID != expected.HostingAccountID ||
+		claims.DomainID != expected.DomainID ||
+		claims.Hostname != expected.Hostname ||
 		claims.RepositoryID != expected.RepositoryID ||
 		claims.CommitSHA != expected.CommitSHA {
 		return Claims{}, errors.New("deployment envelope identity does not match the requested deployment")
@@ -126,10 +133,12 @@ func VerifySigned(token string, keys map[string]*rsa.PublicKey, issuer, audience
 	if claims.Issuer != issuer || claims.Audience != audience {
 		return zero, errors.New("deployment envelope issuer or audience does not match")
 	}
-	if !idPattern.MatchString(claims.OrganizationID) ||
+	if len(claims.Hostname) > 253 || !idPattern.MatchString(claims.OrganizationID) ||
 		!idPattern.MatchString(claims.ProjectID) ||
 		!idPattern.MatchString(claims.DeploymentID) ||
 		!idPattern.MatchString(claims.HostingAccountID) ||
+		!idPattern.MatchString(claims.DomainID) ||
+		!hostnamePattern.MatchString(claims.Hostname) ||
 		!repositoryIDPattern.MatchString(claims.RepositoryID) ||
 		!commitPattern.MatchString(claims.CommitSHA) ||
 		!digestPattern.MatchString(claims.ArtifactSHA256) ||

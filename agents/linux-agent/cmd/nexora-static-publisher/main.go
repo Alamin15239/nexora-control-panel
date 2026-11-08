@@ -28,6 +28,9 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
@@ -51,8 +54,11 @@ type PendingRelease struct {
 	OrganizationID string `json:"organizationId"`
 	ProjectID string `json:"projectId"`
 	HostingAccountID string `json:"hostingAccountId"`
+	DomainID string `json:"domainId"`
+	Hostname string `json:"hostname"`
 	RepositoryID string `json:"repositoryId"`
 	CommitSHA string `json:"commitSha"`
+	HealthCheckPath string `json:"healthCheckPath"`
 }
 type PendingResponse struct {
 	NodeIdentity string `json:"nodeIdentity"`
@@ -214,14 +220,16 @@ func run(configPath string) error {
 				Issuer: cfg.DeploymentEnvelopeIssuer, Audience: cfg.DeploymentEnvelopeAudience,
 				OrganizationID: release.OrganizationID, ProjectID: release.ProjectID,
 				DeploymentID: release.DeploymentID, HostingAccountID: release.HostingAccountID,
+				DomainID: release.DomainID, Hostname: release.Hostname,
 				RepositoryID: release.RepositoryID, CommitSHA: strings.ToLower(release.CommitSHA),
+			}
+			nodeArtifactConfig := artifactclient.Config{
+				ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity,
+				PrivateKey: nodeKey, Purpose: "validate",
 			}
 			result, publishErr := artifactdelivery.FetchAndPublish(ctx, artifactdelivery.Config{
 				HTTPClient: httpClient,
-				ArtifactClient: artifactclient.Config{
-					ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity,
-					PrivateKey: nodeKey, Purpose: "validate",
-				},
+				ArtifactClient: nodeArtifactConfig,
 				Expected: expected,
 				TrustedSigningKeys: map[string]*rsa.PublicKey{cfg.DeploymentSigningKeyID: signingKey},
 				BaseDir: baseDir,
@@ -232,9 +240,55 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
 				continue
 			}
-			fmt.Printf("static release activated: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
-				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)
-		}
+			if err := staticvhost.RequestInstall(ctx, "", result.SignedEnvelope); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s release is staged but vhost installation failed: %v\n", release.DeploymentID, err)
+				continue
+			}
+			if err := artifactclient.ReportActivated(ctx, httpClient, nodeArtifactConfig, artifactclient.ActivationReport{
+				DeploymentID: result.DeploymentID,
+				ReleaseID: result.ReleaseID,
+				ArtifactSHA256: result.ArtifactSHA256,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s is routed by Nginx but activation acknowledgement failed: %v\n", release.DeploymentID, err)
+				continue
+			}
+			healthCheckPath := release.HealthCheckPath
+			if healthCheckPath == "" { healthCheckPath = "/" }
+			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
+			healthAck, healthErr := artifactclient.ReportHealthCheck(ctx, httpClient, nodeArtifactConfig, artifactclient.HealthCheckReport{
+				DeploymentID: result.DeploymentID,
+				ArtifactSHA256: result.ArtifactSHA256,
+				ProbePath: healthCheckPath,
+				HealthStatus: string(probe.Status),
+				HTTPStatus: probe.HTTPStatus,
+				DurationMs: probe.DurationMs,
+				FailureCode: probe.FailureCode,
+			})
+			if healthErr != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s health report failed: %v\n", release.DeploymentID, healthErr)
+				continue
+			}
+			if healthAck.RollbackRequired {
+				rollbackProbe, rollbackErr := rollbackStaticRelease(baseDir, result.ReleaseID,
+					healthAck.RollbackTargetDeploymentID, healthAck.RollbackTargetNodeID,
+					cfg.NodeIdentity, func() runtimehealth.Result {
+						return staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
+					})
+				if rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback did not complete safely: %v\n", release.DeploymentID, rollbackErr)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back; previous release is serving and healthy (HTTP %d)\n",
+					release.DeploymentID, rollbackProbe.HTTPStatus)
+				continue
+			}
+			if probe.Status != runtimehealth.Healthy {
+				fmt.Fprintf(os.Stderr, "deployment %s failed HTTP health check: status=%d failure=%s\n",
+					release.DeploymentID, probe.HTTPStatus, probe.FailureCode)
+				continue
+			}
+			fmt.Printf("static release healthy and serving: deployment=%s release=%s sha256=%s bytes=%d probe_ms=%d already_published=%t\n",
+				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, probe.DurationMs, result.AlreadyPublished)		}
 	}
 	poll()
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
@@ -245,4 +299,33 @@ func run(configPath string) error {
 		case <-ticker.C: poll()
 		}
 	}
+}
+
+
+// rollbackStaticRelease performs a compare-and-switch rollback only when the
+// control plane's target belongs to this node. It verifies the restored release
+// through an injected serving-boundary probe before reporting success.
+func rollbackStaticRelease(baseDir, failedReleaseID string, targetDeploymentID, targetNodeID *string,
+	nodeIdentity string, probe func() runtimehealth.Result) (runtimehealth.Result, error) {
+	var empty runtimehealth.Result
+	if targetDeploymentID == nil || targetNodeID == nil {
+		return empty, errors.New("control plane rollback guidance is incomplete")
+	}
+	if nodeIdentity == "" || *targetNodeID != nodeIdentity {
+		return empty, errors.New("rollback target belongs to a different runtime node")
+	}
+	if !releasepublisher.IsReleaseID(*targetDeploymentID) || !releasepublisher.IsReleaseID(failedReleaseID) {
+		return empty, errors.New("rollback release identifier is invalid")
+	}
+	if probe == nil {
+		return empty, errors.New("rollback serving-boundary probe is required")
+	}
+	if err := releasepublisher.Rollback(baseDir, failedReleaseID, *targetDeploymentID); err != nil {
+		return empty, err
+	}
+	result := probe()
+	if result.Status != runtimehealth.Healthy || result.HTTPStatus < 200 || result.HTTPStatus > 299 || result.FailureCode != "" {
+		return result, fmt.Errorf("restored release failed HTTP verification: status=%d failure=%s", result.HTTPStatus, result.FailureCode)
+	}
+	return result, nil
 }

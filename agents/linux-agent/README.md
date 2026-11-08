@@ -108,6 +108,7 @@ go test ./...
 go test -race ./...
 go vet ./...
 go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-publisher ./cmd/nexora-static-publisher
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
 ```
 
 ### Operator preparation (not performed by CI)
@@ -124,3 +125,27 @@ The service is not enabled by default. Before installing it, the operator must:
 Example config: `config.static-publisher.example.json`. Install a completed, owner-only configuration at `/etc/nexora-static-publisher/node.json`, and place the node key and public trust key in the configured paths. Install `systemd/nexora-static-publisher.service`, then use `systemd-analyze verify` before enabling the unit.
 
 **Do not enable this service on the existing VirtualBox development VM or any customer node yet.** The publisher is a controlled static-file activation component, not a complete production release service. External HTTP health probes, rollback orchestration, web-server routing, account quota enforcement, production tenant-isolation tests, and live Cloudflare/D1/R2 configuration verification remain release gates. The runtime OCI execution loop remains disabled.
+
+
+## Static Nginx vhost broker (privileged boundary)
+
+The static publisher does not write Nginx configuration or invoke systemctl. After a signed static artifact is activated, it sends the original signed deployment envelope to `/run/nexora-static-vhost/vhost.sock`. The root broker independently verifies that envelope before deriving the domain/account binding.
+
+The separate root-owned `nexora-static-vhostd` daemon:
+- accepts only the UID resolved for `nexora-runtime` using kernel Unix peer credentials;
+- loads issuer, audience and key ID from `/etc/nexora-static-vhost/trust.json` and a pinned RSA public key at `/etc/nexora-static-vhost/deployment-envelope-public.pem`;
+- requires root ownership, non-group/world-writable trust files and directory, and rejects symlink opens;
+- independently verifies the RS256 signature, key ID, issuer, audience, claim structure and expiry;
+- derives hostname, domain ID and hosting-account ID only from signed claims; the publisher cannot supply arbitrary paths or Nginx text;
+- renders the narrow static-only vhost and installs it under `/etc/nginx/conf.d`, then runs `nginx -t` and reloads Nginx;
+- exposes its socket to the `nexora-static` group, while independently checking the connecting UID.
+
+Build:
+
+```sh
+go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
+```
+
+Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install the trust JSON from `config.static-vhost.example.json` as root:root mode 0600; install the matching deployment-envelope public key as root:root mode 0644 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The signing private key remains only in the Cloudflare Worker secret store. The systemd unit runs with primary group `nexora-static`; systemd creates the runtime directory with that group, and the daemon creates a `0660` socket without calling `chown` or requiring `CAP_CHOWN`. The socket path is compiled into the publisher and cannot be redirected through customer configuration.
+
+Do not enable either static deployment service on a customer or production node yet. Package installation/upgrade wiring, trust-file provisioning/rotation, disposable-VM HTTP routing tests, post-deploy health reporting, and rollback orchestration remain acceptance gates.

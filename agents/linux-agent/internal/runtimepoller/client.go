@@ -17,6 +17,7 @@ import (
 )
 
 const desiredStatePath = "/internal/v1/application-nodes/desired-state"
+const heartbeatPath = "/internal/v1/application-nodes/heartbeat"
 const maxResponseBytes = 1 << 20
 
 type Workload struct {
@@ -59,6 +60,39 @@ type Client struct {
 	PrivateKey ed25519.PrivateKey
 	HTTPClient *http.Client
 	Now func() time.Time
+}
+
+// Heartbeat records a fresh, signed liveness signal before the node polls work.
+func (c *Client) Heartbeat(ctx context.Context, agentVersion string) error {
+	if len(c.PrivateKey) != ed25519.PrivateKeySize || c.NodeIdentity == "" {
+		return errors.New("valid application-node identity and Ed25519 private key are required")
+	}
+	if agentVersion == "" || len(agentVersion) > 64 {
+		return errors.New("agent version is required")
+	}
+	now := time.Now()
+	if c.Now != nil { now = c.Now() }
+	if now.IsZero() { return errors.New("request clock is required") }
+	body, err := json.Marshal(map[string]string{"agentVersion": agentVersion})
+	if err != nil { return fmt.Errorf("encode heartbeat: %w", err) }
+	proof, err := appnodeauth.Sign(c.PrivateKey, c.NodeIdentity, http.MethodPost, heartbeatPath, body, now)
+	if err != nil { return fmt.Errorf("sign heartbeat: %w", err) }
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+heartbeatPath, strings.NewReader(string(body)))
+	if err != nil { return fmt.Errorf("create heartbeat request: %w", err) }
+	req.Header.Set("Content-Type", "application/json")
+	if err := proof.Apply(req, c.NodeIdentity); err != nil { return err }
+	client := c.HTTPClient
+	if client == nil { client = &http.Client{Timeout: 15 * time.Second} }
+	response, err := client.Do(req)
+	if err != nil { return fmt.Errorf("send runtime heartbeat: %w", err) }
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+	if err != nil { return fmt.Errorf("read heartbeat response: %w", err) }
+	if len(responseBody) > 4096 { return errors.New("heartbeat response exceeds the 4 KiB limit") }
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("heartbeat API returned HTTP %d", response.StatusCode)
+	}
+	return nil
 }
 
 func (c *Client) Poll(ctx context.Context) (Snapshot, error) {

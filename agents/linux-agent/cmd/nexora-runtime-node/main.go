@@ -116,6 +116,9 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	poll := func() error {
+		if err := client.Heartbeat(ctx, "runtime-node"); err != nil {
+			return fmt.Errorf("runtime heartbeat: %w", err)
+		}
 		snapshot, err := client.Poll(ctx)
 		if err != nil { return err }
 		if snapshot.ExecutionEnabled || snapshot.CommandsIncluded || snapshot.SecretsIncluded {

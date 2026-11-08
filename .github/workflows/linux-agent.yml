@@ -35,6 +35,14 @@ jobs:
         run: go test ./...
       - name: Race tests
         run: go test -race ./...
+      - name: Install Nginx for isolated serving integration test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx
+      - name: Verify real Nginx release switching and PHP isolation
+        env:
+          NEXORA_NGINX_INTEGRATION: "1"
+        run: go test ./internal/staticvhost -run '^TestNginxServesAtomicReleaseSwitch$' -count=1 -v
       - name: Vet
         run: go vet ./...
       - name: Build
@@ -44,14 +52,17 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-publisher ./cmd/nexora-static-publisher
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provisiond ./cmd/nexora-provisiond
+          go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
       - name: Verify CLI
         run: /tmp/nexora-agent version
       - name: Verify provisioning systemd unit
         run: |
           sudo install -D -o root -g root -m 0755 /tmp/nexora-provisiond /usr/local/sbin/nexora-provisiond
+          sudo install -D -o root -g root -m 0755 /tmp/nexora-static-vhostd /usr/local/sbin/nexora-static-vhostd
+          sudo install -D -o root -g root -m 0644 systemd/nexora-static-vhostd.service /etc/systemd/system/nexora-static-vhostd.service
           sudo install -D -o root -g root -m 0755 /tmp/nexora-runtime-node /usr/local/bin/nexora-runtime-node
           sudo install -D -o root -g root -m 0755 /tmp/nexora-static-publisher /usr/local/bin/nexora-static-publisher
-          systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service systemd/nexora-static-publisher.service
+          systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service systemd/nexora-static-publisher.service systemd/nexora-static-vhostd.service
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh

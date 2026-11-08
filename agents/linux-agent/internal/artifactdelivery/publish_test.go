@@ -35,7 +35,7 @@ func releaseArchive(t *testing.T) []byte {
 	gz := gzip.NewWriter(&buffer)
 	tw := tar.NewWriter(gz)
 	content := []byte("<h1>Published by Nexora</h1>")
-	if err := tw.WriteHeader(&tar.Header{Name: "public/index.html", Mode: 0644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+	if err := tw.WriteHeader(&tar.Header{Name: "index.html", Mode: 0644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tw.Write(content); err != nil { t.Fatal(err) }
@@ -56,6 +56,8 @@ func envelopeFor(t *testing.T, key *rsa.PrivateKey, expected deployenvelope.Expe
 		"project_id": expected.ProjectID,
 		"deployment_id": expected.DeploymentID,
 		"hosting_account_id": expected.HostingAccountID,
+		"domain_id": expected.DomainID,
+		"hostname": expected.Hostname,
 		"repository_id": expected.RepositoryID,
 		"commit_sha": expected.CommitSHA,
 		"artifact_sha256": hex.EncodeToString(digest[:]),
@@ -86,6 +88,8 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 		ProjectID: "project_test",
 		DeploymentID: "deployment_test",
 		HostingAccountID: "hosting_test",
+		DomainID: "domain_test",
+		Hostname: "www.example.test",
 		RepositoryID: "123456789",
 		CommitSHA: "0123456789abcdef0123456789abcdef01234567",
 	}
@@ -177,11 +181,17 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	}
 	result, err := FetchAndPublish(context.Background(), config, expected.DeploymentID)
 	if err != nil { t.Fatal(err) }
-	if !activationReported { t.Fatal("release activation acknowledgement was not submitted") }
-	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) {
+	if activationReported { t.Fatal("release activation was acknowledged before the serving boundary completed") }
+	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) || result.SignedEnvelope != token {
 		t.Fatalf("unexpected publication result: %+v", result)
 	}
-	published, err := os.ReadFile(filepath.Join(base,"releases",expected.DeploymentID,"public","index.html"))
+	if err := artifactclient.ReportActivated(context.Background(), server.Client(), config.ArtifactClient, artifactclient.ActivationReport{
+		DeploymentID: result.DeploymentID, ReleaseID: result.ReleaseID, ArtifactSHA256: result.ArtifactSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !activationReported { t.Fatal("explicit post-publication activation acknowledgement was not submitted") }
+	published, err := os.ReadFile(filepath.Join(base,"releases",expected.DeploymentID,"index.html"))
 	if err != nil { t.Fatal(err) }
 	if string(published) != "<h1>Published by Nexora</h1>" { t.Fatalf("unexpected content: %q", published) }
 	link, err := os.Readlink(filepath.Join(base,"current"))

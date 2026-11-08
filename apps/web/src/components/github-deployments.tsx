@@ -8,6 +8,7 @@ type Connection = { login: string; scopes: string; connectedAt: string } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
+type Deployment = { id: string; commitSha: string; branch: string; triggerType: string; status: string; commitMessage: string | null; deploymentUrl: string | null; logExcerpt: string | null; requestedAt: string; startedAt: string | null; finishedAt: string | null };
 
 type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
 type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
@@ -185,12 +186,13 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   </div>;
 }
 
-export default function GithubDeployments() {
+export default function GithubDeployments({ customerMode = false }: { customerMode?: boolean } = {}) {
   const [connection, setConnection] = useState<Connection>(null);
   const [connected, setConnected] = useState(false);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [deploymentsByProject, setDeploymentsByProject] = useState<Record<string, Deployment[]>>({});
   const [selectedRepository, setSelectedRepository] = useState("");
   const [hostingAccountId, setHostingAccountId] = useState("");
   const [branch, setBranch] = useState("main");
@@ -209,7 +211,7 @@ export default function GithubDeployments() {
     try {
       const [connectionResponse, accountsResponse, projectsResponse] = await Promise.all([
         fetch("/api/control/github/connection", { cache: "no-store" }),
-        fetch("/api/control/hosting-accounts", { cache: "no-store" }),
+        fetch(customerMode ? "/api/control/customer/hosting-accounts" : "/api/control/hosting-accounts", { cache: "no-store" }),
         fetch("/api/control/github/projects", { cache: "no-store" }),
       ]);
       const [connectionData, accountsData, projectsData] = await Promise.all([connectionResponse.json(), accountsResponse.json(), projectsResponse.json()]);
@@ -218,10 +220,18 @@ export default function GithubDeployments() {
       if (!projectsResponse.ok) throw new Error(projectsData.message ?? "Unable to load linked repositories.");
       setConnected(Boolean(connectionData.connected)); setConnection(connectionData.connection ?? null);
       setAccounts((accountsData.accounts ?? []).filter((account: Account) => account.status === "ACTIVE"));
-      setProjects(projectsData.projects ?? []);
+      const linkedProjects: Project[] = projectsData.projects ?? [];
+      const deploymentResults = await Promise.all(linkedProjects.map(async (project) => {
+        const response = await fetch(`/api/control/github/projects/${project.id}/deployments`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? `Unable to load deployment history for ${project.repositoryFullName}.`);
+        return [project.id, (data.deployments ?? []) as Deployment[]] as const;
+      }));
+      setProjects(linkedProjects);
+      setDeploymentsByProject(Object.fromEntries(deploymentResults));
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load GitHub deployment settings."); }
     finally { setLoading(false); }
-  }, []);
+  }, [customerMode]);
 
   const loadRepositories = useCallback(async () => {
     if (!connected) return;
@@ -239,10 +249,10 @@ export default function GithubDeployments() {
   useEffect(() => { if (connected) void loadRepositories(); }, [connected, loadRepositories]);
   useEffect(() => {
     const status = new URLSearchParams(window.location.search).get("github");
-    if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", "/github-deployments"); void load(); }
-    else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", "/github-deployments"); }
-    else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", "/github-deployments"); }
-  }, [load]);
+    if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
+    else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
+    else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
+  }, [load, customerMode]);
 
   async function connectGithub() {
     setBusy(true); setError("");
@@ -285,19 +295,19 @@ export default function GithubDeployments() {
 
   return <main className="min-h-screen bg-[#f4f6fb]">
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-[1500px] items-center gap-3 px-5 py-5">
-      <Link href="/" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
+      <Link href={customerMode ? "/customer" : "/"} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
       <span className="grid h-10 w-10 place-items-center rounded-xl bg-slate-950 text-white"><Github size={20}/></span>
-      <div><p className="font-semibold text-slate-950">GitHub deployments</p><p className="text-xs text-slate-500">Connect repositories and configure website builds</p></div>
+      <div><p className="font-semibold text-slate-950">{customerMode ? "Nexora Deploy" : "GitHub deployments"}</p><p className="text-xs text-slate-500">{customerMode ? "Projects and Git-based website setup" : "Connect repositories and configure website builds"}</p></div>
     </div></header>
     <section className="mx-auto max-w-[1100px] space-y-6 px-5 py-8">
-      <div><p className="text-sm font-medium text-blue-700">Developer workflow</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Deploy from GitHub</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Link a repository to an active Nexora hosting account. Choose the production branch and static build output. Build execution will become available after the isolated build worker is installed.</p></div>
+      <div><p className="text-sm font-medium text-blue-700">{customerMode ? "Nexora Deploy · Projects" : "Developer workflow"}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">{customerMode ? "Deploy your website" : "Deploy from GitHub"}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Link a repository to an active Nexora hosting account. Choose the production branch and static build output. Builds will become available after the GitHub-hosted workflow and isolated static publisher pass platform acceptance.</p></div>
       {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
       {notice && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</div>}
       {loading ? <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-8 text-sm text-slate-500"><Loader2 className="animate-spin" size={18}/> Loading GitHub settings…</div> : <>
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-3"><span className="rounded-xl bg-slate-100 p-3 text-slate-800"><Github size={22}/></span><div><h2 className="font-semibold text-slate-950">GitHub account</h2><p className="mt-1 text-sm text-slate-500">Authorize the Nexora GitHub App to access repositories you select.</p></div></div>
             {connected ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700"><CheckCircle2 size={14}/> Connected</span> : <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">Not connected</span>}</div>
-          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div><button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button></div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
+          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div>{!customerMode && <button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button>}</div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
           <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-slate-500"><ShieldCheck size={15} className="mt-0.5 shrink-0"/> GitHub App permissions are configured by Nexora. Tokens are encrypted before storage and are never sent to the browser.</p>
         </div>
         {connected && <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -314,10 +324,19 @@ export default function GithubDeployments() {
           {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
-          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><RuntimeProjectSettings projectId={project.id}/></div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
+          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><div className="border-t border-slate-100 px-6 py-4">
+              <div className="mb-3 flex items-center justify-between gap-3"><p className="text-xs font-semibold text-slate-700">Deployment history</p><span className="text-[11px] text-slate-400">{(deploymentsByProject[project.id] ?? []).length} records</span></div>
+              {(deploymentsByProject[project.id] ?? []).length ? <div className="space-y-3">{(deploymentsByProject[project.id] ?? []).map(deployment => <div key={deployment.id} className="rounded-lg border border-slate-200 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-slate-800">{deployment.status.replaceAll("_", " ")}</span><span className="text-[11px] text-slate-500">{deployment.requestedAt ? new Date(deployment.requestedAt).toLocaleString() : "Time unavailable"}</span></div>
+                <p className="mt-1 text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType}</p>
+                {deployment.commitMessage && <p className="mt-1 text-xs text-slate-500">{deployment.commitMessage}</p>}
+                {deployment.deploymentUrl && <a href={deployment.deploymentUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex text-xs font-medium text-blue-700 hover:underline">Open deployment URL</a>}
+                {deployment.logExcerpt && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium text-slate-600">View latest log excerpt</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-[11px] text-slate-100">{deployment.logExcerpt}</pre></details>}
+              </div>)}</div> : <p className="text-xs text-slate-500">No deployment records yet.</p>}
+            </div>{!customerMode && <RuntimeProjectSettings projectId={project.id}/ >}</div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
         </div>
       </>}
-      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback will remain disabled until Nexora installs and verifies the isolated rootless build worker.</p></div>
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback remain disabled until the GitHub-hosted build workflow and a separately enrolled, isolated static publisher pass end-to-end acceptance tests.</p></div>
       <p className="text-xs text-slate-400">Repository links are saved to the current workspace. <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">Manage GitHub App installations <ExternalLink size={11}/></a></p>
     </section>
   </main>;

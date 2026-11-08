@@ -20,6 +20,8 @@ func testExpected() Expected {
 		ProjectID: "project_123",
 		DeploymentID: "deployment_123",
 		HostingAccountID: "account_123",
+		DomainID: "domain_123",
+		Hostname: "www.example.test",
 		RepositoryID: "123456789",
 		CommitSHA: strings.Repeat("a", 40),
 	}
@@ -44,6 +46,7 @@ func validClaims(expected Expected, now time.Time) Claims {
 		Issuer: expected.Issuer, Audience: expected.Audience,
 		OrganizationID: expected.OrganizationID, ProjectID: expected.ProjectID,
 		DeploymentID: expected.DeploymentID, HostingAccountID: expected.HostingAccountID,
+		DomainID: expected.DomainID, Hostname: expected.Hostname,
 		RepositoryID: expected.RepositoryID, CommitSHA: expected.CommitSHA,
 		ArtifactSHA256: strings.Repeat("b", 64), ArtifactBytes: 1024,
 		JWTID: strings.Repeat("c", 32), IssuedAt: now.Unix(), ExpiresAt: now.Add(4*time.Minute).Unix(),
@@ -152,3 +155,25 @@ func TestVerifySignedReturnsTrustedIdentityForLocalAuthorization(t *testing.T) {
 	}
 }
 
+
+func TestVerifyRejectsDomainRebindingAndMalformedHostname(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil { t.Fatal(err) }
+	now := time.Unix(1_800_000_000, 0)
+	expected := testExpected()
+	for name, mutate := range map[string]func(*Claims){
+		"another domain id": func(c *Claims) { c.DomainID = "domain_other" },
+		"another hostname": func(c *Claims) { c.Hostname = "attacker.example.test" },
+		"hostname injection": func(c *Claims) { c.Hostname = "example.test;return 200" },
+		"uppercase hostname": func(c *Claims) { c.Hostname = "WWW.EXAMPLE.TEST" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			claims := validClaims(expected, now)
+			mutate(&claims)
+			token := signTestToken(t, key, claims)
+			if _, err := Verify(token, map[string]*rsa.PublicKey{"test-key-1": &key.PublicKey}, expected, now); err == nil {
+				t.Fatal("Verify accepted a rebound or malformed domain")
+			}
+		})
+	}
+}

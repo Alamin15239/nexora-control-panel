@@ -79,6 +79,8 @@ type DeploymentEnvelopeInput = {
   projectId: string;
   deploymentId: string;
   hostingAccountId: string;
+  domainId: string;
+  hostname: string;
   repositoryId: string;
   commitSha: string;
   artifactSha256: string;
@@ -98,8 +100,12 @@ async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeIn
       !Number.isSafeInteger(input.artifactBytes) || input.artifactBytes < 1 || input.artifactBytes > 100 * 1024 * 1024) {
     throw new Error("Deployment envelope artifact claims are invalid");
   }
-  for (const value of [input.organizationId, input.projectId, input.deploymentId, input.hostingAccountId]) {
+  for (const value of [input.organizationId, input.projectId, input.deploymentId, input.hostingAccountId, input.domainId]) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("Deployment envelope identity is invalid");
+  }
+  if (input.hostname !== input.hostname.toLowerCase() || input.hostname.length > 253 ||
+      !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(input.hostname)) {
+    throw new Error("Deployment envelope hostname is invalid");
   }
   if (!/^[1-9][0-9]{0,19}$/.test(input.repositoryId)) throw new Error("Deployment repository ID is invalid");
 
@@ -111,6 +117,8 @@ async function signDeploymentEnvelope(env: Bindings, input: DeploymentEnvelopeIn
     project_id: input.projectId,
     deployment_id: input.deploymentId,
     hosting_account_id: input.hostingAccountId,
+    domain_id: input.domainId,
+    hostname: input.hostname,
     repository_id: input.repositoryId,
     commit_sha: input.commitSha,
     artifact_sha256: input.artifactSha256,
@@ -323,6 +331,8 @@ app.use("/v1/*", async (c, next) => {
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
     path === "/v1/github/callback" ||
+    path === "/v1/github/connection" || path === "/v1/github/connect" ||
+    path === "/v1/github/repositories" || path === "/v1/github/projects" ||
     path.startsWith("/v1/github/deployments/")
   ) {
     await next();
@@ -1279,10 +1289,12 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
     `SELECT d.id AS deploymentId, d.organization_id AS organizationId, d.project_id AS projectId,
             d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes,
             d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId,
-            p.github_repository_id AS repositoryId
+            dom.id AS domainId, lower(dom.name) AS hostname, p.github_repository_id AS repositoryId
      FROM github_deployments d
      JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id
-     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id
+     JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = d.organization_id AND h.status = 'ACTIVE'
+     JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = h.id
+                                  ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1)
      WHERE d.id = ? AND d.organization_id = ? AND h.server_id = ?
        AND d.status = 'building' AND d.artifact_key IS NOT NULL
        AND d.artifact_bytes IS NOT NULL AND d.artifact_sha256 IS NOT NULL
@@ -1296,6 +1308,8 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
     artifactBytes: number;
     artifactSha256: string;
     hostingAccountId: string;
+    domainId: string;
+    hostname: string;
     repositoryId: string;
   }>();
   if (!deployment) return c.json({ message: "No staged artifact is available for this server deployment." }, 404);
@@ -1321,6 +1335,8 @@ app.get("/v1/agent/deployments/:deploymentId/artifact", async (c) => {
       projectId: deployment.projectId,
       deploymentId: deployment.deploymentId,
       hostingAccountId: deployment.hostingAccountId,
+      domainId: deployment.domainId,
+      hostname: deployment.hostname,
       repositoryId: deployment.repositoryId,
       commitSha: deployment.commitSha,
       artifactSha256: deployment.artifactSha256,
@@ -3778,12 +3794,12 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
   return data.token;
 }
 
-function githubDashboardRedirect(env: Bindings, status: string): string {
+function githubDashboardRedirect(env: Bindings, status: string, customer = false): string {
   const base = env.DASHBOARD_URL ?? "";
   let url: URL;
   try { url = new URL(base); } catch { throw new Error("Dashboard URL is not configured"); }
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Dashboard URL must be an HTTPS origin");
-  url.pathname = "/github-deployments";
+  url.pathname = customer ? "/customer/deploy" : "/github-deployments";
   url.search = new URLSearchParams({ github: status }).toString();
   url.hash = "";
   return url.toString();
@@ -3812,7 +3828,7 @@ app.get("/v1/github/connection", async (c) => {
 app.post("/v1/github/connect", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) {
     return c.json({ message: "GitHub App credentials, callback URL, and token encryption key must be configured first." }, 503);
   }
@@ -3833,24 +3849,34 @@ app.post("/v1/github/connect", async (c) => {
 });
 
 app.get("/v1/github/callback", async (c) => {
-  const providerError = c.req.query("error");
-  if (providerError) {
-    try { return c.redirect(githubDashboardRedirect(c.env, "denied")); }
-    catch { return c.text("GitHub connection was not completed.", 503); }
-  }
-  const code = c.req.query("code") ?? "";
   const state = c.req.query("state") ?? "";
-  if (!/^[a-f0-9]{64}$/i.test(state) || !/^[A-Za-z0-9.\-_]{1,200}$/.test(code)) return c.text("Invalid GitHub OAuth callback.", 400);
-  if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_APP_CLIENT_SECRET || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) return c.text("GitHub OAuth is not configured.", 503);
+  if (!/^[a-f0-9]{64}$/i.test(state)) return c.text("Invalid GitHub OAuth callback.", 400);
   const stateHash = await sha256(state);
   const pending = await c.env.DB.prepare(
     "SELECT organization_id, user_id FROM github_oauth_states WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ? LIMIT 1",
   ).bind(stateHash, new Date().toISOString()).first<{ organization_id: string; user_id: string }>();
   if (!pending) return c.text("GitHub authorization state is invalid or expired.", 400);
-  const consumed = await c.env.DB.prepare(
-    "UPDATE github_oauth_states SET consumed_at = ? WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ?",
-  ).bind(new Date().toISOString(), stateHash, new Date().toISOString()).run();
-  if ((consumed.meta?.changes ?? 0) !== 1) return c.text("GitHub authorization state has already been used.", 400);
+  const platformMembership = await c.env.DB.prepare(
+    "SELECT user_id FROM platform_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(pending.user_id).first<{ user_id: string }>();
+  const customerRedirect = !platformMembership;
+  const consumeState = async () => {
+    const now = new Date().toISOString();
+    const consumed = await c.env.DB.prepare(
+      "UPDATE github_oauth_states SET consumed_at = ? WHERE state_hash = ? AND consumed_at IS NULL AND expires_at > ?",
+    ).bind(now, stateHash, now).run();
+    return (consumed.meta?.changes ?? 0) === 1;
+  };
+  const providerError = c.req.query("error");
+  if (providerError) {
+    if (!(await consumeState())) return c.text("GitHub authorization state has already been used.", 400);
+    try { return c.redirect(githubDashboardRedirect(c.env, "denied", customerRedirect)); }
+    catch { return c.text("GitHub connection was not completed.", 503); }
+  }
+  const code = c.req.query("code") ?? "";
+  if (!/^[A-Za-z0-9._-]{1,200}$/.test(code)) return c.text("Invalid GitHub OAuth callback.", 400);
+  if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_APP_CLIENT_SECRET || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) return c.text("GitHub OAuth is not configured.", 503);
+  if (!(await consumeState())) return c.text("GitHub authorization state has already been used.", 400);
   try {
     const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
@@ -3881,9 +3907,9 @@ app.get("/v1/github/callback", async (c) => {
       tokenExpiresAt, refreshTokenExpiresAt, tokenData.scope ?? "GitHub App permissions").run();
     await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, metadata) VALUES (?, ?, ?, 'github.connected', 'github_connection', ?)")
       .bind(crypto.randomUUID(), pending.organization_id, pending.user_id, JSON.stringify({ githubLogin: githubUser.login })).run();
-    return c.redirect(githubDashboardRedirect(c.env, "connected"));
+    return c.redirect(githubDashboardRedirect(c.env, "connected", customerRedirect));
   } catch {
-    try { return c.redirect(githubDashboardRedirect(c.env, "error")); }
+    try { return c.redirect(githubDashboardRedirect(c.env, "error", customerRedirect)); }
     catch { return c.text("GitHub connection failed. Check server configuration and try again.", 502); }
   }
 });
@@ -3891,7 +3917,7 @@ app.get("/v1/github/callback", async (c) => {
 app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   const connection = await c.env.DB.prepare(
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
@@ -3923,7 +3949,7 @@ app.get("/v1/github/repositories", async (c) => {
 app.post("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization owner or administrator access required" }, 403);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
   const hostingAccountId = typeof input.hostingAccountId === "string" ? input.hostingAccountId : "";
@@ -3937,7 +3963,11 @@ app.post("/v1/github/projects", async (c) => {
   if (!hostingAccountId || !Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(rootDirectory) || rootDirectory.startsWith("/") || rootDirectory.split("/").includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(outputDirectory) || outputDirectory.startsWith("/") || outputDirectory.split("/").includes("..") || !["auto", "static", "vite", "react", "vue", "astro", "next-static"].includes(framework)) {
     return c.json({ message: "Invalid repository, branch, directory, framework, or hosting account configuration." }, 400);
   }
-  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>();
+  const account = identity.platformRole
+    ? await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1").bind(hostingAccountId, identity.organizationId).first<{ id: string }>()
+    : await c.env.DB.prepare(
+        `SELECT a.id FROM hosting_accounts a JOIN hosting_account_memberships m ON m.hosting_account_id = a.id AND m.organization_id = a.organization_id WHERE a.id = ? AND a.organization_id = ? AND a.status = 'ACTIVE' AND m.user_id = ? AND m.status = 'ACTIVE' AND m.role IN ('ACCOUNT_OWNER', 'ACCOUNT_ADMIN', 'ACCOUNT_DEVELOPER') LIMIT 1`,
+      ).bind(hostingAccountId, identity.organizationId, identity.id).first<{ id: string }>();
   if (!account) return c.json({ message: "Choose an active hosting account in this workspace." }, 404);
   const connection = await c.env.DB.prepare("SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1").bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect GitHub first." }, 409);
@@ -3965,12 +3995,13 @@ app.post("/v1/github/projects", async (c) => {
 app.get("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  const result = await c.env.DB.prepare(
-    `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName,
-            production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory,
-            framework, auto_deploy AS autoDeploy, status, created_at AS createdAt
-     FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
-  ).bind(identity.organizationId).all();
+  const result = identity.platformRole
+    ? await c.env.DB.prepare(
+        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
+      ).bind(identity.organizationId).all()
+    : await c.env.DB.prepare(
+        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
+      ).bind(identity.organizationId, identity.id).all();
   return c.json({ projects: result.results ?? [] });
 });
 
@@ -4269,9 +4300,8 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
       ).bind(crypto.randomUUID(), JSON.stringify({ bytes: receivedBytes }), token.deploymentId,
         token.organizationId, artifactSHA256, receivedBytes),
     ]);
-    if (Number(updates[0]?.meta?.changes ?? 0) !== 1) {
-      await c.env.ARTIFACTS.delete(objectKey);
-      return c.json({ message: "Deployment is no longer accepting an artifact." }, 409);
+    if (updates.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("Artifact metadata, application release state, and release audit event were not committed together");
     }
     return c.json({
       received: true,
@@ -4284,17 +4314,20 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
     await c.env.ARTIFACTS.delete(objectKey).catch(() => undefined);
     await c.env.DB.batch([
       c.env.DB.prepare(
-        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'Artifact upload failed.' WHERE id = ? AND organization_id = ? AND status = 'building'",
+        "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), artifact_key = NULL, " +
+        "artifact_bytes = NULL, artifact_sha256 = NULL, log_excerpt = 'Artifact upload failed.' " +
+        "WHERE id = ? AND organization_id = ? AND status = 'building'",
       ).bind(token.deploymentId, token.organizationId),
       c.env.DB.prepare(
         "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'artifact_upload_failed', " +
         "failure_message_redacted = 'Build artifact upload failed.', updated_at = datetime('now') " +
-        "WHERE deployment_id = ? AND organization_id = ? AND state = 'building'",
+        "WHERE deployment_id = ? AND organization_id = ? AND state IN ('building','artifact_uploaded')",
       ).bind(token.deploymentId, token.organizationId),
       c.env.DB.prepare(
         "INSERT INTO application_release_events " +
         "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
-        "SELECT ?, organization_id, id, 'building', 'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
+        "SELECT ?, organization_id, id, CASE WHEN artifact_digest IS NULL THEN 'building' ELSE 'artifact_uploaded' END, " +
+        "'failed', 'control_plane', NULL, 'artifact_upload_failed', '{}' " +
         "FROM application_releases WHERE deployment_id = ? AND organization_id = ? AND state = 'failed' " +
         "AND failure_code = 'artifact_upload_failed' " +
         "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'artifact_upload_failed')",
@@ -4331,6 +4364,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "p.isolation_level AS isolationLevel, " +
     "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key IS NOT NULL ORDER BY n.last_heartbeat_at DESC, n.id LIMIT 1) AS assignedNodeId " +
     "FROM application_project_settings s " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
@@ -4341,7 +4375,9 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
     assignedNodeId: string | null;
   }>();
-  if (runtimeAssignment && (
+  // Fail closed: a missing settings row is not permission to dispatch a build.
+  // Every deployment must be bound to an enabled runtime and an approved isolated pool/node.
+  if (!runtimeAssignment || (
     runtimeAssignment.runtimeEnabled !== 1 ||
     !runtimeAssignment.nodePoolId ||
     runtimeAssignment.poolStatus !== "ready" ||
@@ -4349,7 +4385,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     !runtimeAssignment.assignedNodeId
   )) {
     return c.json({
-      message: "Application deployment is not admitted: the runtime must be enabled and assigned to a ready isolated pool with an online runtime node.",
+      message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
   }
 
@@ -4359,7 +4395,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
-  const applicationReleaseId = runtimeAssignment ? crypto.randomUUID() : null;
+  const applicationReleaseId = crypto.randomUUID();
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
@@ -4539,8 +4575,16 @@ app.put("/v1/applications/projects/:projectId/settings", async (c) => {
      FROM github_projects p
      JOIN hosting_accounts h ON h.id = p.hosting_account_id AND h.organization_id = p.organization_id
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(projectId, identity.organizationId).first<{
+     WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+           AND m.role IN ('ACCOUNT_OWNER', 'ACCOUNT_ADMIN')
+       ))
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{
     id: string; appCpuMillis: number; appMemoryMiB: number;
     appDiskMiB: number; appProcessLimit: number; accountDiskLimitBytes: number;
   }>();
@@ -4733,8 +4777,15 @@ app.get("/v1/applications/projects/:projectId/usage", async (c) => {
      JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = p.organization_id
      LEFT JOIN application_usage_periods u
        ON u.organization_id = p.organization_id AND u.project_id = p.id AND u.period_start = ?
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(periodStart, periodStart, projectId, identity.organizationId).first<{
+     WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+       ))
+     LIMIT 1`,
+  ).bind(periodStart, periodStart, projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{
     id: string; buildMinutesLimit: number; buildSecondsUsed: number; hasUsageEvents: number;
   }>();
   if (!row) return c.json({ message: "GitHub project not found." }, 404);
@@ -4763,7 +4814,8 @@ app.get("/internal/v1/operator/application-node-pools", async (c) => {
     "SELECT p.id, p.name, p.environment, p.region, p.runtime_engine AS runtimeEngine, " +
     "p.isolation_level AS isolationLevel, " +
     "(SELECT COUNT(*) FROM application_nodes n WHERE n.node_pool_id = p.id AND n.node_role = 'runtime' " +
-    "AND n.status = 'online' AND n.revoked_at IS NULL AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
     "FROM application_node_pools p WHERE p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "ORDER BY p.environment, p.region, p.name",
   ).all<{
@@ -4823,6 +4875,7 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
     "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key IS NOT NULL) LIMIT 1",
   ).bind(body.nodePoolId).first<{ id: string }>();
   if (!pool) {
@@ -5006,40 +5059,61 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
   const nonce = c.req.header("x-nexora-node-nonce") ?? "";
-  const signature = c.req.header("x-nexora-node-signature") ?? "";
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity)) {
-    return c.json({ message: "Node identity is required." }, 401);
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  const path = new URL(c.req.url).pathname;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid application-node heartbeat proof." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Heartbeat requests must use application/json." }, 415);
   }
   const rawBody = await c.req.text();
-  if (rawBody.length > 2048) return c.json({ message: "Request body is too large." }, 413);
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Heartbeat body is empty or exceeds 2048 bytes." }, 413);
+  }
   const node = await c.env.DB.prepare(
     "SELECT n.id, n.signing_public_key AS signingPublicKey FROM application_nodes n " +
     "JOIN application_node_pools p ON p.id = n.node_pool_id " +
-    "WHERE n.node_identity = ? AND n.status IN ('online', 'draining') AND p.status = 'ready' " +
-    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+    "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
-  if (!node || !await verifyNodeSignature(node.signingPublicKey, timestamp, nonce, rawBody, signature)) {
-    return c.json({ message: "Invalid node identity or signature." }, 401);
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
+  )) {
+    return c.json({ message: "Runtime node identity or heartbeat signature is not authorized." }, 401);
   }
   let input: unknown;
-  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid JSON body." }, 400); }
-  if (!input || typeof input !== "object" || Array.isArray(input)) return c.json({ message: "A JSON object is required." }, 400);
+  try { input = JSON.parse(rawBody); } catch { return c.json({ message: "Invalid heartbeat JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
   const body = input as Record<string, unknown>;
   if (Object.keys(body).some((key) => key !== "agentVersion") ||
-      typeof body.agentVersion !== "string" || !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
-    return c.json({ message: "Invalid heartbeat payload." }, 400);
+      typeof body.agentVersion !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/.test(body.agentVersion)) {
+    return c.json({ message: "Invalid runtime heartbeat payload." }, 400);
   }
   const nonceResult = await c.env.DB.prepare(
     "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
     "VALUES (?, ?, datetime('now', '+10 minutes'))",
   ).bind(node.id, nonce).run();
-  if (Number(nonceResult.meta?.changes ?? 0) !== 1) return c.json({ message: "Request nonce has already been used." }, 409);
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime heartbeat nonce has already been used." }, 409);
+  }
   const result = await c.env.DB.prepare(
     "UPDATE application_nodes SET agent_version = ?, last_heartbeat_at = datetime('now'), " +
     "last_signature_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE id = ? AND status IN ('online', 'draining')",
-  ).bind(body.agentVersion, node.id).run();
-  if (Number(result.meta?.changes ?? 0) !== 1) return c.json({ message: "Node is no longer authorized." }, 409);
+    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+    "AND revoked_at IS NULL AND signing_public_key = ? " +
+    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+  ).bind(body.agentVersion, node.id, nodeIdentity, node.signingPublicKey).run();
+  if (Number(result.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime node is no longer eligible to heartbeat." }, 409);
+  }
   return c.json({ accepted: true, nodeIdentity, status: "heartbeat_recorded", executionEnabled: false });
 });
 
@@ -5061,7 +5135,8 @@ app.get("/internal/v1/application-nodes/desired-state", async (c) => {
     "SELECT n.id, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' " +
     "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5139,7 +5214,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5157,19 +5233,28 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   const rows = await c.env.DB.prepare(
     "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
-    "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha " +
+    "dom.id AS domainId, lower(dom.name) AS hostname, " +
+    "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha, " +
+    "COALESCE(s.health_check_path, '/') AS healthCheckPath " +
     "FROM application_releases r " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
+    "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
+    "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "JOIN application_nodes n ON n.id = r.assigned_node_id AND n.node_pool_id = r.node_pool_id " +
+    "JOIN application_node_pools pool ON pool.id = n.node_pool_id " +
     "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? AND r.state = 'artifact_uploaded' " +
     "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
-    "AND n.status = 'online' AND n.revoked_at IS NULL ORDER BY r.requested_at LIMIT 10",
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND pool.status = 'ready' AND pool.isolation_level IN ('rootless','microvm') " +
+    "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     deploymentId: string; organizationId: string; projectId: string;
-    hostingAccountId: string; repositoryId: string; commitSha: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string;
   }>();
   await c.env.DB.prepare(
     "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
@@ -5242,7 +5327,8 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5276,9 +5362,12 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "r.artifact_digest AS releaseArtifactDigest, r.artifact_bytes AS releaseArtifactBytes, " +
     "d.commit_sha AS commitSha, d.artifact_key AS artifactKey, d.artifact_bytes AS artifactBytes, " +
     "d.artifact_sha256 AS artifactSha256, p.hosting_account_id AS hostingAccountId, " +
-    "p.github_repository_id AS repositoryId FROM application_releases r " +
+    "dom.id AS domainId, lower(dom.name) AS hostname, p.github_repository_id AS repositoryId FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
+    "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
+    "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
+    "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
@@ -5287,7 +5376,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     nodePoolId: string; state: string; releaseArtifactDigest: string | null;
     releaseArtifactBytes: number | null; commitSha: string; artifactKey: string | null;
     artifactBytes: number | null; artifactSha256: string | null;
-    hostingAccountId: string; repositoryId: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string;
   }>();
   if (!release) return c.json({ message: "No publishable release is assigned to this runtime node pool." }, 404);
   if (!release.artifactKey || !Number.isSafeInteger(release.artifactBytes) ||
@@ -5314,6 +5403,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     envelope = await signDeploymentEnvelope(c.env, {
       organizationId: release.organizationId, projectId: release.projectId,
       deploymentId: release.deploymentId, hostingAccountId: release.hostingAccountId,
+      domainId: release.domainId, hostname: release.hostname,
       repositoryId: release.repositoryId, commitSha: release.commitSha,
       artifactSha256: release.artifactSha256, artifactBytes: release.artifactBytes!,
     });
@@ -5324,8 +5414,12 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
   if (purpose === "publish" && release.state === "ready_to_publish") {
     const transition = await c.env.DB.prepare(
       "UPDATE application_releases SET state = 'publishing', started_at = COALESCE(started_at, datetime('now')), updated_at = datetime('now') " +
-      "WHERE id = ? AND state = 'ready_to_publish'",
-    ).bind(release.releaseId).run();
+      "WHERE id = ? AND state = 'ready_to_publish' AND node_pool_id = ? AND assigned_node_id = ? " +
+      "AND EXISTS (SELECT 1 FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+      "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+      "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+      "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+    ).bind(release.releaseId, release.nodePoolId, node.id, node.id, nodeIdentity, node.signingPublicKey).run();
     if (Number(transition.meta?.changes ?? 0) !== 1) {
       const latest = await c.env.DB.prepare("SELECT state FROM application_releases WHERE id = ? LIMIT 1")
         .bind(release.releaseId).first<{ state: string }>();
@@ -5334,9 +5428,18 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
       }
     }
   }
+  const stillEligible = await c.env.DB.prepare(
+    "SELECT n.id FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') LIMIT 1",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).first<{ id: string }>();
+  if (!stillEligible) return c.json({ message: "Runtime node or isolated pool became ineligible during artifact delivery." }, 409);
   await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status = 'online'",
-  ).bind(node.id).run();
+    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
+    "AND revoked_at IS NULL AND signing_public_key = ?",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
   return new Response(object.body, {
     status: 200,
     headers: {
@@ -5373,7 +5476,8 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5444,9 +5548,13 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
@@ -5550,7 +5658,8 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5616,9 +5725,13 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'health_checking', updated_at = datetime('now') " +
@@ -5698,7 +5811,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
-    "AND n.revoked_at IS NULL AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -5814,9 +5928,13 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   }
 
   const activeNodePredicate =
-    " AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
-    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
-    "AND n.signing_public_key = ?)";
+    " AND EXISTS (SELECT 1 FROM application_nodes n " +
+    "JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' " +
+    "AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.signing_public_key = ? AND p.status = 'ready' " +
+    "AND p.isolation_level IN ('rootless','microvm'))";
   const commonNodeArgs = [node.id, nodeIdentity, node.signingPublicKey];
   const statements = healthStatus === "healthy" ? [
     c.env.DB.prepare(
@@ -6049,8 +6167,14 @@ app.get("/v1/applications/projects/:projectId/settings", async (c) => {
        ON s.project_id = p.id AND s.organization_id = p.organization_id
      LEFT JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id
      WHERE p.id = ? AND p.organization_id = ?
+       AND (? = 1 OR EXISTS (
+         SELECT 1 FROM hosting_account_memberships m
+         WHERE m.hosting_account_id = p.hosting_account_id
+           AND m.organization_id = p.organization_id
+           AND m.user_id = ? AND m.status = 'ACTIVE'
+       ))
      LIMIT 1`,
-  ).bind(projectId, identity.organizationId).first<Record<string, unknown>>();
+  ).bind(projectId, identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<Record<string, unknown>>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   return c.json({
     project: { id: project.id, repositoryFullName: project.repositoryFullName },
@@ -6091,8 +6215,11 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const project = await c.env.DB.prepare(
-    "SELECT id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
-  ).bind(c.req.param("projectId"), identity.organizationId).first<{ id: string }>();
+    "SELECT p.id FROM github_projects p WHERE p.id = ? AND p.organization_id = ? " +
+    "AND (? = 1 OR EXISTS (SELECT 1 FROM hosting_account_memberships m " +
+    "WHERE m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id " +
+    "AND m.user_id = ? AND m.status = 'ACTIVE')) LIMIT 1",
+  ).bind(c.req.param("projectId"), identity.organizationId, identity.platformRole ? 1 : 0, identity.id).first<{ id: string }>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   const rows = await c.env.DB.prepare(
     `SELECT id, commit_sha AS commitSha, branch, trigger_type AS triggerType, status,

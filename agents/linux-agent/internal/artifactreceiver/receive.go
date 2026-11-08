@@ -52,6 +52,9 @@ type Result struct {
 	ArtifactBytes int64
 	Archive deployarchive.Result
 	AlreadyPublished bool
+	// SignedEnvelope is retained only in memory so the privileged vhost broker
+	// can independently verify the exact control-plane authorization.
+	SignedEnvelope string
 }
 
 const releaseManifestName = ".nexora-release.json"
@@ -146,6 +149,7 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 			ArtifactBytes: claims.ArtifactBytes,
 			Archive: archiveResult,
 			AlreadyPublished: true,
+			SignedEnvelope: request.Token,
 		}, nil
 	}
 
@@ -195,6 +199,7 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		ArtifactSHA256: digestHex,
 		ArtifactBytes: claims.ArtifactBytes,
 		Archive: extracted,
+		SignedEnvelope: request.Token,
 	}, nil
 }
 

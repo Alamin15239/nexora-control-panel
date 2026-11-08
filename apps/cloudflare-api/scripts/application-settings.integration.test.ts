@@ -10,6 +10,7 @@ type TestIdentity = {
   organizationName: string;
   organizationSlug: string;
   role: "OWNER" | "ADMIN" | "MEMBER";
+  platformRole?: string | null;
 };
 
 type SavedSettings = {
@@ -103,8 +104,19 @@ class TestD1 {
         }
         if (query.includes("FROM github_projects WHERE id = ? AND organization_id = ?")) {
           const [projectId, organizationId] = values;
-          return projectId === "project-a" && organizationId === db.projectOrganizationId
-            ? ({ id: "project-a" } as T) : null;
+          if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
+          if (query.includes("github_repository_id AS repositoryId")) {
+            return ({
+              id: "project-a",
+              repositoryId: "12345",
+              repositoryFullName: "Alamin15239/example-app",
+              installationId: "installation-a",
+              productionBranch: "main",
+              trustedWorkflowSha: "a".repeat(40),
+              status: "active",
+            } as T);
+          }
+          return ({ id: "project-a" } as T);
         }
         if (query.includes("FROM application_runtime_profiles WHERE id = ?")) {
           return values[0] === db.profile.id ? ({ ...db.profile } as T) : null;
@@ -297,10 +309,16 @@ const identity = (role: TestIdentity["role"], organizationId = "org-a"): TestIde
   organizationName: "Test Organization",
   organizationSlug: "test-org",
   role,
+  platformRole: null,
 });
 
 function environment(db: TestD1, operatorToken?: string) {
-  return { DB: db as unknown as D1Database, APPLICATION_NODE_OPERATOR_TOKEN: operatorToken };
+  return {
+    DB: db as unknown as D1Database,
+    APPLICATION_NODE_OPERATOR_TOKEN: operatorToken,
+    GITHUB_APP_ID: "test-app",
+    GITHUB_APP_PRIVATE_KEY: "test-private-key",
+  };
 }
 
 async function createNodeKeyPair() {
@@ -315,6 +333,31 @@ async function signedNodeRequest(body: unknown, privateKey: CryptoKey, nonce = "
   const rawBody = JSON.stringify(body);
   const message = new TextEncoder().encode(timestamp + "." + nonce + "." + rawBody);
   const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, message));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": "builder-a",
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+    body: rawBody,
+  });
+}
+
+async function signedApplicationNodeRequest(body: unknown, privateKey: CryptoKey, nonce: string, path: string) {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const rawBody = JSON.stringify(body);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
+  const digestHex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const canonical = [
+    "NEXORA-APPLICATION-NODE-V1", "builder-a", timestamp, nonce, "POST", path, digestHex,
+  ].join("\n");
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" }, privateKey, new TextEncoder().encode(canonical),
+  ));
   const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return new Request("https://api.test" + path, {
     method: "POST",
@@ -360,6 +403,45 @@ test("customer MEMBER identity cannot access WHM server inventory", async () => 
   const response = await worker.fetch(request("GET", "/v1/servers"), environment(db), {} as ExecutionContext);
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
+});
+
+test("customer OWNER identity cannot dispatch production deployments before platform enablement", async () => {
+  const db = new TestD1(identity("OWNER"));
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
+  assert.equal(db.writes, 0);
+});
+
+test("customer ADMIN identity cannot dispatch production deployments before platform enablement", async () => {
+  const db = new TestD1(identity("ADMIN"));
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
+  assert.equal(db.writes, 0);
+});
+
+test("platform deployment dispatch rejects projects with no runtime assignment", async () => {
+  const db = new TestD1(identity("OWNER"));
+  db.identity!.platformRole = "ADMIN";
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
+  });
+  assert.equal(db.writes, 0);
 });
 
 test("settings PUT rejects unauthenticated requests with 401", async () => {
@@ -608,14 +690,14 @@ test("per-node usage report rejects queued deployments", async () => {
 });
 
 
-test("signed node heartbeat updates agent version and accepts draining nodes", async () => {
+test("signed runtime heartbeat updates agent version for eligible online nodes", async () => {
   const db = new TestD1(null);
   const pair = await createNodeKeyPair();
   db.node.signingPublicKey = pair.publicKeyHex;
-  db.node.status = "draining";
+  db.node.status = "online";
   const response = await worker.fetch(
-    await signedNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
-      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    await signedApplicationNodeRequest({ agentVersion: "0.2.0" }, pair.privateKey, "7".repeat(32),
+      "/internal/v1/application-nodes/heartbeat"),
     environment(db), {} as ExecutionContext,
   );
   assert.equal(response.status, 200);
@@ -629,8 +711,8 @@ test("signed node heartbeat rejects unexpected fields", async () => {
   db.node.signingPublicKey = pair.publicKeyHex;
   db.node.status = "online";
   const response = await worker.fetch(
-    await signedNodeRequest({ agentVersion: "0.2.0", status: "online" }, pair.privateKey, "8".repeat(32),
-      String(Math.floor(Date.now() / 1000)), "/internal/v1/application-nodes/heartbeat"),
+    await signedApplicationNodeRequest({ agentVersion: "0.2.0", status: "online" }, pair.privateKey, "8".repeat(32),
+      "/internal/v1/application-nodes/heartbeat"),
     environment(db), {} as ExecutionContext,
   );
   assert.equal(response.status, 400);

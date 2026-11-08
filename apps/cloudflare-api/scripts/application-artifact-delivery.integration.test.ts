@@ -33,6 +33,8 @@ class ArtifactD1 {
     artifactBytes: artifactBytes.byteLength,
     artifactSha256: "",
     hostingAccountId: "hosting-a",
+    domainId: "domain-a",
+    hostname: "www.example.test",
     repositoryId: "123456789",
     healthCheckPath: "/ready",
     previousActiveReleaseId: "previous-release",
@@ -61,8 +63,10 @@ class ArtifactD1 {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
         if (query.includes("FROM application_nodes n")) {
-          const [identity] = values;
-          const valid = identity === db.node.nodeIdentity &&
+          const identity = query.includes("n.id = ? AND n.node_identity = ?")
+            ? values[1] : values[0];
+          const idMatches = !query.includes("n.id = ? AND n.node_identity = ?") || values[0] === db.node.id;
+          const valid = idMatches && identity === db.node.nodeIdentity &&
             db.node.status === "online" && db.node.role === "runtime" &&
             db.node.revokedAt === null && db.node.poolStatus === "ready" &&
             ["rootless", "microvm"].includes(db.node.isolationLevel) &&
@@ -419,7 +423,11 @@ test("runtime node receives a signed artifact for a release assigned to its pool
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("x-nexora-artifact-sha256"), await artifactDigestPromise);
-  assert.ok(response.headers.get("x-nexora-deployment-envelope"));
+  const envelope = response.headers.get("x-nexora-deployment-envelope");
+  assert.ok(envelope);
+  const claims = JSON.parse(atob(envelope!.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))) as Record<string, unknown>;
+  assert.equal(claims.domain_id, "domain-a");
+  assert.equal(claims.hostname, "www.example.test");
   assert.equal(response.headers.get("x-nexora-release-id"), "release-a");
   assert.equal(db.release.state, "publishing");
   assert.equal(db.lastSignatureUpdated, true);
