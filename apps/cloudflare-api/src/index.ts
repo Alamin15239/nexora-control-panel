@@ -1802,7 +1802,7 @@ app.get("/v1/hosting-plans", async (c) => {
   const result = await c.env.DB.prepare(
     `SELECT id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit,
             database_limit, mailbox_limit, app_cpu_millis, app_memory_mib,
-            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at
+            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at, price_sar_minor, billing_period, public_enabled
      FROM hosting_plans WHERE organization_id = ? ORDER BY created_at DESC`,
   ).bind(identity.organizationId).all<HostingPlanRow>();
   return c.json({ plans: result.results ?? [] });
