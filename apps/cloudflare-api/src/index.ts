@@ -1901,6 +1901,29 @@ app.delete("/v1/hosting-accounts/:id/memberships/:userId", async (c) => {
   return c.json({ success: true, message: "Customer access revoked for this hosting account." });
 });
 
+app.get("/v1/platform/customers", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  // Platform-wide customer data is restricted to the platform OWNER, not ordinary workspace admins.
+  if (identity.role !== "OWNER") return c.json({ message: "Platform owner access required." }, 403);
+
+  const result = await c.env.DB.prepare(
+    `SELECT u.id AS userId, u.email, u.display_name AS displayName,
+            u.status AS userStatus, u.created_at AS registeredAt,
+            o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
+            o.status AS organizationStatus, m.role AS organizationRole,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status != 'DELETED') AS hostingAccounts,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status = 'ACTIVE') AS activeHostingAccounts,
+            (SELECT COUNT(*) FROM hosting_accounts h WHERE h.organization_id = o.id AND h.status = 'PENDING') AS pendingHostingAccounts
+     FROM users u
+     JOIN memberships m ON m.user_id = u.id
+     JOIN organizations o ON o.id = m.organization_id
+     WHERE m.role = 'MEMBER'
+     ORDER BY u.created_at DESC, u.email COLLATE NOCASE`,
+  ).all();
+  return c.json({ customers: result.results ?? [] });
+});
+
 app.get("/v1/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
