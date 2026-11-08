@@ -24,6 +24,11 @@ type CommandRunner interface {
 
 type execRunner struct{}
 func (execRunner) Run(name string, args ...string) error {
+	allowed := (name == "/usr/sbin/nginx" && len(args) == 1 && args[0] == "-t") ||
+		(name == "/usr/bin/systemctl" && len(args) == 2 && args[0] == "reload" && args[1] == "nginx")
+	if !allowed {
+		return errors.New("static vhost installer command is not allowlisted")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Run()
