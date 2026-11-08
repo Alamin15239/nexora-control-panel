@@ -56,7 +56,7 @@ export default function UserManagementPage() {
           <button disabled={busyId === user.id} onClick={() => void removeUser(user)} className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"><UserX size={14}/>{busyId === user.id ? "Removing…" : "Remove from workspace"}</button>
         </div>)}</div>}
       </section>
-      <p className="text-xs leading-5 text-slate-400">The last active OWNER or ADMIN cannot be removed. To permanently erase a person's Nexora identity across all workspaces, use a separate platform-level identity deletion workflow.</p>
+      <p className="text-xs leading-5 text-slate-400">The last active OWNER or ADMIN cannot be removed. To permanently erase a person&apos;s Nexora identity across all workspaces, use a separate platform-level identity deletion workflow.</p>
     </section>
   </main>;
 }
