@@ -44,6 +44,15 @@ func main() {
 	if err := os.MkdirAll("/run/nexora-static-vhost", 0750); err != nil {
 		fatal("create broker runtime directory: %v", err)
 	}
+	runtimeInfo, err := os.Lstat("/run/nexora-static-vhost")
+	if err != nil {
+		fatal("inspect broker runtime directory: %v", err)
+	}
+	runtimeStat, ok := runtimeInfo.Sys().(*syscall.Stat_t)
+	if !ok || !runtimeInfo.IsDir() || runtimeInfo.Mode()&os.ModeSymlink != 0 ||
+		runtimeStat.Uid != 0 || runtimeInfo.Mode().Perm()&0022 != 0 {
+		fatal("broker runtime directory is not a trusted root-owned directory")
+	}
 	if err := os.Chown("/run/nexora-static-vhost", 0, int(gid)); err != nil {
 		fatal("set broker runtime directory ownership: %v", err)
 	}
