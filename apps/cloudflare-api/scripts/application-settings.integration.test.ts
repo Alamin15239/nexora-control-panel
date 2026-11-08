@@ -354,7 +354,7 @@ async function signedApplicationNodeRequest(body: unknown, privateKey: CryptoKey
   const digestHex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
   const canonical = [
     "NEXORA-APPLICATION-NODE-V1", "builder-a", timestamp, nonce, "POST", path, digestHex,
-  ].join("\\n");
+  ].join("\n");
   const signature = new Uint8Array(await crypto.subtle.sign(
     { name: "Ed25519" }, privateKey, new TextEncoder().encode(canonical),
   ));
