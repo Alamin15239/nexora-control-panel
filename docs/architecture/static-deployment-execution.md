@@ -163,3 +163,27 @@ The five-minute RS256 deployment envelope now binds `domain_id` and the canonica
 A new pure Go package, `internal/staticvhost`, renders a constrained static-only Nginx server block. It derives the document root from the validated hosting-account ID, hashes the immutable domain ID for a stable config filename, rejects hostname injection, disables directory listing, denies hidden files and PHP paths, and emits no FastCGI, proxy, include, alias, or customer-provided directives.
 
 **Important implementation boundary:** the renderer is not yet connected to the privileged provisioning IPC, does not install or atomically replace Nginx files, does not run `nginx -t` or reload Nginx, and does not establish Nginx read/traverse permissions for publisher releases. No live HTTP test has yet proved that activation changes the customer-visible response. Those are still mandatory gates; static publishing and customer deployment dispatch remain disabled until the privileged broker and end-to-end serving test are complete.
+
+
+### Atomic Nginx vhost installation implementation
+
+The Linux agent's `internal/staticvhost` package now contains an atomic installer for
+renderer-produced static vhosts. It accepts only the deterministic
+`nexora-static-<32 hex chars>.conf` filename, requires the effective UID to match
+the expected config owner, verifies the config directory and any existing target,
+and serializes updates with a root-owned, no-follow lock file.
+
+The installer stages a same-directory temporary file, fsyncs it, atomically renames
+it into place, validates the complete Nginx configuration with `nginx -t`, and
+reloads Nginx only after validation succeeds. A validation or reload failure
+restores the previous file (or removes a newly introduced file); after a failed
+reload it makes a best-effort validation and reload of the restored configuration.
+Unit tests cover successful ordering, failed validation, failed reload, restoration,
+unsafe filenames/directories, symlink targets, and symlinked lock files.
+
+This package is not yet wired to the publisher or a dedicated privileged IPC
+endpoint. The existing provisioning socket authorizes only `nexora-agent`, while
+the static publisher runs as `nexora-runtime`; granting the publisher access to
+the general-purpose provisioning helper would be an unacceptable privilege
+expansion. A separate narrow broker/helper and root-owned domain/account registry
+must be completed before this installer is invoked in production.
