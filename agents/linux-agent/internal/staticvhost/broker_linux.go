@@ -16,11 +16,40 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"sync"
 	"time"
 
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+)
+
+var brokerKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}//go:build linux
+
+package staticvhost
+
+import (
+	"bytes"
+	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/binary"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"syscall"
+	"sync"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+)
+
 )
 
 const (
@@ -73,7 +102,7 @@ func LoadRootBrokerTrust() (BrokerTrust, error) {
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF { return trust, errors.New("broker trust config contains trailing data") }
 	if doc.Issuer == "" || len(doc.Issuer) > 256 || doc.Audience == "" || len(doc.Audience) > 256 ||
-		len(doc.KeyID) < 1 || len(doc.KeyID) > 64 {
+		!brokerKeyIDPattern.MatchString(doc.KeyID) {
 		return trust, errors.New("broker trust config has invalid issuer, audience or key ID")
 	}
 	keyBytes, err := readRootOwnedFile(brokerPublicKeyPath, 16<<10)
