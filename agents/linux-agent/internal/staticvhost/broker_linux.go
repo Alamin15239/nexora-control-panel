@@ -56,9 +56,9 @@ type brokerResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// LoadRootBrokerTrust loads the pinned deployment-envelope trust configuration
-// and public key. Both files and their parent directory must be root-owned and
-// non-writable by group or others. Key paths are fixed by the broker.
+// LoadRootBrokerTrust loads the pinned deployment-envelope trust configuration,
+// public key, and account/domain registry. All trust files and their parent
+// directory must be root-owned and non-writable by group or others. Paths are fixed.
 func LoadRootBrokerTrust() (BrokerTrust, error) {
 	var trust BrokerTrust
 	dirInfo, err := os.Lstat(filepath.Dir(brokerTrustPath))
