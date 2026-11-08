@@ -10,3 +10,15 @@ CREATE TABLE IF NOT EXISTS platform_memberships (
 
 CREATE INDEX IF NOT EXISTS idx_platform_memberships_role_status
   ON platform_memberships(role, status);
+
+-- Grant platform ownership only to the explicitly designated Nexora operator.
+-- This does not change the user's organization membership role.
+INSERT INTO platform_memberships (user_id, role, status)
+SELECT id, 'PLATFORM_OWNER', 'ACTIVE'
+FROM users
+WHERE lower(email) = lower('alaminkhan.xiaomi@gmail.com')
+  AND status = 'ACTIVE'
+ON CONFLICT(user_id) DO UPDATE SET
+  role = 'PLATFORM_OWNER',
+  status = 'ACTIVE',
+  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
