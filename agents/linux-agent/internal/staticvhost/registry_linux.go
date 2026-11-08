@@ -55,13 +55,12 @@ func LoadRootBindingRegistry() (*BindingRegistry, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, errors.New("account/domain registry contains trailing data")
 	}
-	return NewBindingRegistry(document.Accounts, document.Domains)
+	return newBindingRegistry(document.Accounts, document.Domains)
 }
 
-// NewBindingRegistry validates the complete registry before it can be used.
-// It is exported to support deterministic tests; production loads it from the
-// fixed root-owned path above.
-func NewBindingRegistry(accounts []brokerAccountRecord, domains []brokerDomainRecord) (*BindingRegistry, error) {
+// newBindingRegistry validates the complete registry before it can be used.
+// Production loads it only from the fixed root-owned path above.
+func newBindingRegistry(accounts []brokerAccountRecord, domains []brokerDomainRecord) (*BindingRegistry, error) {
 	if len(accounts) == 0 || len(accounts) > 10000 || len(domains) == 0 || len(domains) > 50000 {
 		return nil, errors.New("account/domain registry has invalid entry counts")
 	}
@@ -69,20 +68,26 @@ func NewBindingRegistry(accounts []brokerAccountRecord, domains []brokerDomainRe
 		accounts: make(map[string]brokerAccountRecord, len(accounts)),
 		domains:  make(map[string]brokerDomainRecord, len(domains)),
 	}
+	usernames := make(map[string]struct{}, len(accounts))
+	uids := make(map[uint32]struct{}, len(accounts))
 	for _, account := range accounts {
 		if !accountIDPattern.MatchString(account.HostingAccountID) ||
 			!linuxUsernamePattern.MatchString(account.LinuxUsername) ||
-			account.LinuxUID == 0 {
+			account.LinuxUID < 1000 || account.LinuxUsername == "root" || account.LinuxUsername == "nobody" ||
+			account.LinuxUsername == "nexora-runtime" || account.LinuxUsername == "nexora-agent" {
 			return nil, errors.New("account registry contains an invalid hosting account or Linux identity")
 		}
 		if _, exists := registry.accounts[account.HostingAccountID]; exists {
 			return nil, errors.New("account registry contains a duplicate hosting account")
 		}
-		for _, existing := range registry.accounts {
-			if existing.LinuxUsername == account.LinuxUsername || existing.LinuxUID == account.LinuxUID {
-				return nil, errors.New("account registry contains a duplicate Linux identity")
-			}
+		if _, exists := usernames[account.LinuxUsername]; exists {
+			return nil, errors.New("account registry contains a duplicate Linux username")
 		}
+		if _, exists := uids[account.LinuxUID]; exists {
+			return nil, errors.New("account registry contains a duplicate Linux UID")
+		}
+		usernames[account.LinuxUsername] = struct{}{}
+		uids[account.LinuxUID] = struct{}{}
 		registry.accounts[account.HostingAccountID] = account
 	}
 	for _, domain := range domains {
