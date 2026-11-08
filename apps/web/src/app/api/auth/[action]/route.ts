@@ -280,12 +280,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
           .bind(userId, email, passwordHash, name),
         db.prepare("INSERT INTO organizations (id, name, slug, status) VALUES (?, ?, ?, 'ACTIVE')")
           .bind(organizationId, organizationName, slug),
-        db.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'MEMBER')")
+        db.prepare("INSERT INTO memberships (id, user_id, organization_id, role) VALUES (?, ?, ?, 'OWNER')")
           .bind(crypto.randomUUID(), userId, organizationId),
         db.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.register', 'organization', ?)")
           .bind(crypto.randomUUID(), organizationId, userId, organizationId),
       ]);
-      const session = await issueSession(db, userId, organizationId, "MEMBER");
+      const session = await issueSession(db, userId, organizationId, "OWNER");
       const { accessToken, ...safeSession } = session;
       const response = NextResponse.json({
         user: { id: userId, email, displayName: name },
@@ -366,6 +366,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
     const response = NextResponse.json({
       user: { id: user.id, email: user.email, displayName: user.displayName },
       customerAccess: Boolean(customerAccess),
+      platformRole: membership.platformRole,
       ...safeSession,
     });
     sessionCookie(response, accessToken);
@@ -391,17 +392,18 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
     const identity = await db.prepare(
       `SELECT u.id, u.email, u.display_name AS displayName,
               o.id AS organizationId, o.name AS organizationName, o.slug AS organizationSlug,
-              m.role
+              m.role, pm.role AS platformRole
        FROM auth_sessions s
        JOIN users u ON u.id = s.user_id
        JOIN memberships m ON m.user_id = u.id AND m.organization_id = s.organization_id
        JOIN organizations o ON o.id = s.organization_id
+       LEFT JOIN platform_memberships pm ON pm.user_id = u.id AND pm.status = 'ACTIVE'
        WHERE s.token_hash = ? AND s.revoked_at IS NULL
          AND s.expires_at > ? AND u.status = 'ACTIVE' AND o.status = 'ACTIVE'
        LIMIT 1`,
     ).bind(await sha256(token), new Date().toISOString()).first<{
       id: string; email: string; displayName: string | null;
-      organizationId: string; organizationName: string; organizationSlug: string; role: AuthRole;
+      organizationId: string; organizationName: string; organizationSlug: string; role: AuthRole; platformRole: "PLATFORM_OWNER" | "PLATFORM_ADMIN" | null;
     }>();
     if (!identity) {
       const response = NextResponse.json({ message: "Not authenticated" }, { status: 401 });
@@ -417,6 +419,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ act
       displayName: identity.displayName,
       organization: { id: identity.organizationId, name: identity.organizationName, slug: identity.organizationSlug },
       role: identity.role,
+      platformRole: identity.platformRole,
       customerAccess: Boolean(customerAccess),
     });
   } catch (error) {
