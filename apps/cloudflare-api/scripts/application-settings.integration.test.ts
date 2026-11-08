@@ -10,6 +10,7 @@ type TestIdentity = {
   organizationName: string;
   organizationSlug: string;
   role: "OWNER" | "ADMIN" | "MEMBER";
+  platformRole?: string | null;
 };
 
 type SavedSettings = {
@@ -103,8 +104,19 @@ class TestD1 {
         }
         if (query.includes("FROM github_projects WHERE id = ? AND organization_id = ?")) {
           const [projectId, organizationId] = values;
-          return projectId === "project-a" && organizationId === db.projectOrganizationId
-            ? ({ id: "project-a" } as T) : null;
+          if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
+          if (query.includes("github_repository_id AS repositoryId")) {
+            return ({
+              id: "project-a",
+              repositoryId: "12345",
+              repositoryFullName: "Alamin15239/example-app",
+              installationId: "installation-a",
+              productionBranch: "main",
+              trustedWorkflowSha: "a".repeat(40),
+              status: "active",
+            } as T);
+          }
+          return ({ id: "project-a" } as T);
         }
         if (query.includes("FROM application_runtime_profiles WHERE id = ?")) {
           return values[0] === db.profile.id ? ({ ...db.profile } as T) : null;
@@ -297,10 +309,16 @@ const identity = (role: TestIdentity["role"], organizationId = "org-a"): TestIde
   organizationName: "Test Organization",
   organizationSlug: "test-org",
   role,
+  platformRole: null,
 });
 
 function environment(db: TestD1, operatorToken?: string) {
-  return { DB: db as unknown as D1Database, APPLICATION_NODE_OPERATOR_TOKEN: operatorToken };
+  return {
+    DB: db as unknown as D1Database,
+    APPLICATION_NODE_OPERATOR_TOKEN: operatorToken,
+    GITHUB_APP_ID: "test-app",
+    GITHUB_APP_PRIVATE_KEY: "test-private-key",
+  };
 }
 
 async function createNodeKeyPair() {
@@ -383,6 +401,21 @@ test("customer ADMIN identity cannot dispatch production deployments before plat
   );
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { message: "Customer accounts cannot access WHM administration." });
+  assert.equal(db.writes, 0);
+});
+
+test("platform deployment dispatch rejects projects with no runtime assignment", async () => {
+  const db = new TestD1(identity("OWNER"));
+  db.identity!.platformRole = "ADMIN";
+  const response = await worker.fetch(
+    request("POST", "/v1/github/projects/project-a/deployments", {}),
+    environment(db),
+    {} as ExecutionContext,
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), {
+    message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
+  });
   assert.equal(db.writes, 0);
 });
 
