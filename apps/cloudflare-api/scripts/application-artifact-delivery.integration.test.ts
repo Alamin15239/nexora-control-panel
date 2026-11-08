@@ -61,8 +61,10 @@ class ArtifactD1 {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
         if (query.includes("FROM application_nodes n")) {
-          const [identity] = values;
-          const valid = identity === db.node.nodeIdentity &&
+          const identity = query.includes("n.id = ? AND n.node_identity = ?")
+            ? values[1] : values[0];
+          const idMatches = !query.includes("n.id = ? AND n.node_identity = ?") || values[0] === db.node.id;
+          const valid = idMatches && identity === db.node.nodeIdentity &&
             db.node.status === "online" && db.node.role === "runtime" &&
             db.node.revokedAt === null && db.node.poolStatus === "ready" &&
             ["rootless", "microvm"].includes(db.node.isolationLevel) &&
