@@ -144,7 +144,7 @@ Build:
 go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
 ```
 
-Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install `domains.json` root:root mode 0640 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The publisher configuration may specify `static_vhost_socket`; if omitted, the compiled default socket path is used.
+Operator prerequisites (not performed automatically): create the `nexora-static` group; ensure `nexora-runtime` is a member; create `/etc/nexora-static-vhost` as root-owned mode 0750 or stricter; install `domains.json` root:root mode 0640 or stricter; install the daemon at `/usr/local/sbin/nexora-static-vhostd`; install `systemd/nexora-static-vhostd.service`; and verify the unit with `systemd-analyze verify`. The socket path is compiled into the publisher; customer or node configuration cannot redirect privileged requests to another Unix socket.
 
 Registry contents must be reconciled from authoritative hosting-account and verified-domain state by a trusted root-owned agent path. Never grant write access to the publisher, web server, or customer accounts. The broker intentionally fails closed if the registry is missing or invalid. That reconciliation writer and its atomic update protocol are not yet implemented.
 
