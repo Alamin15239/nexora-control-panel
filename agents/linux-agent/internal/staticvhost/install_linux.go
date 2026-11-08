@@ -5,6 +5,7 @@ package staticvhost
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,11 +67,26 @@ func install(configDir, filename, content string, ownerUID uint32, runner Comman
 	oldInfo, err := os.Lstat(target)
 	if err == nil {
 		oldStat, valid := oldInfo.Sys().(*syscall.Stat_t)
-		if !valid || !oldInfo.Mode().IsRegular() || oldInfo.Mode()&os.ModeSymlink != 0 || oldStat.Uid != ownerUID {
-			return errors.New("existing managed Nginx config is not a trusted regular file")
+		if !valid || !oldInfo.Mode().IsRegular() || oldInfo.Mode()&os.ModeSymlink != 0 ||
+			oldStat.Uid != ownerUID || oldInfo.Mode().Perm()&0022 != 0 || oldInfo.Size() > 64<<10 {
+			return errors.New("existing managed Nginx config is not a trusted bounded regular file")
 		}
-		previous, err = os.ReadFile(target)
-		if err != nil { return fmt.Errorf("read previous Nginx config: %w", err) }
+		fd, openErr := syscall.Open(target, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+		if openErr != nil {
+			return fmt.Errorf("open previous Nginx config safely: %w", openErr)
+		}
+		oldFile := os.NewFile(uintptr(fd), target)
+		openedInfo, statErr := oldFile.Stat()
+		if statErr != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(oldInfo, openedInfo) ||
+			openedInfo.Mode().Perm()&0022 != 0 || openedInfo.Size() > 64<<10 {
+			_ = oldFile.Close()
+			return errors.New("existing managed Nginx config changed during verification")
+		}
+		previous, err = io.ReadAll(io.LimitReader(oldFile, (64<<10)+1))
+		closeErr := oldFile.Close()
+		if err != nil || closeErr != nil || len(previous) > 64<<10 {
+			return errors.New("existing managed Nginx config could not be read safely")
+		}
 		hadPrevious = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect previous Nginx config: %w", err)
@@ -91,9 +107,11 @@ func install(configDir, filename, content string, ownerUID uint32, runner Comman
 	}
 	if err := runner.Run("/usr/bin/systemctl", "reload", "nginx"); err != nil {
 		restoreErr := restore()
+		if restoreErr != nil {
+			return fmt.Errorf("Nginx reload failed: %v; restoring previous config failed: %w", err, restoreErr)
+		}
 		_ = runner.Run("/usr/sbin/nginx", "-t")
 		_ = runner.Run("/usr/bin/systemctl", "reload", "nginx")
-		if restoreErr != nil { return fmt.Errorf("Nginx reload failed: %v; restoring previous config failed: %w", err, restoreErr) }
 		return fmt.Errorf("Nginx reload failed; previous config restored: %w", err)
 	}
 	return nil
