@@ -20,8 +20,8 @@ const staticProbeTimeout = 5 * time.Second
 
 // ProbeHTTP checks the activated static hostname through the local Nginx
 // listener. It never resolves or connects to a customer-controlled address.
-func ProbeHTTP(ctx context.Context, hostname string, timeout time.Duration) runtimehealth.Result {
-	return probeHTTPAt(ctx, hostname, "127.0.0.1:80", timeout)
+func ProbeHTTP(ctx context.Context, hostname, path string, timeout time.Duration) runtimehealth.Result {
+	return probeHTTPAt(ctx, hostname, path, "127.0.0.1:80", timeout)
 }
 
 // probeHTTPAt keeps the destination injectable for tests. Production callers
@@ -39,6 +39,17 @@ func probeHTTPAt(ctx context.Context, hostname, address string, timeout time.Dur
 		result.FailureCode = "probe_error"
 		return finish()
 	}
+	if path == "" || len(path) > 512 || !strings.HasPrefix(path, "/") ||
+		strings.ContainsAny(path, "?#\\\r\n") {
+		result.FailureCode = "probe_error"
+		return finish()
+	}
+	for _, character := range path {
+		if character < 0x20 || character == 0x7f {
+			result.FailureCode = "probe_error"
+			return finish()
+		}
+	}
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil || host != "127.0.0.1" {
 		result.FailureCode = "probe_error"
@@ -53,7 +64,7 @@ func probeHTTPAt(ctx context.Context, hostname, address string, timeout time.Dur
 	if timeout > 30*time.Second { timeout = 30*time.Second }
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	target := "http://" + net.JoinHostPort("127.0.0.1", portText) + "/"
+	target := "http://" + net.JoinHostPort("127.0.0.1", portText) + path
 	parsed, err := url.Parse(target)
 	if err != nil || parsed.Hostname() != "127.0.0.1" || parsed.Port() != portText {
 		result.FailureCode = "probe_error"
