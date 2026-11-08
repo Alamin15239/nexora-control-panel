@@ -24,33 +24,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
 )
 
-var brokerKeyIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}//go:build linux
-
-package staticvhost
-
-import (
-	"bytes"
-	"context"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/binary"
-	"encoding/json"
-	"encoding/pem"
-	"errors"
-	"fmt"
-	"io"
-	"net"
-	"os"
-	"path/filepath"
-	"regexp"
-	"syscall"
-	"sync"
-	"time"
-
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
-)
-
-)
+var brokerKeyIDPattern = regexp.MustCompile("^[A-Za-z0-9._-]{1,64}$")
 
 const (
 	maxBrokerRequest = 9 << 10
@@ -60,9 +34,9 @@ const (
 )
 
 type brokerTrustFile struct {
-	Issuer string `json:"issuer"`
-	Audience string `json:"audience"`
-	KeyID string `json:"keyId"`
+	Issuer string
+	Audience string
+	KeyID string
 }
 
 type BrokerTrust struct {
@@ -73,12 +47,12 @@ type BrokerTrust struct {
 }
 
 type brokerRequest struct {
-	DeploymentEnvelope string `json:"deploymentEnvelope"`
+	DeploymentEnvelope string
 }
 
 type brokerResponse struct {
-	OK bool `json:"ok"`
-	Error string `json:"error,omitempty"`
+	OK bool
+	Error string
 }
 
 // LoadRootBrokerTrust loads the pinned deployment-envelope trust configuration
@@ -125,6 +99,9 @@ func LoadRootBrokerTrust() (BrokerTrust, error) {
 }
 
 func readRootOwnedFile(path string, limit int64) ([]byte, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("trust-file path must be absolute and clean")
+	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil { return nil, err }
 	file := os.NewFile(uintptr(fd), path)
