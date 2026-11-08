@@ -97,7 +97,7 @@ func TestBrokerRejectsInvalidEnvelopeFromAuthorizedPublisher(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	trust := BrokerTrust{Issuer:"trusted-issuer", Audience:"static-deployments", KeyID:"key-1", PublicKey:&rsa.PublicKey{N:big.NewInt(17), E:65537}}
+	trust := testBrokerTrust(t, "key-1", &rsa.PublicKey{N:big.NewInt(17), E:65537})
 	go func() { done <- Serve(ctx, listener, uint32(os.Getuid()), "/etc/nginx/conf.d", trust) }()
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer requestCancel()
@@ -183,7 +183,7 @@ func TestBrokerRejectsExpiredEnvelopeWithoutInstalling(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(),"broker.sock")
 	listener, err := net.ListenUnix("unix",&net.UnixAddr{Name:socketPath,Net:"unix"})
 	if err != nil { t.Fatal(err) }
-	trust := BrokerTrust{Issuer:"trusted-issuer",Audience:"static-deployments",KeyID:"broker-test",PublicKey:&key.PublicKey}
+	trust := testBrokerTrust(t, "broker-test", &key.PublicKey)
 	called := false
 	serverDone := make(chan struct{})
 	go func(){
