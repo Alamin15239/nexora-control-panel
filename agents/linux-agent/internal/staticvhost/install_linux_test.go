@@ -239,3 +239,18 @@ func TestInstallWritesConfigWithConservativeMode(t *testing.T) {
 		t.Fatalf("installed config mode = %04o, want 0644", got)
 	}
 }
+
+
+func TestExecRunnerRejectsNonAllowlistedCommands(t *testing.T) {
+	runner := execRunner{}
+	for _, tc := range []struct{name string; args []string}{
+		{name:"/bin/sh", args:[]string{"-c","id"}},
+		{name:"/usr/sbin/nginx", args:[]string{"-s","stop"}},
+		{name:"/usr/bin/systemctl", args:[]string{"restart","sshd"}},
+		{name:"/usr/bin/systemctl", args:[]string{"reload","nginx","--no-block"}},
+	} {
+		if err := runner.Run(tc.name, tc.args...); err == nil {
+			t.Fatalf("accepted non-allowlisted command %s %v", tc.name, tc.args)
+		}
+	}
+}
