@@ -158,6 +158,10 @@ func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, c
 }
 
 func handleBrokerRequest(ctx context.Context, conn *net.UnixConn, allowedUID uint32, configDir string, trust BrokerTrust) {
+	handleBrokerRequestWithInstaller(ctx, conn, allowedUID, configDir, trust, InstallAsRoot)
+}
+
+func handleBrokerRequestWithInstaller(ctx context.Context, conn *net.UnixConn, allowedUID uint32, configDir string, trust BrokerTrust, installer func(string, Binding) error) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(brokerTimeout))
 	raw, err := conn.SyscallConn()
@@ -202,7 +206,8 @@ func handleBrokerRequest(ctx context.Context, conn *net.UnixConn, allowedUID uin
 		Hostname: claims.Hostname,
 		HostingAccountID: claims.HostingAccountID,
 	}
-	if err := InstallAsRoot(configDir, binding); err != nil {
+	if installer == nil { return }
+	if err := installer(configDir, binding); err != nil {
 		writeBrokerResponse(conn, brokerResponse{Error:"Nginx vhost installation failed"})
 		return
 	}
