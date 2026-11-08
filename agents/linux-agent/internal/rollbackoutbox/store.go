@@ -3,7 +3,6 @@
 package rollbackoutbox
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -205,5 +204,3 @@ func (s *Store) write(state snapshot) error {
 	return nil
 }
 
-// Keep bytes imported explicitly for strict decoder compatibility checks.
-var _ = bytes.MinRead
