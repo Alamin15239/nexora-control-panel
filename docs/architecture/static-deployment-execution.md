@@ -127,3 +127,28 @@ Therefore the existing `releasepublisher.Rollback` primitive currently switches 
 Before adding rollback commands, implement and verify one explicit serving integration for static deployments. The preferred direction is a dedicated deployment vhost whose document root resolves to the publisher-owned account `current` path, with strict account-to-hostname mapping and no customer write access to publisher storage. The integration must define how static deployments coexist with the existing PHP hosting vhosts and must be exercised through Nginx configuration tests plus an HTTP test that proves a release activation changes the served response.
 
 Only after that serving contract is proven should the signed static rollback command/acknowledgement lifecycle be connected. OCI workload rollback remains a separate runtime-controller operation.
+
+## Nginx serving integration contract
+
+The existing database already has a canonical domain-to-account relationship: `domains.hosting_account_id` identifies the hosting account that owns `domains.name`. The static deployment project is also bound to exactly one `github_projects.hosting_account_id`. A deployment hostname must therefore be resolved server-side by joining those records; it must never be accepted as a free-form hostname supplied by a customer build, artifact, or node request.
+
+The static publisher service is deliberately unprivileged. Its systemd unit runs as `nexora-runtime:nexora-static`, has `NoNewPrivileges=true` and `ProtectSystem=strict`, and declares only `/var/lib/nexora-static` writable. It cannot safely install files under `/etc/nginx/sites-available`, enable a site, test the global Nginx configuration, or reload Nginx. Giving it general root access or broad write access to Nginx configuration would defeat the publication trust boundary.
+
+The implementation must use a narrowly scoped privileged operation rather than weakening the publisher service:
+
+1. The control plane resolves one eligible active domain from the project's hosting account and includes its immutable domain ID and normalized hostname in the signed deployment envelope. The hostname is derived from the `domains` row, not from artifact contents. If no eligible domain exists, publication must fail closed.
+2. The publisher verifies the signed envelope and the account/domain binding before requesting serving configuration. It passes only opaque account/domain IDs and the signed hostname claim to a dedicated, narrowly authorized privileged broker operation. It must not pass arbitrary Nginx text, filesystem paths, shell commands, or customer-controlled configuration.
+3. The privileged helper independently validates the hostname syntax, confirms the local hosting account identity using a root-owned account registry, constructs the document root as `/var/lib/nexora-static/accounts/<hostingAccountId>/current`, and rejects any path outside that exact managed tree. The helper must not accept a caller-selected document root.
+4. Nginx access to the publisher-owned release tree must be granted explicitly and minimally (read/traverse only). The publisher's supplementary `www-data` group membership does not grant the Nginx worker access in the reverse direction. Verify every parent directory and the active symlink target; do not recursively grant access outside the account release tree.
+5. Install a static-only vhost with no PHP/FastCGI handler, no directory listing, a defined index/404 policy, and the existing TLS/custom-hostname termination model. The static vhost must not replace or mutate the hosting account's PHP vhost. Domain ownership conflicts and duplicate server names must fail closed.
+6. The privileged helper writes config atomically, runs `nginx -t`, reloads only an already-active Nginx service, and records enough ownership metadata to remove or repair only the exact config it created. Failed validation must preserve the prior working config and active release.
+7. Add integration tests using a disposable Nginx instance or isolated config root. The test must request the configured hostname, verify release A content, activate release B, and verify the same HTTP request returns release B. Also verify a PHP hosting vhost remains unchanged and a domain cannot be rebound across accounts.
+
+### Privileged-broker boundary
+
+The existing provisioning IPC server authorizes the `nexora-agent` UID and invokes a fixed helper. The static publisher runs under a different UID. Do not simply add the publisher to a broad privileged group or allow it to invoke arbitrary provisioning operations. Introduce a distinct authorization rule for the one static-serving operation (or a separate broker socket), bind it to the publisher's OS identity, and keep all other provisioning operations unavailable to that identity. The helper must re-derive and validate all security-sensitive values; the broker's caller identity is not a substitute for domain/account validation.
+
+### Serving-readiness gate
+
+The static publisher must not report a deployment as customer-visible or successful merely because the release symlink switched. The deployment remains nonterminal until the configured hostname returns the expected release identity/content through the real Nginx serving path and the signed health report is accepted by the control plane. A failed HTTP probe leaves the deployment failed and triggers no automatic rollback until the separate signed rollback command/acknowledgement lifecycle is complete.
+
