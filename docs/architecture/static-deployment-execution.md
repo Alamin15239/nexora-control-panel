@@ -110,3 +110,20 @@ The control-plane protocol must therefore carry an explicit target kind and bind
 The API must issue rollback work only after an authenticated unhealthy health-check report has been matched to the exact assigned release and a verified previous successful release. It must not infer the rollback target from client-supplied values. The command queue, one-time delivery/claim semantics, expiry, retry policy, signed acknowledgement endpoint, database state transitions, and audit events must be designed and integration-tested together. Until then, `rollbackRequired` is advisory guidance only and must never be presented as an executed rollback.
 
 The current runtime node intentionally rejects command-bearing desired-state responses. Do not remove that guard or add command delivery until both the server-side command lifecycle and the node-side consumer are implemented and tested end to end.
+
+
+## Verified serving-path gap (2026-11-08)
+
+A source review confirms that the current hosting vhost and the static publisher do not share a serving path:
+
+- The hosting provisioner accepts document roots only under `/home/<username>/public_html` and generates the Nginx `root` directive from that path.
+- The static publisher is configured with `publisher_root=/var/lib/nexora-static` and publishes each hosting account beneath `/var/lib/nexora-static/accounts/<hostingAccountId>`, activating its `current` symlink there.
+- No reviewed code maps the publisher's `current` path into the Nginx document root, creates a dedicated Nginx vhost for that path, or otherwise proves that an HTTP request serves the activated static release.
+
+Therefore the existing `releasepublisher.Rollback` primitive currently switches the publisher's local pointer, but repository inspection does not establish that it switches the content customers receive over HTTP. It would be unsafe to implement or advertise operational automatic rollback on that assumption.
+
+### Required next integration decision
+
+Before adding rollback commands, implement and verify one explicit serving integration for static deployments. The preferred direction is a dedicated deployment vhost whose document root resolves to the publisher-owned account `current` path, with strict account-to-hostname mapping and no customer write access to publisher storage. The integration must define how static deployments coexist with the existing PHP hosting vhosts and must be exercised through Nginx configuration tests plus an HTTP test that proves a release activation changes the served response.
+
+Only after that serving contract is proven should the signed static rollback command/acknowledgement lifecycle be connected. OCI workload rollback remains a separate runtime-controller operation.
