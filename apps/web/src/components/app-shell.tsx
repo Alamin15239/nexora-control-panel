@@ -31,7 +31,8 @@ const navigation = [
     items: [
       { label: "Servers & nodes", href: "/servers", icon: Server },
       { label: "Hosting packages", href: "/hosting-plans", icon: Box },
-      { label: "Customer accounts", href: "/hosting-accounts", icon: Users },
+      { label: "Customer accounts", href: "/customer-accounts", icon: Users },
+      { label: "Hosting accounts", href: "/hosting-accounts", icon: Server },
       { label: "Monitoring", href: "/monitoring", icon: Activity },
     ],
   },
