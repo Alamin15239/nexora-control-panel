@@ -87,6 +87,11 @@ func TestNewBindingRegistryRejectsUnknownAccountAndInvalidDomain(t *testing.T) {
 		d = append(d, d[0])
 		if _, err := newBindingRegistry(a, d); err == nil { t.Fatal("accepted duplicate domain identity") }
 	})
+	t.Run("duplicate hostname", func(t *testing.T) {
+		a, d := validRegistryEntries()
+		d[1].Hostname = d[0].Hostname
+		if _, err := newBindingRegistry(a, d); err == nil { t.Fatal("accepted duplicate hostname") }
+	})
 }
 
 func TestBindingRegistryFailsClosedWhenUnavailable(t *testing.T) {
