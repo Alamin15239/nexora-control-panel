@@ -33,5 +33,7 @@ LockPersonality=true
 RestrictSUIDSGID=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
 ReadOnlyPaths=/etc/nexora-static-vhost
 ReadWritePaths=/etc/nginx/conf.d /run/nexora-static-vhost
