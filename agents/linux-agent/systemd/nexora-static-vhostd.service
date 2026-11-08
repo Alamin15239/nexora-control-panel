@@ -1,0 +1,37 @@
+[Unit]
+Description=Nexora Static Vhost Privileged Broker
+Documentation=https://github.com/Alamin15239/nexora-control-panel
+After=local-fs.target nginx.service
+Wants=local-fs.target
+Requires=nginx.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=nexora-static-vhost
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=no
+UMask=0077
+ExecStart=/usr/local/sbin/nexora-static-vhostd
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+ReadOnlyPaths=/etc/nexora-static-vhost
+ReadWritePaths=/etc/nginx/conf.d /run/nexora-static-vhost
