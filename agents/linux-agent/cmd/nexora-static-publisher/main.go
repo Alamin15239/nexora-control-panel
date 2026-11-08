@@ -29,6 +29,7 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
@@ -246,11 +247,35 @@ func run(configPath string) error {
 				ReleaseID: result.ReleaseID,
 				ArtifactSHA256: result.ArtifactSHA256,
 			}); err != nil {
-				fmt.Fprintf(os.Stderr, "deployment %s is serving but activation acknowledgement failed: %v\n", release.DeploymentID, err)
+				fmt.Fprintf(os.Stderr, "deployment %s is routed by Nginx but activation acknowledgement failed: %v\n", release.DeploymentID, err)
 				continue
 			}
-			fmt.Printf("static release activated and serving: deployment=%s release=%s sha256=%s bytes=%d already_published=%t\n",
-				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, result.AlreadyPublished)		}
+			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, 5*time.Second)
+			healthAck, healthErr := artifactclient.ReportHealthCheck(ctx, httpClient, nodeArtifactConfig, artifactclient.HealthCheckReport{
+				DeploymentID: result.DeploymentID,
+				ArtifactSHA256: result.ArtifactSHA256,
+				ProbePath: "/",
+				HealthStatus: string(probe.Status),
+				HTTPStatus: probe.HTTPStatus,
+				DurationMs: probe.DurationMs,
+				FailureCode: probe.FailureCode,
+			})
+			if healthErr != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s health report failed: %v\n", release.DeploymentID, healthErr)
+				continue
+			}
+			if healthAck.RollbackRequired {
+				fmt.Fprintf(os.Stderr, "deployment %s is unhealthy; control plane requested rollback to deployment %s on node %s (automatic rollback is not enabled)\n",
+					release.DeploymentID, *healthAck.RollbackTargetDeploymentID, *healthAck.RollbackTargetNodeID)
+				continue
+			}
+			if probe.Status != runtimehealth.Healthy {
+				fmt.Fprintf(os.Stderr, "deployment %s failed HTTP health check: status=%d failure=%s\n",
+					release.DeploymentID, probe.HTTPStatus, probe.FailureCode)
+				continue
+			}
+			fmt.Printf("static release healthy and serving: deployment=%s release=%s sha256=%s bytes=%d probe_ms=%d already_published=%t\n",
+				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, probe.DurationMs, result.AlreadyPublished)		}
 	}
 	poll()
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
