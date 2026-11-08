@@ -302,6 +302,34 @@ async function bearerIdentity(request: Request, db: D1Database) {
   }>();
 }
 
+/**
+ * Customer logins (MEMBER) are confined to the account-scoped cPanel API.
+ * All WHM/control-plane routes are denied by default for customer identities.
+ * Customer endpoints independently verify hosting_account_memberships, while
+ * internal node endpoints use their own signed/operator authentication.
+ */
+app.use("/v1/*", async (c, next) => {
+  const path = c.req.path;
+  if (
+    path === "/v1/health" ||
+    path === "/v1/health/ready" ||
+    path === "/v1/health/schema" ||
+    path.startsWith("/v1/auth/") ||
+    path.startsWith("/v1/customer/") ||
+    path.startsWith("/v1/internal/")
+  ) {
+    await next();
+    return;
+  }
+
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role === "MEMBER") {
+    return c.json({ message: "Customer accounts cannot access WHM administration." }, 403);
+  }
+  await next();
+});
+
 app.get("/v1/health", (c) =>
   c.json({ service: "nexora-api", status: "ok", runtime: "cloudflare-workers" }),
 );
