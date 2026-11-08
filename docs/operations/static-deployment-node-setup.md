@@ -91,7 +91,7 @@ sudo stat -c '%U:%G:%a %n' \
   /etc/nexora-static-vhost/bindings.json
 ```
 
-Expected trust permissions are root-owned, directory `750` or stricter, trust JSON `600`, and public PEM `644` or stricter. The broker refuses symlinked or group/world-writable trust files.
+Expected permissions are root-owned, directory `750` or stricter, trust JSON and binding registry `600`, and public PEM `644` or stricter. The broker refuses symlinked or group/world-writable trust files and rejects a missing or inconsistent account/domain registry.
 
 Do not enable the services until all of the following are true:
 
