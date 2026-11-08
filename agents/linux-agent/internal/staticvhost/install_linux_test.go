@@ -169,3 +169,73 @@ func TestInstallRejectsOversizedExistingConfig(t *testing.T) {
 		t.Fatalf("Nginx commands ran for an oversized existing config: %#v", runner.calls)
 	}
 }
+
+
+func TestInstallBindingRejectsInvalidDomainIdentity(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	runner := &fakeRunner{}
+	binding := Binding{DomainID: "../escape", Hostname: "example.test", HostingAccountID: "account_123"}
+	if err := installBinding(dir, binding, uid, runner); err == nil {
+		t.Fatal("accepted invalid domain identity")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("commands ran for invalid domain identity: %#v", runner.calls)
+	}
+}
+
+func TestInstallBindingRejectsInvalidHostingAccountIdentity(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	runner := &fakeRunner{}
+	binding := Binding{DomainID: "domain_123", Hostname: "example.test", HostingAccountID: "../../etc"}
+	if err := installBinding(dir, binding, uid, runner); err == nil {
+		t.Fatal("accepted invalid hosting-account identity")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("commands ran for invalid account identity: %#v", runner.calls)
+	}
+}
+
+func TestInstallBindingRejectsNonCanonicalHostname(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	runner := &fakeRunner{}
+	binding := Binding{DomainID: "domain_123", Hostname: "Example.test", HostingAccountID: "account_123"}
+	if err := installBinding(dir, binding, uid, runner); err == nil {
+		t.Fatal("accepted non-canonical hostname")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("commands ran for non-canonical hostname: %#v", runner.calls)
+	}
+}
+
+func TestInstallRejectsMismatchedEffectiveUIDBeforeCommands(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	runner := &fakeRunner{}
+	if err := install(dir, validName(), config("    server_name example.test;"), uid+1, runner); err == nil {
+		t.Fatal("accepted mismatched effective UID")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("commands ran for mismatched effective UID: %#v", runner.calls)
+	}
+}
+
+func TestInstallRejectsMissingCommandRunner(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	if err := install(dir, validName(), config("    server_name example.test;"), uid, nil); err == nil {
+		t.Fatal("accepted nil command runner")
+	}
+}
+
+func TestInstallWritesConfigWithConservativeMode(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	runner := &fakeRunner{}
+	if err := install(dir, validName(), config("    server_name example.test;"), uid, runner); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, validName()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("installed config mode = %04o, want 0644", got)
+	}
+}
