@@ -55,7 +55,7 @@ func TestNginxServesAtomicReleaseSwitch(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cmd := exec.CommandContext(ctx,nginx,"-g","daemon off;","-p",tmp+"/","-c",configPath)
+	cmd := exec.CommandContext(ctx,nginx,"-g","daemon off; master_process off;","-p",tmp+"/","-c",configPath)
 	output := &strings.Builder{}
 	cmd.Stdout,cmd.Stderr = output,output
 	if err := cmd.Start(); err != nil { t.Fatalf("start isolated nginx: %v",err) }
