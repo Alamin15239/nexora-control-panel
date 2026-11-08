@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	maxBrokerRequest = 8 << 10
+	maxBrokerRequest = 9 << 10
 	brokerTimeout = 2 * time.Minute
 	brokerTrustPath = "/etc/nexora-static-vhost/trust.json"
 	brokerPublicKeyPath = "/etc/nexora-static-vhost/deployment-envelope-public.pem"
@@ -214,7 +214,7 @@ func writeBrokerResponse(w io.Writer, response brokerResponse) {
 // RequestInstall sends only a signed deployment envelope. The root broker
 // independently verifies the signature and derives the domain/account binding.
 func RequestInstall(ctx context.Context, socketPath, signedEnvelope string) error {
-	if signedEnvelope == "" || len(signedEnvelope) > maxBrokerRequest/2 {
+	if signedEnvelope == "" || len(signedEnvelope) > 8<<10 {
 		return errors.New("deployment envelope is empty or oversized")
 	}
 	if socketPath == "" { socketPath = "/run/nexora-static-vhost/vhost.sock" }
