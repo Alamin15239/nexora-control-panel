@@ -74,3 +74,27 @@ func TestReadRootOwnedFileRejectsGroupWritableFile(t *testing.T) {
 		t.Fatal("accepted a group-writable trust file")
 	}
 }
+
+
+func TestBrokerRejectsInvalidEnvelopeFromAuthorizedPublisher(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "broker.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name:socketPath, Net:"unix"})
+	if err != nil { t.Fatal(err) }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	trust := BrokerTrust{Issuer:"trusted-issuer", Audience:"static-deployments", KeyID:"key-1", PublicKey:&rsa.PublicKey{N:big.NewInt(17), E:65537}}
+	go func() { done <- Serve(ctx, listener, uint32(os.Getuid()), "/etc/nginx/conf.d", trust) }()
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer requestCancel()
+	err = RequestInstall(requestCtx, socketPath, "not.a.valid.signature")
+	if err == nil || !strings.Contains(err.Error(), "invalid or expired") {
+		t.Fatalf("expected signed-envelope rejection, got %v", err)
+	}
+	cancel()
+	select {
+	case serveErr := <-done:
+		if serveErr != nil { t.Fatal(serveErr) }
+	case <-time.After(2*time.Second):
+		t.Fatal("broker did not stop after cancellation")
+	}
+}
