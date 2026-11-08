@@ -135,3 +135,37 @@ func TestInstallBindingRejectsInvalidBindingBeforeCommands(t *testing.T) {
 		t.Fatalf("commands ran for invalid binding: %#v", runner.calls)
 	}
 }
+
+
+func TestInstallRejectsGroupOrWorldWritableExistingConfig(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	path := filepath.Join(dir, validName())
+	if err := os.WriteFile(path, []byte(config("    server_name old.example.test;")), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0666); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	if err := install(dir, validName(), config("    server_name new.example.test;"), uid, runner); err == nil {
+		t.Fatal("accepted a group/world-writable existing vhost")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("Nginx commands ran for an unsafe existing config: %#v", runner.calls)
+	}
+}
+
+func TestInstallRejectsOversizedExistingConfig(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	path := filepath.Join(dir, validName())
+	if err := os.WriteFile(path, make([]byte, (64<<10)+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	if err := install(dir, validName(), config("    server_name new.example.test;"), uid, runner); err == nil {
+		t.Fatal("accepted an oversized existing vhost")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("Nginx commands ran for an oversized existing config: %#v", runner.calls)
+	}
+}
