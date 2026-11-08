@@ -43,8 +43,8 @@ func TestStaticProbeClassifiesHTTPFailuresWithoutFollowingRedirects(t *testing.T
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer target.Close()
-	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,_ *http.Request){
-		http.Redirect(w,_ ,target.URL,http.StatusFound)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,req *http.Request){
+		http.Redirect(w,req,target.URL,http.StatusFound)
 	}))
 	defer redirect.Close()
 	result := probeHTTPAt(context.Background(),"www.example.test",loopbackAddress(t,redirect),time.Second)
@@ -76,8 +76,7 @@ func TestStaticProbeRejectsInvalidHostnameAndNonLoopbackDestination(t *testing.T
 }
 
 func TestStaticProbeReportsConnectionRefused(t *testing.T) {
-	probe := net.ListenConfig{}
-	listener, err := probe.Listen(context.Background(),"tcp4","127.0.0.1:0")
+	listener, err := net.Listen("tcp4","127.0.0.1:0")
 	if err != nil { t.Fatal(err) }
 	_,portText,err := net.SplitHostPort(listener.Addr().String())
 	if err != nil { t.Fatal(err) }
