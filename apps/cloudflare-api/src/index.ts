@@ -3846,7 +3846,6 @@ app.get("/v1/github/callback", async (c) => {
     "SELECT user_id FROM platform_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
   ).bind(pending.user_id).first<{ user_id: string }>();
   const customerRedirect = !platformMembership;
-  const providerError = c.req.query("error");
   const consumeState = async () => {
     const now = new Date().toISOString();
     const consumed = await c.env.DB.prepare(
@@ -3854,6 +3853,7 @@ app.get("/v1/github/callback", async (c) => {
     ).bind(now, stateHash, now).run();
     return (consumed.meta?.changes ?? 0) === 1;
   };
+  const providerError = c.req.query("error");
   if (providerError) {
     if (!(await consumeState())) return c.text("GitHub authorization state has already been used.", 400);
     try { return c.redirect(githubDashboardRedirect(c.env, "denied", customerRedirect)); }
@@ -3864,6 +3864,42 @@ app.get("/v1/github/callback", async (c) => {
   if (!c.env.GITHUB_APP_CLIENT_ID || !c.env.GITHUB_APP_CLIENT_SECRET || !c.env.GITHUB_OAUTH_CALLBACK_URL || !c.env.GITHUB_TOKEN_ENCRYPTION_KEY) return c.text("GitHub OAuth is not configured.", 503);
   if (!(await consumeState())) return c.text("GitHub authorization state has already been used.", 400);
   try {
+    const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ client_id: c.env.GITHUB_APP_CLIENT_ID, client_secret: c.env.GITHUB_APP_CLIENT_SECRET, code, redirect_uri: c.env.GITHUB_OAUTH_CALLBACK_URL }),
+    });
+    if (!tokenResponse.ok) throw new Error("GitHub token exchange failed");
+    const tokenData = await tokenResponse.json() as { access_token?: string; refresh_token?: string; expires_in?: number; refresh_token_expires_in?: number; token_type?: string; scope?: string; error?: string };
+    if (!tokenData.access_token || tokenData.token_type?.toLowerCase() !== "bearer") throw new Error("GitHub did not issue a usable access token");
+    const userResponse = await githubApi(tokenData.access_token, "/user");
+    if (!userResponse.ok) throw new Error("Unable to verify GitHub account");
+    const githubUser = await userResponse.json() as { id?: number; login?: string };
+    if (!Number.isSafeInteger(githubUser.id) || !githubUser.login || !/^[A-Za-z0-9-]{1,39}$/.test(githubUser.login)) throw new Error("GitHub account response is invalid");
+    const encrypted = await encryptGithubToken(c.env, tokenData.access_token);
+    const encryptedRefresh = tokenData.refresh_token ? await encryptGithubToken(c.env, tokenData.refresh_token) : null;
+    const tokenExpiresAt = Number.isFinite(tokenData.expires_in) ? new Date(Date.now() + Number(tokenData.expires_in) * 1000).toISOString() : null;
+    const refreshTokenExpiresAt = Number.isFinite(tokenData.refresh_token_expires_in) ? new Date(Date.now() + Number(tokenData.refresh_token_expires_in) * 1000).toISOString() : null;
+    await c.env.DB.prepare(
+      `INSERT INTO github_connections (id, organization_id, github_user_id, github_login, encrypted_access_token, access_token_iv, encrypted_refresh_token, refresh_token_iv, token_expires_at, refresh_token_expires_at, scopes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET github_user_id = excluded.github_user_id, github_login = excluded.github_login,
+         encrypted_access_token = excluded.encrypted_access_token, access_token_iv = excluded.access_token_iv,
+         encrypted_refresh_token = excluded.encrypted_refresh_token, refresh_token_iv = excluded.refresh_token_iv,
+         token_expires_at = excluded.token_expires_at, refresh_token_expires_at = excluded.refresh_token_expires_at,
+         scopes = excluded.scopes, updated_at = datetime('now')`,
+    ).bind(crypto.randomUUID(), pending.organization_id, String(githubUser.id), githubUser.login,
+      encrypted.ciphertext, encrypted.iv, encryptedRefresh?.ciphertext ?? null, encryptedRefresh?.iv ?? null,
+      tokenExpiresAt, refreshTokenExpiresAt, tokenData.scope ?? "GitHub App permissions").run();
+    await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, metadata) VALUES (?, ?, ?, 'github.connected', 'github_connection', ?)")
+      .bind(crypto.randomUUID(), pending.organization_id, pending.user_id, JSON.stringify({ githubLogin: githubUser.login })).run();
+    return c.redirect(githubDashboardRedirect(c.env, "connected", customerRedirect));
+  } catch {
+    try { return c.redirect(githubDashboardRedirect(c.env, "error", customerRedirect)); }
+    catch { return c.text("GitHub connection failed. Check server configuration and try again.", 502); }
+  }
+});
+
 app.get("/v1/github/repositories", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
