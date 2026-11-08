@@ -92,7 +92,7 @@ Before enabling customer deployments:
 
 The health-check API contract and the Go loopback probe/report primitives exist, and the release publisher can atomically activate a previously verified immutable release by release ID. These pieces are not yet wired into one operational lifecycle:
 
-- `nexora-static-publisher` currently downloads, validates, and activates an artifact, then reports activation. It does not execute a post-activation HTTP health probe or submit a health-check report.
+- `nexora-static-publisher` downloads, validates, and activates an artifact, installs the Nginx vhost through the privileged broker, and only then reports activation. It does not yet execute a post-activation HTTP health probe or submit a health-check report.
 - `nexora-runtime-node` currently heartbeats and polls desired state while explicitly rejecting execution-enabled snapshots. It does not start workloads, call `runtimehealth.ProbeAndReport`, or consume rollback guidance.
 - An unhealthy health-check report marks the release failed and returns the previous deployment/node as rollback guidance. The API does not issue a rollback command, and the runtime node does not perform a rollback. The workload row is metadata; updating it is not proof that the serving release was switched back.
 - `releasepublisher.Activate` is only a local atomic symlink-switch primitive. It is not yet connected to a signed, idempotent rollback request or an acknowledgement/audit lifecycle.
