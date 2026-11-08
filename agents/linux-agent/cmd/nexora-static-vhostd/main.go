@@ -21,7 +21,6 @@ const (
 	socketPath = "/run/nexora-static-vhost/vhost.sock"
 	configDir = "/etc/nginx/conf.d"
 	publisherUser = "nexora-runtime"
-	socketGroup = "nexora-static"
 )
 
 func main() {
@@ -33,10 +32,6 @@ func main() {
 	if err != nil { fatal("cannot resolve publisher account: %v", err) }
 	uid, err := strconv.ParseUint(publisher.Uid, 10, 32)
 	if err != nil { fatal("invalid publisher UID: %v", err) }
-	group, err := user.LookupGroup(socketGroup)
-	if err != nil { fatal("cannot resolve socket group: %v", err) }
-	gid, err := strconv.ParseUint(group.Gid, 10, 32)
-	if err != nil { fatal("invalid socket group GID: %v", err) }
 	trust, err := staticvhost.LoadRootBrokerTrust()
 	if err != nil {
 		fatal("deployment-envelope trust configuration is unavailable: %v", err)
@@ -50,16 +45,13 @@ func main() {
 	}
 	runtimeStat, ok := runtimeInfo.Sys().(*syscall.Stat_t)
 	if !ok || !runtimeInfo.IsDir() || runtimeInfo.Mode()&os.ModeSymlink != 0 ||
-		runtimeStat.Uid != 0 || runtimeInfo.Mode().Perm()&0022 != 0 {
+		runtimeStat.Uid != 0 || runtimeStat.Gid != uint32(syscall.Getegid()) || runtimeInfo.Mode().Perm()&0022 != 0 {
 		fatal("broker runtime directory is not a trusted root-owned directory")
-	}
-	if err := os.Chown("/run/nexora-static-vhost", 0, int(gid)); err != nil {
-		fatal("set broker runtime directory ownership: %v", err)
 	}
 	if err := os.Chmod("/run/nexora-static-vhost", 0750); err != nil {
 		fatal("set broker runtime directory mode: %v", err)
 	}
-	listener, err := listenSocket(socketPath, int(gid))
+	listener, err := listenSocket(socketPath)
 	if err != nil { fatal("configure broker socket: %v", err) }
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -68,7 +60,7 @@ func main() {
 	}
 }
 
-func listenSocket(path string, gid int) (*net.UnixListener, error) {
+func listenSocket(path string) (*net.UnixListener, error) {
 	if _, err := os.Lstat(path); err == nil {
 		return nil, errors.New("socket path already exists; refusing to replace it")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -77,10 +69,6 @@ func listenSocket(path string, gid int) (*net.UnixListener, error) {
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name:path, Net:"unix"})
 	if err != nil { return nil, err }
 	listener.SetUnlinkOnClose(true)
-	if err := os.Chown(path, 0, gid); err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("set socket ownership: %w", err)
-	}
 	if err := os.Chmod(path, 0660); err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("set socket mode: %w", err)
