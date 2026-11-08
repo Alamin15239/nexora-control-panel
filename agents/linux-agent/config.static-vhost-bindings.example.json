@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "hostingAccountId": "REPLACE_WITH_HOSTING_ACCOUNT_ID",
+      "linuxUsername": "REPLACE_WITH_HOSTING_LINUX_USERNAME",
+      "linuxUid": 1001
+    }
+  ],
+  "domains": [
+    {
+      "domainId": "REPLACE_WITH_DOMAIN_ID",
+      "hostingAccountId": "REPLACE_WITH_HOSTING_ACCOUNT_ID",
+      "hostname": "www.example.test"
+    }
+  ]
+}
