@@ -31,6 +31,8 @@ const navigation = [
     items: [
       { label: "Servers & nodes", href: "/servers", icon: Server },
       { label: "Hosting packages", href: "/hosting-plans", icon: Box },
+      { label: "Payment orders", href: "/payment-orders", icon: Users },
+      { label: "Payment settings", href: "/payment-settings", icon: Settings2 },
       { label: "Customer accounts", href: "/customer-accounts", icon: Users },
       { label: "Hosting accounts", href: "/hosting-accounts", icon: Server },
       { label: "Monitoring", href: "/monitoring", icon: Activity },
@@ -53,7 +55,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   const normalizedPathname = (pathname || "/").replace(/\/+$/, "") || "/";
   const isPublicAuthRoute = ["/login", "/signup", "/forgot-password", "/reset-password"]
     .some(route => normalizedPathname === route || normalizedPathname.startsWith(`${route}/`));
-  const isCustomerRoute = normalizedPathname === "/customer" || normalizedPathname.startsWith("/customer/");
+  const isCustomerRoute = normalizedPathname === "/customer" || normalizedPathname.startsWith("/customer/") || normalizedPathname === "/store" || normalizedPathname.startsWith("/store/");
   const [accessChecking, setAccessChecking] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
