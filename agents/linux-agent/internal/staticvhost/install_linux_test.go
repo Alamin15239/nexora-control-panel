@@ -71,3 +71,19 @@ func TestInstallRejectsSymlinkTarget(t *testing.T) {
 	got,err:=os.ReadFile(target);if err!=nil{t.Fatal(err)}
 	if string(got)!="keep"{t.Fatalf("symlink target modified: %q",got)}
 }
+
+func TestInstallRejectsSymlinkedLockFile(t *testing.T) {
+	dir, uid := testConfigDir(t)
+	target := filepath.Join(t.TempDir(), "lock-target")
+	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil { t.Fatal(err) }
+	lockPath := filepath.Join(dir, "."+validName()+".lock")
+	if err := os.Symlink(target, lockPath); err != nil { t.Fatal(err) }
+	runner := &fakeRunner{}
+	if err := Install(dir, validName(), config("    server_name example.test;"), uid, runner); err == nil {
+		t.Fatal("accepted symlinked install lock")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil { t.Fatal(err) }
+	if string(got) != "keep" { t.Fatalf("lock target changed: %q", got) }
+	if len(runner.calls) != 0 { t.Fatalf("commands ran despite unsafe lock: %#v", runner.calls) }
+}
