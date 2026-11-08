@@ -51,6 +51,12 @@ VALUES ('project-a','org-a','account-a','connection-a','repo-1','owner/repo')"""
 db.execute("""INSERT INTO github_deployments
 (id,organization_id,project_id,commit_sha,branch,trigger_type)
 VALUES ('deployment-a','org-a','project-a',?,'main','manual')""", ("a" * 40,))
+db.execute("""INSERT INTO github_projects
+(id,organization_id,hosting_account_id,github_connection_id,github_repository_id,repository_full_name)
+VALUES ('project-b','org-a','account-a','connection-a','repo-2','owner/other-repo')""")
+db.execute("""INSERT INTO github_deployments
+(id,organization_id,project_id,commit_sha,branch,trigger_type)
+VALUES ('deployment-b','org-a','project-b',?,'main','manual')""", ("b" * 40,))
 def must_reject(label, sql, args):
     try:
         db.execute(sql, args)
@@ -183,7 +189,7 @@ must_reject(
 )
 must_reject(
     "release execution tenant and project binding is immutable",
-    "UPDATE application_releases SET project_id='project-b' WHERE id='release-a'",
+    "UPDATE application_releases SET project_id='project-b', deployment_id='deployment-b' WHERE id='release-a'",
     (),
 )
 must_reject(
