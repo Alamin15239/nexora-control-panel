@@ -20,7 +20,7 @@ import (
 
 const (
 	maxBrokerRequest = 4096
-	brokerTimeout = 10 * time.Second
+	brokerTimeout = 2 * time.Minute
 )
 
 type registryFile struct {
