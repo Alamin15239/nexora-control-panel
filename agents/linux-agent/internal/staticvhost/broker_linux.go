@@ -34,9 +34,9 @@ const (
 )
 
 type brokerTrustFile struct {
-	Issuer string
-	Audience string
-	KeyID string
+	Issuer string `json:"issuer"`
+	Audience string `json:"audience"`
+	KeyID string `json:"keyId"`
 }
 
 type BrokerTrust struct {
@@ -47,12 +47,12 @@ type BrokerTrust struct {
 }
 
 type brokerRequest struct {
-	DeploymentEnvelope string
+	DeploymentEnvelope string `json:"deploymentEnvelope"`
 }
 
 type brokerResponse struct {
-	OK bool
-	Error string
+	OK bool `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // LoadRootBrokerTrust loads the pinned deployment-envelope trust configuration
