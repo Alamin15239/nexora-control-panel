@@ -98,3 +98,15 @@ The health-check API contract and the Go loopback probe/report primitives exist,
 - `releasepublisher.Activate` is only a local atomic symlink-switch primitive. It is not yet connected to a signed, idempotent rollback request or an acknowledgement/audit lifecycle.
 
 Consequently, do not treat `health_checking` as a completed deployment, do not claim automatic rollback, and do not enable customer deployment execution. The next implementation phase must define and test the static-site HTTP probe target and the signed rollback command/acknowledgement protocol before wiring either into the publisher or runtime supervisor.
+## Rollback protocol implementation boundary
+
+Rollback must be implemented for the actual serving runtime, not by calling the static publisher from the OCI runtime process. Nexora currently has two distinct mechanisms:
+
+- **Static hosting release:** the publisher owns a versioned document-root tree and `current` symlink. Its local `releasepublisher.Rollback(baseDir, failedReleaseID, previousReleaseID)` compare-and-switch primitive is appropriate only for this filesystem-backed release layout.
+- **OCI application workload:** the runtime supervisor owns a container identified by workload ID and release ID. Rolling it back means reconciling that workload to the previously approved immutable release/image digest through the OCI lifecycle backend; changing a static symlink cannot roll back a container.
+
+The control-plane protocol must therefore carry an explicit target kind and bind every command to the exact node identity, project, deployment/release, workload (when OCI), expected currently-active failed release, previous successful release, and a unique command ID. The node must reject unknown fields, stale expected-release values, cross-node commands, expired commands, duplicate command IDs, and targets that do not match its durable local ownership state. A command is acknowledged only after the serving backend has been inspected and confirms the target release is active. The acknowledgement must be signed by the node and idempotently recorded by the API; a timeout must permit safe retry without replaying an unrelated rollback.
+
+The API must issue rollback work only after an authenticated unhealthy health-check report has been matched to the exact assigned release and a verified previous successful release. It must not infer the rollback target from client-supplied values. The command queue, one-time delivery/claim semantics, expiry, retry policy, signed acknowledgement endpoint, database state transitions, and audit events must be designed and integration-tested together. Until then, `rollbackRequired` is advisory guidance only and must never be presented as an executed rollback.
+
+The current runtime node intentionally rejects command-bearing desired-state responses. Do not remove that guard or add command delivery until both the server-side command lifecycle and the node-side consumer are implemented and tested end to end.
