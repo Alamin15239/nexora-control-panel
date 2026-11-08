@@ -102,6 +102,8 @@ func newFixture(t *testing.T) fixture {
 		ProjectID:"project_test",
 		DeploymentID:"deploy_test_001",
 		HostingAccountID:"hosting_test",
+		DomainID:"domain_test",
+		Hostname:"www.example.test",
 		RepositoryID:"123456789",
 		CommitSHA:"0123456789abcdef0123456789abcdef01234567",
 	}
