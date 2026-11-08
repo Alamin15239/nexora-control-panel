@@ -21,9 +21,9 @@ var (
 // Binding is resolved by the control plane from the project's hosting account
 // and its eligible domain. Callers must not populate it from artifact content.
 type Binding struct {
-	DomainID string
-	Hostname string
-	HostingAccountID string
+	DomainID string `json:"domainId"`
+	Hostname string `json:"hostname"`
+	HostingAccountID string `json:"hostingAccountId"`
 }
 
 // ConfigName returns a deterministic, collision-resistant filename that does
