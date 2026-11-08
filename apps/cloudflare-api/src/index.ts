@@ -318,6 +318,7 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/health/schema" ||
     path.startsWith("/v1/auth/") ||
     path.startsWith("/v1/customer/") ||
+    path.startsWith("/v1/store/") ||
     path.startsWith("/v1/applications/") ||
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
@@ -350,7 +351,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "payment_settings", "payment_orders"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -1601,6 +1602,193 @@ app.post("/v1/agent/heartbeat", async (c) => {
 });
 
 
+
+type StorePlanRow = { id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null; website_limit: number; database_limit: number; mailbox_limit: number; price_sar_minor: number; billing_period: string };
+async function platformOwnerOrganization(db: D1Database): Promise<string | null> {
+  const row = await db.prepare(
+    `SELECT m.organization_id AS organizationId
+     FROM platform_memberships pm
+     JOIN memberships m ON m.user_id = pm.user_id
+     WHERE pm.role = 'PLATFORM_OWNER' AND pm.status = 'ACTIVE'
+     ORDER BY pm.created_at ASC LIMIT 1`,
+  ).first<{ organizationId: string }>();
+  return row?.organizationId ?? null;
+}
+function platformAdmin(identity: { platformRole: PlatformRole | null }): boolean {
+  return identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+}
+
+app.get("/v1/store/plans", async (c) => {
+  const ownerOrganizationId = await platformOwnerOrganization(c.env.DB);
+  if (!ownerOrganizationId) return c.json({ plans: [] });
+  const rows = await c.env.DB.prepare(
+    `SELECT id,name,disk_limit_bytes,bandwidth_limit_bytes,website_limit,database_limit,mailbox_limit,
+            price_sar_minor,billing_period
+     FROM hosting_plans
+     WHERE organization_id = ? AND active = 1 AND public_enabled = 1 AND price_sar_minor > 0
+     ORDER BY price_sar_minor ASC,name COLLATE NOCASE`,
+  ).bind(ownerOrganizationId).all<StorePlanRow>();
+  return c.json({ plans: rows.results ?? [] });
+});
+
+app.get("/v1/store/payment-instructions", async (c) => {
+  const ownerOrganizationId = await platformOwnerOrganization(c.env.DB);
+  if (!ownerOrganizationId) return c.json({ configured: false, instructions: null });
+  const settings = await c.env.DB.prepare(
+    "SELECT bank_name,account_holder,iban,payment_instructions FROM payment_settings WHERE organization_id = ? LIMIT 1",
+  ).bind(ownerOrganizationId).first<{ bank_name: string | null; account_holder: string | null; iban: string | null; payment_instructions: string | null }>();
+  const configured = Boolean(settings?.bank_name && settings?.account_holder && settings?.iban);
+  return c.json({ configured, instructions: configured ? settings : null });
+});
+
+app.get("/v1/store/orders", async (c) => {
+  const identity = await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" },401);
+  const rows = await c.env.DB.prepare(
+    `SELECT id,order_reference,plan_name,amount_sar_minor,billing_period,desired_username,primary_domain,
+            status,transfer_reference,receipt_content_type,receipt_size,review_note,created_at,updated_at
+     FROM payment_orders WHERE organization_id = ? AND user_id = ? ORDER BY created_at DESC`,
+  ).bind(identity.organizationId,identity.id).all();
+  return c.json({ orders: rows.results ?? [] });
+});
+
+app.post("/v1/store/orders", async (c) => {
+  const identity = await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" },401);
+  let input: Record<string,unknown>;
+  try { input = await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const planId = typeof input.planId === "string" ? input.planId : "";
+  const username = typeof input.username === "string" ? input.username.trim().toLowerCase() : "";
+  const domain = typeof input.primaryDomain === "string" ? input.primaryDomain.trim().toLowerCase() : "";
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(username)) return c.json({message:"Choose a username of 3–16 lowercase letters, numbers or underscores."},400);
+  if (domain && !validDomain(domain)) return c.json({message:"Enter a valid domain name."},400);
+  const ownerOrganizationId = await platformOwnerOrganization(c.env.DB);
+  if (!ownerOrganizationId) return c.json({message:"The hosting catalogue is not configured."},503);
+  const plan = await c.env.DB.prepare(
+    "SELECT id,name,price_sar_minor,billing_period,website_limit FROM hosting_plans WHERE id = ? AND organization_id = ? AND active = 1 AND public_enabled = 1 LIMIT 1",
+  ).bind(planId,ownerOrganizationId).first<{id:string;name:string;price_sar_minor:number|null;billing_period:string;website_limit:number}>();
+  if (!plan || !plan.price_sar_minor || plan.price_sar_minor < 1) return c.json({message:"This hosting plan is not available for purchase."},404);
+  if (domain && plan.website_limit < 1) return c.json({message:"This plan does not include a website slot."},409);
+  const id=crypto.randomUUID(), reference="NX-"+randomHex(6).toUpperCase(), now=new Date().toISOString();
+  await c.env.DB.prepare(
+    `INSERT INTO payment_orders
+     (id,organization_id,user_id,plan_id,order_reference,plan_name,amount_sar_minor,billing_period,desired_username,primary_domain,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,'AWAITING_PAYMENT',?,?)`,
+  ).bind(id,identity.organizationId,identity.id,plan.id,reference,plan.name,plan.price_sar_minor,plan.billing_period,username,domain||null,now,now).run();
+  return c.json({order:{id,order_reference:reference,plan_name:plan.name,amount_sar_minor:plan.price_sar_minor,billing_period:plan.billing_period,status:"AWAITING_PAYMENT"}},201);
+});
+
+app.post("/v1/store/orders/:id/receipt", async (c) => {
+  const identity = await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!c.env.ARTIFACTS) return c.json({message:"Private receipt storage is unavailable."},503);
+  let input: Record<string,unknown>;
+  try { input=await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const transferReference=typeof input.transferReference==="string"?input.transferReference.trim().slice(0,100):"";
+  const contentType=typeof input.contentType==="string"?input.contentType:"";
+  const encoded=typeof input.fileBase64==="string"?input.fileBase64:"";
+  if (!transferReference) return c.json({message:"Enter the bank transfer reference."},400);
+  if (!["image/jpeg","image/png","application/pdf"].includes(contentType)) return c.json({message:"Upload a JPG, PNG or PDF receipt."},400);
+  if (!encoded || encoded.length > 7_000_000) return c.json({message:"Receipt is empty or exceeds the 5 MB limit."},400);
+  let bytes: Uint8Array;
+  try { const binary=atob(encoded); bytes=Uint8Array.from(binary,ch=>ch.charCodeAt(0)); } catch { return c.json({message:"Receipt file is invalid."},400); }
+  if (bytes.length < 1 || bytes.length > 5*1024*1024) return c.json({message:"Receipt must be 5 MB or smaller."},400);
+  const order=await c.env.DB.prepare("SELECT id,status FROM payment_orders WHERE id=? AND organization_id=? AND user_id=? LIMIT 1")
+    .bind(c.req.param("id"),identity.organizationId,identity.id).first<{id:string;status:string}>();
+  if (!order) return c.json({message:"Order not found."},404);
+  if (!["AWAITING_PAYMENT","REJECTED"].includes(order.status)) return c.json({message:"A receipt cannot be changed for this order status."},409);
+  const key="payment-receipts/"+identity.organizationId+"/"+order.id+"/"+crypto.randomUUID();
+  await c.env.ARTIFACTS.put(key,bytes,{httpMetadata:{contentType}});
+  const now=new Date().toISOString();
+  await c.env.DB.prepare(
+    "UPDATE payment_orders SET receipt_key=?,receipt_content_type=?,receipt_size=?,transfer_reference=?,status='RECEIPT_SUBMITTED',updated_at=?,review_note=NULL WHERE id=? AND organization_id=? AND user_id=?",
+  ).bind(key,contentType,bytes.length,transferReference,now,order.id,identity.organizationId,identity.id).run();
+  return c.json({submitted:true,message:"Receipt submitted for Nexora review."});
+});
+
+app.get("/v1/platform/payment-settings", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  const row=await c.env.DB.prepare("SELECT bank_name,account_holder,iban,payment_instructions,updated_at FROM payment_settings WHERE organization_id=? LIMIT 1")
+    .bind(identity.organizationId).first();
+  return c.json({settings:row??{bank_name:"",account_holder:"",iban:"",payment_instructions:""}});
+});
+
+app.put("/v1/platform/payment-settings", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  let input:Record<string,unknown>;
+  try { input=await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const bankName=typeof input.bankName==="string"?input.bankName.trim().slice(0,100):"";
+  const holder=typeof input.accountHolder==="string"?input.accountHolder.trim().slice(0,120):"";
+  const iban=typeof input.iban==="string"?input.iban.replace(/\\s/g,"").toUpperCase().slice(0,34):"";
+  const instructions=typeof input.instructions==="string"?input.instructions.trim().slice(0,2000):"";
+  if (iban && !/^[A-Z]{2}[0-9A-Z]{13,32}$/.test(iban)) return c.json({message:"Enter a valid IBAN or leave it blank until you are ready."},400);
+  await c.env.DB.prepare(
+    `INSERT INTO payment_settings (organization_id,bank_name,account_holder,iban,payment_instructions,updated_by,updated_at)
+     VALUES (?,?,?,?,?,?,?) ON CONFLICT(organization_id) DO UPDATE SET bank_name=excluded.bank_name,
+     account_holder=excluded.account_holder,iban=excluded.iban,payment_instructions=excluded.payment_instructions,
+     updated_by=excluded.updated_by,updated_at=excluded.updated_at`,
+  ).bind(identity.organizationId,bankName||null,holder||null,iban||null,instructions||null,identity.id,new Date().toISOString()).run();
+  await c.env.DB.prepare("INSERT INTO audit_logs (id,organization_id,actor_user_id,action,resource_type,metadata) VALUES (?,?,?,'payment.settings_updated','payment_settings',?)")
+    .bind(crypto.randomUUID(),identity.organizationId,identity.id,JSON.stringify({bankConfigured:Boolean(bankName&&holder&&iban)})).run();
+  return c.json({saved:true});
+});
+
+app.get("/v1/platform/payment-orders", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  const rows=await c.env.DB.prepare(
+    `SELECT po.id,po.order_reference,po.plan_name,po.amount_sar_minor,po.billing_period,po.desired_username,
+            po.primary_domain,po.status,po.transfer_reference,po.receipt_content_type,po.receipt_size,
+            po.review_note,po.created_at,po.updated_at,u.email,u.display_name AS customer_name,o.name AS organization_name
+     FROM payment_orders po JOIN users u ON u.id=po.user_id JOIN organizations o ON o.id=po.organization_id
+     ORDER BY po.created_at DESC LIMIT 200`,
+  ).all();
+  return c.json({orders:rows.results??[]});
+});
+
+app.get("/v1/platform/payment-orders/:id/receipt", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  const order=await c.env.DB.prepare("SELECT receipt_key,receipt_content_type FROM payment_orders WHERE id=? LIMIT 1")
+    .bind(c.req.param("id")).first<{receipt_key:string|null;receipt_content_type:string|null}>();
+  if (!order?.receipt_key || !c.env.ARTIFACTS) return c.json({message:"Receipt not found."},404);
+  const object=await c.env.ARTIFACTS.get(order.receipt_key);
+  if (!object) return c.json({message:"Receipt file is missing."},404);
+  const bytes=new Uint8Array(await object.arrayBuffer());
+  let binary=""; for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+  return c.json({contentType:order.receipt_content_type,fileBase64:btoa(binary)});
+});
+
+app.post("/v1/platform/payment-orders/:id/review", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  let input:Record<string,unknown>;
+  try { input=await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const decision=input.decision==="approve"?"APPROVED":input.decision==="reject"?"REJECTED":null;
+  const note=typeof input.note==="string"?input.note.trim().slice(0,500):"";
+  if (!decision) return c.json({message:"Choose approve or reject."},400);
+  if (decision==="REJECTED"&&!note) return c.json({message:"A reason is required when rejecting a payment."},400);
+  const order=await c.env.DB.prepare("SELECT id,organization_id,user_id,status FROM payment_orders WHERE id=? LIMIT 1")
+    .bind(c.req.param("id")).first<{id:string;organization_id:string;user_id:string;status:string}>();
+  if (!order) return c.json({message:"Order not found."},404);
+  if (!["RECEIPT_SUBMITTED","UNDER_REVIEW"].includes(order.status)) return c.json({message:"Only submitted receipts can be reviewed."},409);
+  const now=new Date().toISOString();
+  const result=await c.env.DB.prepare(
+    "UPDATE payment_orders SET status=?,reviewed_by=?,reviewed_at=?,review_note=?,updated_at=? WHERE id=? AND status IN ('RECEIPT_SUBMITTED','UNDER_REVIEW')",
+  ).bind(decision,identity.id,now,note||null,now,order.id).run();
+  if ((result.meta?.changes??0)!==1) return c.json({message:"This order was already reviewed. Refresh the list."},409);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id,organization_id,actor_user_id,action,resource_type,resource_id,metadata) VALUES (?,?,?,?,?,?,?)")
+    .bind(crypto.randomUUID(),identity.organizationId,identity.id,decision==="APPROVED"?"payment.order_approved":"payment.order_rejected","payment_order",order.id,JSON.stringify({customerOrganizationId:order.organization_id,note})).run();
+  return c.json({reviewed:true,status:decision,message:decision==="APPROVED"?"Payment approved. Hosting provisioning must now be completed from the hosting-account workflow.":"Payment rejected. The customer can submit a corrected receipt."});
+});
+
 type HostingPlanRow = {
   id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null;
   website_limit: number; database_limit: number; mailbox_limit: number;
@@ -1614,7 +1802,7 @@ app.get("/v1/hosting-plans", async (c) => {
   const result = await c.env.DB.prepare(
     `SELECT id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit,
             database_limit, mailbox_limit, app_cpu_millis, app_memory_mib,
-            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at
+            app_disk_mib, app_process_limit, app_build_minutes_month, active, created_at, price_sar_minor, billing_period, public_enabled
      FROM hosting_plans WHERE organization_id = ? ORDER BY created_at DESC`,
   ).bind(identity.organizationId).all<HostingPlanRow>();
   return c.json({ plans: result.results ?? [] });
@@ -1639,7 +1827,12 @@ app.post("/v1/hosting-plans", async (c) => {
   const appDiskMiB = input.appDiskMiB === undefined ? 2048 : Number(input.appDiskMiB);
   const appProcessLimit = input.appProcessLimit === undefined ? 128 : Number(input.appProcessLimit);
   const appBuildMinutesMonth = input.appBuildMinutesMonth === undefined ? 300 : Number(input.appBuildMinutesMonth);
+  const priceSarMinor = input.priceSarMinor === "" || input.priceSarMinor == null ? null : Number(input.priceSarMinor);
+  const billingPeriod = input.billingPeriod === "yearly" ? "yearly" : "monthly";
+  const publicEnabled = input.publicEnabled === true ? 1 : 0;
   if (!name || name.length > 80) return c.json({ message: "Plan name is required (maximum 80 characters)" }, 400);
+  if (priceSarMinor !== null && (!Number.isSafeInteger(priceSarMinor) || priceSarMinor < 100 || priceSarMinor > 100000000)) return c.json({ message: "Price must be at least SAR 1.00 and no more than SAR 1,000,000.00." }, 400);
+  if (publicEnabled && priceSarMinor === null) return c.json({ message: "Set a price before publishing this plan." }, 400);
   if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
   if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
   if (![websiteLimit, databaseLimit, mailboxLimit].every((v) => Number.isInteger(v) && v >= 0 && v <= 10000)) {
@@ -1658,10 +1851,11 @@ app.post("/v1/hosting-plans", async (c) => {
       c.env.DB.prepare(
         `INSERT INTO hosting_plans
          (id, organization_id, name, disk_limit_bytes, bandwidth_limit_bytes, website_limit, database_limit, mailbox_limit,
-          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          app_cpu_millis, app_memory_mib, app_disk_mib, app_process_limit, app_build_minutes_month, active,
+          price_sar_minor, billing_period, public_enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       ).bind(id, identity.organizationId, name, diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
-        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth),
+        websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth, priceSarMinor, billingPeriod, publicEnabled),
       c.env.DB.prepare(
         "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'hosting_plan.create', 'hosting_plan', ?)",
       ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id),
@@ -1670,7 +1864,7 @@ app.post("/v1/hosting-plans", async (c) => {
       bandwidth_limit_bytes: bandwidthGb === null ? null : bandwidthGb * 1024 ** 3,
       website_limit: websiteLimit, database_limit: databaseLimit, mailbox_limit: mailboxLimit,
       app_cpu_millis: appCpuMillis, app_memory_mib: appMemoryMiB, app_disk_mib: appDiskMiB,
-      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1 } }, 201);
+      app_process_limit: appProcessLimit, app_build_minutes_month: appBuildMinutesMonth, active: 1, price_sar_minor: priceSarMinor, billing_period: billingPeriod, public_enabled: publicEnabled } }, 201);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (/UNIQUE constraint failed: hosting_plans.organization_id, hosting_plans.name/i.test(message)) {
@@ -1680,6 +1874,26 @@ app.post("/v1/hosting-plans", async (c) => {
   }
 });
 
+
+
+app.post("/v1/hosting-plans/:id/store-settings", async (c) => {
+  const identity=await bearerIdentity(c.req.raw,c.env.DB);
+  if (!identity) return c.json({message:"Not authenticated"},401);
+  if (!platformAdmin(identity)) return c.json({message:"Platform administrator access required."},403);
+  let input:Record<string,unknown>;
+  try { input=await c.req.json<Record<string,unknown>>(); } catch { return c.json({message:"Invalid JSON request"},400); }
+  const price=input.priceSarMinor===""||input.priceSarMinor==null?null:Number(input.priceSarMinor);
+  const period=input.billingPeriod==="yearly"?"yearly":"monthly";
+  const publish=input.publicEnabled===true?1:0;
+  if (price!==null&&(!Number.isSafeInteger(price)||price<100||price>100000000)) return c.json({message:"Price must be between SAR 1.00 and SAR 1,000,000.00."},400);
+  if (publish&&price===null) return c.json({message:"A price is required before publishing this plan."},400);
+  const result=await c.env.DB.prepare("UPDATE hosting_plans SET price_sar_minor=?,billing_period=?,public_enabled=? WHERE id=? AND organization_id=?")
+    .bind(price,period,publish,c.req.param("id"),identity.organizationId).run();
+  if ((result.meta?.changes??0)!==1) return c.json({message:"Hosting plan not found."},404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id,organization_id,actor_user_id,action,resource_type,resource_id,metadata) VALUES (?,?,?,'hosting_plan.store_settings_updated','hosting_plan',?,?)")
+    .bind(crypto.randomUUID(),identity.organizationId,identity.id,c.req.param("id"),JSON.stringify({priceSarMinor:price,billingPeriod:period,publicEnabled:publish===1})).run();
+  return c.json({saved:true});
+});
 
 app.post("/v1/hosting-plans/:id/website-limit", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
