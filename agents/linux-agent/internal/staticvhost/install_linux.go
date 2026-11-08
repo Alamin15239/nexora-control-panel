@@ -41,6 +41,10 @@ func Install(configDir, filename, content string, ownerUID uint32, runner Comman
 	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || stat.Uid != ownerUID || info.Mode().Perm()&0022 != 0 {
 		return errors.New("Nginx config directory failed ownership or permission checks")
 	}
+	unlock, err := acquireInstallLock(configDir, filename, ownerUID)
+	if err != nil { return err }
+	defer unlock()
+
 	target := filepath.Join(configDir, filename)
 	var previous []byte
 	hadPrevious := false
@@ -80,6 +84,21 @@ func Install(configDir, filename, content string, ownerUID uint32, runner Comman
 	return nil
 }
 
+func acquireInstallLock(dir, filename string, ownerUID uint32) (func(), error) {
+	path := filepath.Join(dir, "."+filename+".lock")
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0600)
+	if err != nil { return nil, fmt.Errorf("open Nginx install lock: %w", err) }
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if err != nil || !ok || !info.Mode().IsRegular() || stat.Uid != ownerUID || info.Mode().Perm()&0077 != 0 {
+		file.Close()
+		return nil, errors.New("Nginx install lock failed ownership or permission checks")
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil { file.Close(); return nil, fmt.Errorf("lock Nginx install: %w", err) }
+	return func() { _ = syscall.Flock(fd, syscall.LOCK_UN); _ = file.Close() }, nil
+}
+
 func atomicWrite(dir, filename string, data []byte, ownerUID uint32) error {
 	tmp, err := os.CreateTemp(dir, ".nexora-static-*.tmp")
 	if err != nil { return fmt.Errorf("create staged Nginx config: %w", err) }
@@ -92,6 +111,11 @@ func atomicWrite(dir, filename string, data []byte, ownerUID uint32) error {
 	if err := os.Rename(tmpPath, filepath.Join(dir, filename)); err != nil { return fmt.Errorf("atomically publish Nginx config: %w", err) }
 	return syncDirectory(dir)
 }
+func (f *os.File) Close() error {
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return f.Close()
+}
+
 func syncDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil { return err }
