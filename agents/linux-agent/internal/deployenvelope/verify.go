@@ -30,7 +30,7 @@ var (
 	hex32Pattern = regexp.MustCompile("^[a-f0-9]{32}$")
 	digestPattern = regexp.MustCompile("^[a-f0-9]{64}$")
 	commitPattern = regexp.MustCompile("^[a-f0-9]{40}$")
-	hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	hostnamePattern = regexp.MustCompile("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
 	repositoryIDPattern = regexp.MustCompile("^[1-9][0-9]{0,19}$")
 )
 
@@ -133,7 +133,7 @@ func VerifySigned(token string, keys map[string]*rsa.PublicKey, issuer, audience
 	if claims.Issuer != issuer || claims.Audience != audience {
 		return zero, errors.New("deployment envelope issuer or audience does not match")
 	}
-	if !idPattern.MatchString(claims.OrganizationID) ||
+	if len(claims.Hostname) > 253 || !idPattern.MatchString(claims.OrganizationID) ||
 		!idPattern.MatchString(claims.ProjectID) ||
 		!idPattern.MatchString(claims.DeploymentID) ||
 		!idPattern.MatchString(claims.HostingAccountID) ||
