@@ -161,17 +161,21 @@ func activateLocked(baseDir, releaseID string) error {
 		return fmt.Errorf("inspect active release link: %w", statErr)
 	}
 
-	tmp := filepath.Join(baseDir, ".current-"+releaseID)
-	if _, err := os.Lstat(tmp); err == nil {
-		return errors.New("temporary activation path already exists")
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("inspect temporary activation path: %w", err)
+	// Use a unique private temporary directory so a process crash cannot leave
+	// a predictable temporary symlink that permanently blocks this release ID.
+	// The symlink and current path remain on the same filesystem, preserving
+	// the atomic rename while allowing abandoned temp directories to be cleaned
+	// up independently.
+	tempDir, err := os.MkdirTemp(baseDir, ".activation-")
+	if err != nil {
+		return fmt.Errorf("create private activation workspace: %w", err)
 	}
+	defer os.RemoveAll(tempDir)
+	tmp := filepath.Join(tempDir, "current")
 	if err := os.Symlink(filepath.Join("releases", releaseID), tmp); err != nil {
 		return fmt.Errorf("create temporary active link: %w", err)
 	}
 	if err := os.Rename(tmp, active); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("atomically switch active release: %w", err)
 	}
 	if err := syncDirectory(baseDir); err != nil {
