@@ -72,6 +72,8 @@ func signEnvelope(t *testing.T, key *rsa.PrivateKey, now time.Time, expected dep
 		"project_id":expected.ProjectID,
 		"deployment_id":expected.DeploymentID,
 		"hosting_account_id":expected.HostingAccountID,
+		"domain_id":expected.DomainID,
+		"hostname":expected.Hostname,
 		"repository_id":expected.RepositoryID,
 		"commit_sha":expected.CommitSHA,
 		"artifact_sha256":hex.EncodeToString(digest[:]),
