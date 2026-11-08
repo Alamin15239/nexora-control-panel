@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -23,11 +24,8 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 			Nonce:r.Header.Get("X-Nexora-Node-Nonce"),
 			Signature:r.Header.Get("X-Nexora-Node-Signature"),
 		}
-		issuedAt, parseErr := time.Parse(time.RFC3339, time.Unix(0,0).Format(time.RFC3339))
-		_ = issuedAt
-		if parseErr != nil { t.Fatal(parseErr) }
-		var timestamp int64
-		if _, scanErr := fmt.Sscan(proof.Timestamp,&timestamp); scanErr != nil { t.Errorf("invalid signed timestamp: %v",scanErr) }
+		timestamp, parseErr := strconv.ParseInt(proof.Timestamp,10,64)
+		if parseErr != nil { t.Errorf("invalid signed timestamp: %v",parseErr) }
 		if verifyErr := appnodeauth.Verify(publicKey,r.Header.Get("X-Nexora-Node-Identity"),r.Method,r.URL.Path,nil,proof,time.Unix(timestamp,0)); verifyErr != nil {
 			t.Errorf("request proof invalid: %v",verifyErr)
 			w.WriteHeader(http.StatusUnauthorized)
