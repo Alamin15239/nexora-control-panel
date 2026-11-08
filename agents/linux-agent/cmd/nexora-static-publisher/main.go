@@ -236,7 +236,7 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
 				continue
 			}
-			if err := staticvhost.RequestInstall(ctx, "", release.DomainID); err != nil {
+			if err := staticvhost.RequestInstall(ctx, "", result.SignedEnvelope); err != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s activated but vhost installation failed: %v\n", release.DeploymentID, err)
 				continue
 			}
