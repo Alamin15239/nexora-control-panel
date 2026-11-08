@@ -44,6 +44,7 @@ type BrokerTrust struct {
 	Audience string
 	KeyID string
 	PublicKey *rsa.PublicKey
+	Registry *BindingRegistry
 }
 
 type brokerRequest struct {
@@ -95,7 +96,11 @@ func LoadRootBrokerTrust() (BrokerTrust, error) {
 	if !ok || publicKey.N == nil || publicKey.N.BitLen() < 2048 || publicKey.E < 3 {
 		return trust, errors.New("pinned deployment public key must be RSA-2048 or stronger")
 	}
-	return BrokerTrust{Issuer:doc.Issuer, Audience:doc.Audience, KeyID:doc.KeyID, PublicKey:publicKey}, nil
+	registry, err := LoadRootBindingRegistry()
+	if err != nil {
+		return trust, err
+	}
+	return BrokerTrust{Issuer:doc.Issuer, Audience:doc.Audience, KeyID:doc.KeyID, PublicKey:publicKey, Registry:registry}, nil
 }
 
 func readRootOwnedFile(path string, limit int64) ([]byte, error) {
@@ -122,7 +127,7 @@ func readRootOwnedFile(path string, limit int64) ([]byte, error) {
 // itself supplies the domain/account binding; no mutable domain registry is used.
 func Serve(ctx context.Context, listener *net.UnixListener, allowedUID uint32, configDir string, trust BrokerTrust) error {
 	if listener == nil || configDir != "/etc/nginx/conf.d" ||
-		trust.Issuer == "" || trust.Audience == "" || trust.KeyID == "" || trust.PublicKey == nil {
+		trust.Issuer == "" || trust.Audience == "" || trust.KeyID == "" || trust.PublicKey == nil || trust.Registry == nil {
 		return errors.New("static vhost broker configuration is invalid")
 	}
 	slots := make(chan struct{}, 4)
@@ -205,6 +210,10 @@ func handleBrokerRequestWithInstaller(ctx context.Context, conn *net.UnixConn, a
 		DomainID: claims.DomainID,
 		Hostname: claims.Hostname,
 		HostingAccountID: claims.HostingAccountID,
+	}
+	if err := trust.Registry.Validate(binding); err != nil {
+		writeBrokerResponse(conn, brokerResponse{Error:"deployment domain/account binding is not authorized"})
+		return
 	}
 	if installer == nil { return }
 	if err := installer(configDir, binding); err != nil {
