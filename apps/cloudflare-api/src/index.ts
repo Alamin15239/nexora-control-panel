@@ -4358,7 +4358,9 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
     assignedNodeId: string | null;
   }>();
-  if (runtimeAssignment && (
+  // Fail closed: a missing settings row is not permission to dispatch a build.
+  // Every deployment must be bound to an enabled runtime and an approved isolated pool/node.
+  if (!runtimeAssignment || (
     runtimeAssignment.runtimeEnabled !== 1 ||
     !runtimeAssignment.nodePoolId ||
     runtimeAssignment.poolStatus !== "ready" ||
@@ -4366,7 +4368,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     !runtimeAssignment.assignedNodeId
   )) {
     return c.json({
-      message: "Application deployment is not admitted: the runtime must be enabled and assigned to a ready isolated pool with an online runtime node.",
+      message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
   }
 
@@ -4376,7 +4378,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
-  const applicationReleaseId = runtimeAssignment ? crypto.randomUUID() : null;
+  const applicationReleaseId = crypto.randomUUID();
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
