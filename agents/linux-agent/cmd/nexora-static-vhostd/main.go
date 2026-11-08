@@ -19,7 +19,6 @@ import (
 
 const (
 	socketPath = "/run/nexora-static-vhost/vhost.sock"
-	registryPath = "/etc/nexora-static-vhost/domains.json"
 	configDir = "/etc/nginx/conf.d"
 	publisherUser = "nexora-runtime"
 	socketGroup = "nexora-static"
@@ -38,8 +37,9 @@ func main() {
 	if err != nil { fatal("cannot resolve socket group: %v", err) }
 	gid, err := strconv.ParseUint(group.Gid, 10, 32)
 	if err != nil { fatal("invalid socket group GID: %v", err) }
-	if _, err := staticvhost.LoadRootRegistry(registryPath); err != nil {
-		fatal("trusted domain registry is unavailable: %v", err)
+	trust, err := staticvhost.LoadRootBrokerTrust()
+	if err != nil {
+		fatal("deployment-envelope trust configuration is unavailable: %v", err)
 	}
 	if err := os.MkdirAll("/run/nexora-static-vhost", 0750); err != nil {
 		fatal("create broker runtime directory: %v", err)
@@ -63,7 +63,7 @@ func main() {
 	if err != nil { fatal("configure broker socket: %v", err) }
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := staticvhost.Serve(ctx, listener, uint32(uid), registryPath, configDir); err != nil {
+	if err := staticvhost.Serve(ctx, listener, uint32(uid), configDir, trust); err != nil {
 		fatal("static vhost broker stopped: %v", err)
 	}
 }
