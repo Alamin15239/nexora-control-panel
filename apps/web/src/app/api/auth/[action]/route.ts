@@ -131,6 +131,21 @@ export async function POST(request: NextRequest, context: { params: Promise<{ ac
   }
 
   try {
+    // Password-reset email delivery is owned by nexora-api, where Resend secrets are configured.
+    if (action === "forgot-password") {
+      const upstream = await fetch("https://api.nexoraedge.digital/v1/auth/forgot-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: input.email }),
+        cache: "no-store",
+      });
+      const body = await upstream.text();
+      return new NextResponse(body || "{}", {
+        status: upstream.status,
+        headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+      });
+    }
+
     const db = await getDatabase();
     const email = normalizeEmail(input.email);
     const password = typeof input.password === "string" ? input.password : "";
