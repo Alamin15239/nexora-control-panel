@@ -44,6 +44,15 @@ func LoadRootRegistry(path string) (map[string]Binding, error) {
 	if path == "" || !filepathIsCleanAbsolute(path) {
 		return nil, errors.New("registry path must be absolute and clean")
 	}
+	parentInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return nil, fmt.Errorf("inspect static domain registry directory: %w", err)
+	}
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
+	if !ok || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 ||
+		parentStat.Uid != 0 || parentInfo.Mode().Perm()&0022 != 0 {
+		return nil, errors.New("static domain registry directory must be root-owned and non-writable by group or others")
+	}
 	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open static domain registry: %w", err)
@@ -187,8 +196,7 @@ func writeBrokerResponse(w io.Writer, response brokerResponse) {
 	if err != nil || len(payload) > 1024 { return }
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
-	_, _ = w.Write(header[:])
-	_, _ = w.Write(payload)
+	_ = writeBrokerFrame(w, header[:], payload)
 }
 
 // RequestInstall asks the privileged broker to install the vhost for a domain
