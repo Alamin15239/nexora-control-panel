@@ -1,5 +1,5 @@
 // Package artifactreceiver composes deployment authorization, artifact integrity,
-// archive validation, private extraction, and atomic release activation.
+// archive validation, private extraction, and immutable release storage.
 //
 // This is an offline publisher primitive, not a network service. A future receiver
 // must authenticate the node, independently load deployment ownership from the
@@ -42,7 +42,6 @@ type Request struct {
 	Limits   deployarchive.Limits
 	Replay      ReplayGuard
 	OnValidated func(context.Context, deployenvelope.Claims, deployarchive.Result) error
-	OnPublished func(context.Context, deployenvelope.Claims) error
 }
 
 type Result struct {
@@ -137,11 +136,8 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 		return result, err
 	}
 	if alreadyPublished {
-		if request.OnPublished != nil {
-			if err := request.OnPublished(ctx, claims); err != nil {
-				return result, fmt.Errorf("report existing release activation: %w", err)
-			}
-		}
+		// A retry verifies the immutable release only. It must never reactivate
+		// a release that may have failed health checks and been rolled back.
 		return Result{
 			DeploymentID: claims.DeploymentID,
 			ReleaseID: claims.DeploymentID,
@@ -184,15 +180,10 @@ func Receive(ctx context.Context, request Request) (Result, error) {
 	if err := writeReleaseManifest(stagePath, claims.DeploymentID, digestHex, claims.ArtifactBytes); err != nil {
 		return result, fmt.Errorf("write publisher release manifest: %w", err)
 	}
-	if err := releasepublisher.Publish(request.BaseDir, stageID, request.Expected.DeploymentID); err != nil {
-		return result, fmt.Errorf("publish immutable release: %w", err)
+	if err := releasepublisher.Store(request.BaseDir, stageID, request.Expected.DeploymentID); err != nil {
+		return result, fmt.Errorf("store immutable release: %w", err)
 	}
 	published = true
-	if request.OnPublished != nil {
-		if err := request.OnPublished(ctx, claims); err != nil {
-			return result, fmt.Errorf("report activated release: %w", err)
-		}
-	}
 	return Result{
 		DeploymentID: claims.DeploymentID,
 		ReleaseID: claims.DeploymentID,
@@ -286,19 +277,6 @@ func reconcilePublishedRelease(baseDir, releaseID, digest string, artifactBytes 
 		manifest.ArtifactSHA256 != digest || manifest.ArtifactBytes != artifactBytes {
 		return false, errors.New("existing release manifest does not match the verified deployment artifact")
 	}
-	currentPath := filepath.Join(baseDir, "current")
-	expectedTarget := filepath.Join("releases", releaseID)
-	actualTarget, linkErr := os.Readlink(currentPath)
-	if linkErr == nil && actualTarget == expectedTarget { return true, nil }
-	if linkErr != nil && !errors.Is(linkErr, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect current release link: %w", linkErr)
-	}
-	if err := releasepublisher.Activate(baseDir, releaseID); err != nil {
-		return false, fmt.Errorf("reconcile existing release activation: %w", err)
-	}
-	actualTarget, err = os.Readlink(currentPath)
-	if err != nil || actualTarget != expectedTarget {
-		return false, errors.New("existing release activation could not be confirmed")
-	}
+	// Existing immutable content is recognized without changing the active release.
 	return true, nil
 }
