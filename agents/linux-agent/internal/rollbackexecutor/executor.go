@@ -112,7 +112,8 @@ func (e *Executor) Execute(ctx context.Context, baseDir string, intent rollbacko
 		// A reporter error is retryable. Keep the durable operation verified;
 		// do not claim completion or switch releases again.
 		result := e.Prober.Probe(ctx, op)
-		if result.Status != runtimehealth.Healthy || result.HTTPStatus < 200 || result.HTTPStatus > 299 || result.FailureCode != "" {
+		if result.Status != runtimehealth.Healthy || result.HTTPStatus < 200 || result.HTTPStatus > 299 ||
+			result.FailureCode != "" || result.DurationMs < 0 || result.DurationMs > 30000 {
 			return op, errors.New("verified rollback health state changed before acknowledgement")
 		}
 		if err := e.Reporter.Report(ctx, op, result); err != nil {
