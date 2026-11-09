@@ -2,11 +2,11 @@
 
 ## Status
 
-The Linux agent now contains a durable rollback outbox and a separately gated local
-executor. These packages are not wired into the runtime-node polling loop, and the
-executor is not enabled by the service configuration. This is a safety boundary:
-the current desired-state API remains read-only and does not deliver executable
-rollback commands.
+The Linux agent contains a durable rollback outbox and a separately gated local
+executor. The static publisher is wired to its signed pending-rollback poll and
+completion-acknowledgement path, but the sample configuration keeps execution
+disabled. The separate runtime-node desired-state poller remains read-only; this
+static publisher path does not enable OCI runtime command execution.
 
 ## Execution contract
 
