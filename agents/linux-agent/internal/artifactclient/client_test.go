@@ -182,7 +182,7 @@ func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T)
 	digest := sha256.Sum256([]byte("artifact"))
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeIdentity\":\"previous-runtime-node\",\"rollbackTargetArtifactSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetReleaseId\":\"previous-release-row\",\"rollbackTargetNodeIdentity\":\"previous-runtime-node\",\"rollbackTargetArtifactSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"))
 	}))
 	defer server.Close()
 	ack, err := ReportHealthCheck(context.Background(), server.Client(), Config{
@@ -198,7 +198,8 @@ func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T)
 	})
 	if err != nil { t.Fatal(err) }
 	if !ack.RollbackRequired || ack.RollbackTargetDeploymentID == nil ||
-		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.RollbackTargetNodeIdentity == nil ||
+		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.RollbackTargetReleaseID == nil ||
+		*ack.RollbackTargetReleaseID != "previous-release-row" || ack.RollbackTargetNodeIdentity == nil ||
              *ack.RollbackTargetNodeIdentity != "previous-runtime-node" || ack.RollbackTargetArtifactSHA256 == nil ||
 		*ack.RollbackTargetArtifactSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || ack.ReleaseState != "failed" {
 		t.Fatalf("unexpected rollback acknowledgement: %+v", ack)
