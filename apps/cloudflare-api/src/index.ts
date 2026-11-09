@@ -6015,6 +6015,201 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   });
 });
 
+
+const ROLLBACK_COMPLETION_PATH = "/internal/v1/application-nodes/releases/rollback-completed";
+
+app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
+  const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
+  const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
+  const nonce = c.req.header("x-nexora-node-nonce") ?? "";
+  const signature = (c.req.header("x-nexora-node-signature") ?? "").toLowerCase();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(nodeIdentity) ||
+      !/^\d{10}$/.test(timestamp) || !/^[a-f0-9]{32}$/i.test(nonce) ||
+      !/^[a-f0-9]{128}$/.test(signature)) {
+    return c.json({ message: "Missing or invalid rollback completion proof." }, 401);
+  }
+  if (!/^application\/json(?:;\s*charset=utf-8)?$/i.test(c.req.header("content-type") ?? "")) {
+    return c.json({ message: "Rollback completion reports must use application/json." }, 415);
+  }
+
+  const reader = c.req.raw.body?.getReader();
+  if (!reader) return c.json({ message: "Rollback completion report body is required." }, 400);
+  const chunks: Uint8Array[] = [];
+  let bodyBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bodyBytes += chunk.value.byteLength;
+      if (bodyBytes > 2048) {
+        await reader.cancel();
+        return c.json({ message: "Rollback completion report exceeds 2048 bytes." }, 413);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch {
+    return c.json({ message: "Unable to read rollback completion report." }, 400);
+  } finally {
+    reader.releaseLock();
+  }
+  if (bodyBytes < 2) return c.json({ message: "Rollback completion report body is empty." }, 400);
+  const rawBytes = new Uint8Array(bodyBytes);
+  let offset = 0;
+  for (const chunk of chunks) { rawBytes.set(chunk, offset); offset += chunk.byteLength; }
+  const decodedBody = new TextDecoder("utf-8").decode(rawBytes);
+  const encodedBody = new TextEncoder().encode(decodedBody);
+  if (encodedBody.byteLength !== rawBytes.byteLength ||
+      encodedBody.some((value, index) => value !== rawBytes[index])) {
+    return c.json({ message: "Rollback completion report must be valid UTF-8." }, 400);
+  }
+
+  const node = await c.env.DB.prepare(
+    "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
+    "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+    "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND n.signing_public_key IS NOT NULL LIMIT 1",
+  ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
+  if (!node || !await verifyApplicationNodeRequestSignature(
+    node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", ROLLBACK_COMPLETION_PATH, decodedBody, signature,
+  )) {
+    return c.json({ message: "Runtime node is not authorized to report rollback completion." }, 401);
+  }
+
+  let input: unknown;
+  try { input = JSON.parse(decodedBody); } catch { return c.json({ message: "Invalid rollback completion JSON." }, 400); }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  const allowedKeys = new Set([
+    "operationId", "failedDeploymentId", "targetDeploymentId",
+    "targetArtifactSha256", "httpStatus", "durationMs",
+  ]);
+  if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
+      typeof body.operationId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(body.operationId) ||
+      typeof body.failedDeploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.failedDeploymentId) ||
+      typeof body.targetDeploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.targetDeploymentId) ||
+      body.failedDeploymentId === body.targetDeploymentId ||
+      typeof body.targetArtifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.targetArtifactSha256) ||
+      !Number.isInteger(body.httpStatus) || Number(body.httpStatus) < 200 || Number(body.httpStatus) > 299 ||
+      !Number.isInteger(body.durationMs) || Number(body.durationMs) < 0 || Number(body.durationMs) > 30000) {
+    return c.json({ message: "Rollback completion report is outside permitted bounds." }, 400);
+  }
+
+  const nonceResult = await c.env.DB.prepare(
+    "INSERT OR IGNORE INTO application_node_request_nonces (node_id, nonce, expires_at) " +
+    "VALUES (?, ?, datetime('now', '+10 minutes'))",
+  ).bind(node.id, nonce).run();
+  if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+
+  // Local symlink rollback is permitted only when both immutable releases are
+  // assigned to this same node. Cross-node recovery requires a separate traffic
+  // and scheduler protocol and is deliberately rejected here.
+  const binding = await c.env.DB.prepare(
+    "SELECT failed.id AS failedReleaseId, failed.organization_id AS organizationId, " +
+    "failed.project_id AS projectId, target.id AS targetReleaseId, " +
+    "target.artifact_digest AS targetArtifactDigest, w.id AS workloadId " +
+    "FROM application_releases failed " +
+    "JOIN application_releases target ON target.deployment_id = ? " +
+    "AND target.organization_id = failed.organization_id AND target.project_id = failed.project_id " +
+    "JOIN application_workloads w ON w.organization_id = failed.organization_id " +
+    "AND w.project_id = failed.project_id AND w.workload_kind = 'web' " +
+    "WHERE failed.deployment_id = ? AND failed.assigned_node_id = ? " +
+    "AND target.assigned_node_id = ? AND failed.node_pool_id = ? AND target.node_pool_id = ? " +
+    "AND failed.state = 'failed' AND target.state = 'succeeded' " +
+    "AND target.artifact_digest = ? AND w.active_release_id = target.id " +
+    "AND w.node_id = ? AND w.status IN ('unhealthy','healthy') LIMIT 1",
+  ).bind(body.targetDeploymentId, body.failedDeploymentId, node.id, node.id,
+    node.nodePoolId, node.nodePoolId, body.targetArtifactSha256, node.id).first<{
+      failedReleaseId: string; organizationId: string; projectId: string;
+      targetReleaseId: string; targetArtifactDigest: string; workloadId: string;
+    }>();
+  if (!binding) {
+    return c.json({ message: "Rollback does not match a failed release and successful same-node target assignment." }, 409);
+  }
+
+  const details = JSON.stringify({
+    operationId: body.operationId,
+    failedDeploymentId: body.failedDeploymentId,
+    targetDeploymentId: body.targetDeploymentId,
+    targetArtifactSha256: body.targetArtifactSha256,
+    httpStatus: body.httpStatus,
+    durationMs: body.durationMs,
+  });
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO application_rollback_acknowledgements " +
+      "(operation_id, organization_id, project_id, node_id, failed_release_id, target_release_id, " +
+      "failed_deployment_id, target_deployment_id, target_artifact_sha256, http_status, probe_duration_ms) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(body.operationId, binding.organizationId, binding.projectId, node.id,
+      binding.failedReleaseId, binding.targetReleaseId, body.failedDeploymentId,
+      body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs),
+    c.env.DB.prepare(
+      "UPDATE application_workloads SET status = 'healthy', desired_replicas = 1, " +
+      "observed_replicas = 1, updated_at = datetime('now') " +
+      "WHERE id = ? AND active_release_id = ? AND node_id = ? AND status IN ('unhealthy','healthy') " +
+      "AND EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
+      "WHERE a.operation_id = ? AND a.node_id = ? AND a.failed_release_id = ? " +
+      "AND a.target_release_id = ? AND a.target_artifact_sha256 = ? " +
+      "AND a.http_status = ? AND a.probe_duration_ms = ?)",
+    ).bind(binding.workloadId, binding.targetReleaseId, node.id, body.operationId, node.id,
+      binding.failedReleaseId, binding.targetReleaseId, body.targetArtifactSha256,
+      body.httpStatus, body.durationMs),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, ?, ?, 'succeeded', 'succeeded', 'node', ?, 'rollback_completed', ? " +
+      "WHERE EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
+      "WHERE a.operation_id = ? AND a.node_id = ? AND a.target_release_id = ?) " +
+      "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = ? " +
+      "AND e.event_code = 'rollback_completed' AND e.details_redacted_json = ?)",
+    ).bind(crypto.randomUUID(), binding.organizationId, binding.targetReleaseId, node.id, details,
+      body.operationId, node.id, binding.targetReleaseId, binding.targetReleaseId, details),
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+      "AND revoked_at IS NULL AND signing_public_key = ?",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+  ]);
+  if (Number(results[3]?.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Runtime node was revoked or changed during rollback acknowledgement." }, 409);
+  }
+
+  const saved = await c.env.DB.prepare(
+    "SELECT node_id AS nodeId, failed_release_id AS failedReleaseId, target_release_id AS targetReleaseId, " +
+    "target_artifact_sha256 AS targetArtifactSha256, http_status AS httpStatus, " +
+    "probe_duration_ms AS durationMs FROM application_rollback_acknowledgements WHERE operation_id = ? LIMIT 1",
+  ).bind(body.operationId).first<{
+    nodeId: string; failedReleaseId: string; targetReleaseId: string;
+    targetArtifactSha256: string; httpStatus: number; durationMs: number;
+  }>();
+  if (!saved || saved.nodeId !== node.id || saved.failedReleaseId !== binding.failedReleaseId ||
+      saved.targetReleaseId !== binding.targetReleaseId || saved.targetArtifactSha256 !== body.targetArtifactSha256 ||
+      saved.httpStatus !== body.httpStatus || saved.durationMs !== body.durationMs) {
+    return c.json({ message: "Rollback operation ID conflicts with an existing acknowledgement." }, 409);
+  }
+  const workload = await c.env.DB.prepare(
+    "SELECT status, active_release_id AS activeReleaseId, node_id AS nodeId " +
+    "FROM application_workloads WHERE id = ? LIMIT 1",
+  ).bind(binding.workloadId).first<{ status: string; activeReleaseId: string; nodeId: string }>();
+  if (!workload || workload.status !== "healthy" || workload.activeReleaseId !== binding.targetReleaseId ||
+      workload.nodeId !== node.id) {
+    return c.json({ message: "Rollback acknowledgement was stored but workload state could not be confirmed." }, 409);
+  }
+
+  return c.json({
+    accepted: true,
+    duplicate: Number(results[0]?.meta?.changes ?? 0) === 0,
+    operationId: body.operationId,
+    state: "reported",
+  }, 200, { "cache-control": "no-store" });
+});
+
 app.post("/internal/v1/application-build-usage", async (c) => {
   const nodeIdentity = c.req.header("x-nexora-node-identity") ?? "";
   const timestamp = c.req.header("x-nexora-node-timestamp") ?? "";
