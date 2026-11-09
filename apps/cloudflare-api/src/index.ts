@@ -362,7 +362,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "payment_settings", "payment_orders"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -5863,7 +5863,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
     "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
-    "w.node_id AS previousActiveNodeId " +
+    "previous.artifact_digest AS previousArtifactDigest, w.node_id AS previousActiveNodeId " +
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
@@ -5875,6 +5875,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
+    previousArtifactDigest: string | null;
     previousActiveNodeId: string | null;
   }>();
   if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
@@ -5915,6 +5916,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
         ? release.previousDeploymentId : null,
       rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
         ? release.previousActiveNodeId : null,
+      rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+        ? release.previousArtifactDigest : null,
     });
   }
   if (release.state !== "health_checking") {
@@ -6007,6 +6010,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       ? release.previousDeploymentId : null,
     rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
       ? release.previousActiveNodeId : null,
+    rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      ? release.previousArtifactDigest : null,
   });
 });
 
