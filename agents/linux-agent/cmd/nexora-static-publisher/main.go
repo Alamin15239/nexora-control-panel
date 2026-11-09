@@ -223,7 +223,7 @@ func ensurePrivateChild(path string, uid, gid uint32) error {
 }
 
 func provisionAccountDirectories(accountsRoot, accountID string) (string, error) {
-	if !accountIDPattern.MatchString(accountID) { return "", errors.New("hosting account identifier is invalid") }
+	if !validHostingAccountID(accountID) { return "", errors.New("hosting account identifier is invalid") }
 	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
 	if err := verifyOwnedDirectory(accountsRoot, uid, gid); err != nil {
 		return "", fmt.Errorf("accounts root: %w", err)
@@ -540,7 +540,7 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "rollback required for failed deployment %s but execution is disabled\n", pendingRollback.FailedDeploymentID)
 				continue
 			}
-			if !identityPattern.MatchString(pendingRollback.HostingAccountID) {
+			if !validHostingAccountID(pendingRollback.HostingAccountID) {
 				fmt.Fprintf(os.Stderr, "skip rollback %s: invalid hosting account identifier\n", pendingRollback.FailedDeploymentID)
 				continue
 			}
