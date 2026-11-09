@@ -465,11 +465,13 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	}
 	if !acknowledgement.Accepted || acknowledgement.DeploymentID != report.DeploymentID ||
 		acknowledgement.ReleaseState != expectedState || acknowledgement.WorkloadHealth != expectedHealth ||
-		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetNodeIdentity != nil && acknowledgement.RollbackTargetArtifactSHA256 != nil) ||
+		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetReleaseID != nil && acknowledgement.RollbackTargetNodeIdentity != nil && acknowledgement.RollbackTargetArtifactSHA256 != nil) ||
+		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetReleaseID == nil)) ||
 		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetNodeIdentity == nil)) ||
 		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetArtifactSHA256 == nil)) ||
 		(acknowledgement.RollbackTargetDeploymentID != nil &&
 			(!regexpID(*acknowledgement.RollbackTargetDeploymentID) ||
+				!regexpID(*acknowledgement.RollbackTargetReleaseID) ||
 				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID ||
 				!regexpID(*acknowledgement.RollbackTargetNodeIdentity) ||
 				len(*acknowledgement.RollbackTargetArtifactSHA256) != 64 ||
