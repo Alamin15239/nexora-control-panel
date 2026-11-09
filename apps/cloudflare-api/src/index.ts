@@ -5361,9 +5361,19 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     nodeIdentity,
     polledAt: new Date().toISOString(),
     releases: (rows.results ?? []).filter((row) =>
-      validStaticHealthCheckPath(row.healthCheckPath ?? "/") && validDomain(row.hostname),
+      validStaticHealthCheckPath(row.healthCheckPath ?? "/") &&
+      validDomain(row.hostname) &&
+      /^[a-f0-9]{40}$/i.test(row.commitSha),
     ),
-    rollbacks: rollbackRows.results ?? [],
+    rollbacks: (rollbackRows.results ?? []).filter((row) =>
+      validStaticHealthCheckPath(row.healthCheckPath ?? "/") &&
+      validDomain(row.hostname) &&
+      /^[A-Za-z0-9_-]{1,128}$/.test(row.failedDeploymentId) &&
+      /^[A-Za-z0-9_-]{1,128}$/.test(row.targetDeploymentId) &&
+      /^[A-Za-z0-9_-]{1,128}$/.test(row.failedReleaseId) &&
+      /^[A-Za-z0-9_-]{1,128}$/.test(row.targetReleaseId) &&
+      /^[a-f0-9]{64}$/i.test(row.targetArtifactSha256),
+    ),
   }, 200, { "cache-control": "no-store" });
 });
 
