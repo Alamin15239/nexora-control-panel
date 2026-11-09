@@ -63,7 +63,7 @@ func Open(path string) (*Store, error) {
 	}
 	info, err := os.Lstat(filepath.Dir(path))
 	if err != nil { return nil, fmt.Errorf("inspect outbox directory: %w", err) }
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || !ownedByEffectiveUser(info) {
 		return nil, errors.New("outbox directory must be real and owner-only")
 	}
 	s := &Store{path:path}
@@ -146,6 +146,11 @@ func (s *Store) List() ([]Operation,error) {
 
 // acquireLock serializes mutations across Store instances and processes. The
 // private parent directory prevents untrusted users from replacing this file.
+func ownedByEffectiveUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
 func (s *Store) acquireLock() (func(), error) {
 	lockPath := s.path + ".lock"
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
@@ -187,7 +192,7 @@ func (s *Store) read() (snapshot,error) {
 	var state snapshot
 	info,err:=os.Lstat(s.path)
 	if err!=nil { return state,err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink!=0 || info.Mode().Perm()&0077!=0 {
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink!=0 || info.Mode().Perm()&0077!=0 || !ownedByEffectiveUser(info) {
 		return state,errors.New("outbox file must be regular and owner-only")
 	}
 	if info.Size()>maxFileBytes { return state,errors.New("outbox exceeds maximum size") }
@@ -213,7 +218,7 @@ func (s *Store) write(state snapshot) error {
 	raw,err:=json.Marshal(state); if err!=nil{return err}
 	if len(raw)>maxFileBytes { return errors.New("rollback outbox exceeds maximum size") }
 	if info,err:=os.Lstat(s.path); err==nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink!=0 || info.Mode().Perm()&0077!=0 {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink!=0 || info.Mode().Perm()&0077!=0 || !ownedByEffectiveUser(info) {
 			return errors.New("refusing to replace unsafe rollback outbox")
 		}
 	} else if !os.IsNotExist(err) { return err }
