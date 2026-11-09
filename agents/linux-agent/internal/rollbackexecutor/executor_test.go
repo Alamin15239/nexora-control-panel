@@ -29,6 +29,17 @@ func (p *fixedProbe) Probe(context.Context, rollbackoutbox.Operation) runtimehea
 	return p.result
 }
 
+type sequenceProbe struct {
+	results []runtimehealth.Result
+	calls int
+}
+func (p *sequenceProbe) Probe(context.Context, rollbackoutbox.Operation) runtimehealth.Result {
+	if p.calls >= len(p.results) { return runtimehealth.Result{Status: runtimehealth.Unhealthy, FailureCode: "probe_error"} }
+	result := p.results[p.calls]
+	p.calls++
+	return result
+}
+
 type fixedReporter struct {
 	err error
 	calls int
@@ -178,4 +189,19 @@ func TestExecuteKeepsTransientSwitchFailurePendingForRetry(t *testing.T) {
 	if op.State != "reported" || publisher.calls != 2 || reporter.calls != 1 {
 		t.Fatalf("retry did not complete safely: state=%q switches=%d reports=%d", op.State, publisher.calls, reporter.calls)
 	}
+}
+
+
+func TestExecuteDoesNotReportOutOfBoundsPreAcknowledgementProbe(t *testing.T) {
+	store, base, intent := setup(t)
+	probe := &sequenceProbe{results: []runtimehealth.Result{
+		healthyProbe(),
+		{Status: runtimehealth.Healthy, HTTPStatus: 200, DurationMs: 30001},
+	}}
+	reporter := &fixedReporter{}
+	executor := Executor{Enabled: true, Store: store, Publisher: RealPublisher{}, Prober: probe, Reporter: reporter}
+	op, err := executor.Execute(context.Background(), base, intent)
+	if err == nil { t.Fatal("out-of-bounds pre-acknowledgement probe was accepted") }
+	if op.State != "verified" { t.Fatalf("state = %q, want verified for safe retry", op.State) }
+	if reporter.calls != 0 { t.Fatal("reporter was called for an out-of-bounds probe") }
 }
