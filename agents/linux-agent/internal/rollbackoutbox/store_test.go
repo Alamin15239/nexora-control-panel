@@ -15,7 +15,7 @@ func fixture(t *testing.T) (*Store,Operation) {
 	s,err:=Open(filepath.Join(dir,"outbox.json")); if err!=nil { t.Fatal(err) }
 	return s,Operation{ID:"op-rollback-001",FailedDeploymentID:"dep-failed-001",FailedReleaseID:"rel-failed-001",
 		TargetDeploymentID:"dep-good-001",TargetReleaseID:"rel-good-001",ProjectID:"project-001",
-		OrganizationID:"org-001",NodeID:"node-001",ExpectedActiveReleaseID:"rel-failed-001",
+		OrganizationID:"org-001",NodeID:"node-001",HostingAccountID:"hosting-001",Hostname:"www.example.test",HealthCheckPath:"/",ExpectedActiveReleaseID:"rel-failed-001",
 		ArtifactSHA256:"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 }
 
