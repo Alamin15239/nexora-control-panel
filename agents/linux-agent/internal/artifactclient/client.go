@@ -472,7 +472,7 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID ||
 				!regexpID(*acknowledgement.RollbackTargetNodeIdentity) ||
 				len(*acknowledgement.RollbackTargetArtifactSHA256) != 64 ||
-				strings.ToLower(*acknowledgement.RollbackTargetArtifactSHA256) != *acknowledgement.RollbackTargetArtifactSHA256))) ||
+				strings.ToLower(*acknowledgement.RollbackTargetArtifactSHA256) != *acknowledgement.RollbackTargetArtifactSHA256)) ||
 		(report.HealthStatus == "healthy" && acknowledgement.RollbackRequired) {
 		return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement does not match the submitted result")
 	}
