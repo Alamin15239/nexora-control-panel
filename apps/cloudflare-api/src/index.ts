@@ -5250,6 +5250,32 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     deploymentId: string; organizationId: string; projectId: string;
     hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string;
   }>();
+  const rollbackRows = await c.env.DB.prepare(
+    "SELECT failed.deployment_id AS failedDeploymentId, target.deployment_id AS targetDeploymentId, " +
+    "failed.organization_id AS organizationId, failed.project_id AS projectId, " +
+    "p.hosting_account_id AS hostingAccountId, lower(dom.name) AS hostname, " +
+    "COALESCE(s.health_check_path, '/') AS healthCheckPath, " +
+    "target.artifact_digest AS targetArtifactSha256 " +
+    "FROM application_releases failed " +
+    "JOIN application_workloads w ON w.organization_id = failed.organization_id " +
+    "AND w.project_id = failed.project_id AND w.workload_kind = 'web' " +
+    "JOIN application_releases target ON target.id = w.active_release_id " +
+    "AND target.organization_id = failed.organization_id AND target.project_id = failed.project_id " +
+    "JOIN github_projects p ON p.id = failed.project_id AND p.organization_id = failed.organization_id " +
+    "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
+    "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
+    "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
+    "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+    "WHERE failed.assigned_node_id = ? AND failed.node_pool_id = ? AND failed.state = 'failed' " +
+    "AND target.assigned_node_id = ? AND target.node_pool_id = ? AND target.state = 'succeeded' " +
+    "AND target.artifact_digest IS NOT NULL AND w.node_id = ? AND w.status = 'unhealthy' " +
+    "AND NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements a WHERE a.failed_release_id = failed.id) " +
+    "ORDER BY failed.finished_at ASC LIMIT 10",
+  ).bind(node.id, node.nodePoolId, node.id, node.nodePoolId, node.id).all<{
+    failedDeploymentId: string; targetDeploymentId: string; organizationId: string;
+    projectId: string; hostingAccountId: string; hostname: string;
+    healthCheckPath: string; targetArtifactSha256: string;
+  }>();
   await c.env.DB.prepare(
     "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
     "WHERE id = ? AND node_identity = ? AND status = 'online' AND revoked_at IS NULL",
@@ -5258,6 +5284,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     nodeIdentity,
     polledAt: new Date().toISOString(),
     releases: rows.results ?? [],
+    rollbacks: rollbackRows.results ?? [],
   }, 200, { "cache-control": "no-store" });
 });
 
