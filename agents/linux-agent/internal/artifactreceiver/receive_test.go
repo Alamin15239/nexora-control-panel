@@ -125,7 +125,7 @@ func newFixture(t *testing.T) fixture {
 	}
 }
 
-func TestReceiveVerifiesAndPublishesImmutableRelease(t *testing.T) {
+func TestReceiveVerifiesAndStoresImmutableReleaseWithoutActivation(t *testing.T) {
 	f := newFixture(t)
 	result, err := Receive(context.Background(), f.request)
 	if err != nil { t.Fatal(err) }
@@ -142,9 +142,9 @@ func TestReceiveVerifiesAndPublishesImmutableRelease(t *testing.T) {
 	releaseInfo, err := os.Stat(filepath.Join(f.request.BaseDir, "releases", result.ReleaseID))
 	if err != nil { t.Fatal(err) }
 	if releaseInfo.Mode().Perm() != 0750 { t.Fatalf("published release root mode = %o, want 0750", releaseInfo.Mode().Perm()) }
-	target, err := os.Readlink(filepath.Join(f.request.BaseDir,"current"))
-	if err != nil { t.Fatal(err) }
-	if target != filepath.Join("releases",result.ReleaseID) { t.Fatalf("unexpected current target: %q", target) }
+	if _, err := os.Lstat(filepath.Join(f.request.BaseDir, "current")); !os.IsNotExist(err) {
+		t.Fatalf("artifact receipt unexpectedly activated release: %v", err)
+	}
 }
 
 func TestReceiveRejectsArtifactDigestMismatchBeforeStaging(t *testing.T) {
@@ -180,7 +180,7 @@ func TestReceiveRejectsReplayedEnvelope(t *testing.T) {
 }
 
 
-func TestReceiveRetryRecognizesPreviouslyPublishedReleaseWithoutOverwrite(t *testing.T) {
+func TestReceiveRetryRecognizesStoredReleaseWithoutReactivatingRollbackTarget(t *testing.T) {
 	f := newFixture(t)
 	first, err := Receive(context.Background(), f.request)
 	if err != nil { t.Fatal(err) }
@@ -198,8 +198,8 @@ func TestReceiveRetryRecognizesPreviouslyPublishedReleaseWithoutOverwrite(t *tes
 	if !result.AlreadyPublished { t.Fatal("retry was not recognized as already published") }
 	target, err := os.Readlink(filepath.Join(f.request.BaseDir, "current"))
 	if err != nil { t.Fatal(err) }
-	if target != filepath.Join("releases", f.request.Expected.DeploymentID) {
-		t.Fatalf("retry did not reconcile active release: %q", target)
+	if target != filepath.Join("releases", "previous-release") {
+		t.Fatalf("retry changed the active rollback target: %q", target)
 	}
 	entries, err := os.ReadDir(filepath.Join(f.request.BaseDir, "staging"))
 	if err != nil { t.Fatal(err) }
