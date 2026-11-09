@@ -149,7 +149,9 @@ func TestRollbackIntentFromPendingBindsAccountAndProbeMetadata(t *testing.T) {
 	}
 	op := rollbackIntentFromPending(pending, "runtime-node-test")
 	if op.ID != "rollback-deployment-failed" || op.NodeID != "runtime-node-test" ||
+		op.FailedDeploymentID != pending.FailedDeploymentID || op.TargetDeploymentID != pending.TargetDeploymentID ||
 		op.FailedReleaseID != pending.FailedReleaseID || op.TargetReleaseID != pending.TargetReleaseID ||
+		op.ExpectedActiveReleaseID != pending.FailedReleaseID ||
 		op.HostingAccountID != pending.HostingAccountID || op.Hostname != pending.Hostname ||
 		op.HealthCheckPath != pending.HealthCheckPath || op.ArtifactSHA256 != pending.TargetArtifactSHA256 {
 		t.Fatalf("rollback intent lost its trusted assignment: %+v", op)
