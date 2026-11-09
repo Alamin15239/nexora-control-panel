@@ -363,6 +363,13 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "rollback %s: %v\n", pendingRollback.FailedDeploymentID, err)
 				continue
 			}
+			operationID := "rollback-" + pendingRollback.FailedDeploymentID
+			exists, existsErr := localRollbackOperationExists(rollbackStore, operationID)
+			if existsErr != nil {
+				fmt.Fprintf(os.Stderr, "rollback %s: inspect local outbox: %v\n", pendingRollback.FailedDeploymentID, existsErr)
+				continue
+			}
+			if exists { continue } // Existing operation was already resumed at the start of this poll.
 			intent := rollbackIntentFromPending(pendingRollback, cfg.NodeIdentity)
 			rollbackOp, err := executeRollbackOperation(ctx, httpClient, cfg, rollbackStore, baseDir, intent, nodeKey)
 			if err != nil {
@@ -417,6 +424,15 @@ func executeRollbackOperation(ctx context.Context, client *http.Client, cfg Conf
 		}},
 	}
 	return executor.Execute(ctx, baseDir, op)
+}
+
+func localRollbackOperationExists(store *rollbackoutbox.Store, operationID string) (bool, error) {
+	operations, err := store.List()
+	if err != nil { return false, err }
+	for _, operation := range operations {
+		if operation.ID == operationID { return true, nil }
+	}
+	return false, nil
 }
 
 func resumeLocalRollbackOutbox(ctx context.Context, client *http.Client, cfg Config,
