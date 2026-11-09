@@ -66,6 +66,8 @@ type PendingRelease struct {
 type PendingRollback struct {
 	FailedDeploymentID string `json:"failedDeploymentId"`
 	TargetDeploymentID string `json:"targetDeploymentId"`
+	FailedReleaseID string `json:"failedReleaseId"`
+	TargetReleaseID string `json:"targetReleaseId"`
 	OrganizationID string `json:"organizationId"`
 	ProjectID string `json:"projectId"`
 	HostingAccountID string `json:"hostingAccountId"`
@@ -398,16 +400,16 @@ func rollbackIntentFromPending(p PendingRollback, nodeIdentity string) rollbacko
 	return rollbackoutbox.Operation{
 		ID: "rollback-" + p.FailedDeploymentID,
 		FailedDeploymentID: p.FailedDeploymentID,
-		FailedReleaseID: p.FailedDeploymentID,
+		FailedReleaseID: p.FailedReleaseID,
 		TargetDeploymentID: p.TargetDeploymentID,
-		TargetReleaseID: p.TargetDeploymentID,
+		TargetReleaseID: p.TargetReleaseID,
 		ProjectID: p.ProjectID,
 		OrganizationID: p.OrganizationID,
 		NodeID: nodeIdentity,
 		HostingAccountID: p.HostingAccountID,
 		Hostname: p.Hostname,
 		HealthCheckPath: p.HealthCheckPath,
-		ExpectedActiveReleaseID: p.FailedDeploymentID,
+		ExpectedActiveReleaseID: p.FailedReleaseID,
 		ArtifactSHA256: p.TargetArtifactSHA256,
 	}
 }
