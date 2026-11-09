@@ -1,6 +1,6 @@
 # Nexora platform status and source-of-truth architecture
 
-**Status snapshot: 2026-11-07**
+**Status snapshot: 2026-11-09**
 
 This document reconciles the current repository implementation with older architecture notes. It describes code and configuration present in the repository; it does not assert that every binding, secret, migration, service, or workflow is installed in the live Cloudflare account or on a production host.
 
@@ -28,8 +28,10 @@ Cloudflare Workers are not general-purpose Linux VPS instances. A Workers-only d
 - Short-lived, one-time artifact-upload capability and bounded private R2 artifact upload endpoint.
 - D1 schema for projects, deployment/release records, runtime profiles, node pools, node identities, quotas and build-usage events.
 - Authenticated application-node enrollment, heartbeat, signed desired-state polling, artifact delivery and release/health-check protocol foundations.
-- Dedicated static artifact publisher daemon: assigned-node polling, trusted RS256 envelope verification, durable replay protection, SHA-256 verification, archive validation, private staging, immutable releases and atomic activation.
-- Static release activation reports to the API; the API intentionally leaves the release in `health_checking` until an actual HTTP origin probe succeeds.
+- Dedicated static artifact publisher daemon: assigned-node polling, trusted RS256 envelope verification, durable replay protection, SHA-256 verification, archive validation, private account-directory provisioning, immutable releases and atomic activation.
+- Static publishing installs and validates the Nginx vhost through the privileged broker before switching the active release; it then reports activation to the API.
+- The publisher performs a bounded local HTTP origin probe and submits a signed health result. Same-node automatic rollback uses a durable outbox, compare-and-switch semantics, a second serving probe and a signed, idempotent API acknowledgement. Cross-node previous workloads are preserved rather than incorrectly rolled back by the new node.
+- GitHub Actions currently verifies the Linux agent with full Go tests, race tests, real Nginx release-switching/PHP-isolation integration, vet, binary builds and systemd unit validation. Cloudflare API CI verifies TypeScript, all D1 migrations, tenant constraints, runtime admission and application integration contracts.
 - Linux-side archive validation/extraction primitives, rootless Podman supervisor primitives, workload-volume and secret-bundle primitives, and durable supervisor metadata.
 - R2 artifact retention logic for eligible terminal artifacts.
 - Dashboard UI for GitHub connection, repository linking and runtime metadata configuration.
@@ -44,9 +46,9 @@ The repository does **not** yet provide a complete customer-facing build-to-live
 2. The control plane can dispatch the named workflow only when GitHub App credentials/permissions are configured and the project has an administrator-reviewed workflow SHA.
 3. The static publisher is implemented and CI-tested, but is not installed or enabled on a runtime node. Its `static-v1` profile remains disabled by default.
 4. Static activation requires operator-provisioned account release directories, a dedicated read-only web-server group, Nginx document-root routing, a node signing key and the matching deployment-envelope public key. These live prerequisites have not been verified.
-5. The publisher reports archive validation and atomic activation but deliberately does not report the site healthy. An external HTTP health probe, traffic verification and rollback orchestration are still required.
+5. The publisher and API now implement activation acknowledgement, a bounded local HTTP origin probe, health-state transitions and same-node rollback acknowledgement. These are CI-tested code paths, not proof that the live node, Cloudflare ingress or customer traffic path has passed end-to-end acceptance.
 6. The application runtime-node service remains read-only for OCI workloads. It rejects execution, command delivery and secret delivery; it does not start or stop customer containers.
-7. Automatic push deployment, complete logs, customer rollback UI, production health-check lifecycle, ingress routing and end-to-end release acceptance remain incomplete.
+7. Customer-facing automatic push deployment, complete deployment logs, customer rollback UI, production ingress routing and live end-to-end release acceptance remain incomplete.
 8. Build-usage reporting exists, but build-dispatch quota enforcement is explicitly not enabled.
 
 The dashboard must continue to describe a project as configured—not deployed—until the complete flow has passed acceptance tests. Never report a deployment as successful merely because GitHub accepted a workflow-dispatch request or an artifact reached R2.
@@ -59,7 +61,9 @@ The dashboard must continue to describe a project as configured—not deployed�
 - Verify GitHub OIDC trust, exact workflow SHA, repository/branch/commit binding, one-time upload capability and R2 checksum.
 - Install the static publisher only on a dedicated non-production node after operator provisioning of its keys, replay store, account directories and web-server group.
 - Configure Nginx document roots and verify the actual HTTP origin, not just the release symlink.
-- Add external health checks, failure-safe rollback, bounded redacted logs and end-to-end tenant-isolation tests before exposing a Deploy action.
+- Install the publisher only after its service account, signing keys, replay store, account directories, web-server group and Nginx broker are provisioned.
+- Verify the actual Cloudflare-to-origin traffic path in addition to the local origin probe; test failed health checks, same-node rollback, cross-node preservation, interrupted publishing and durable outbox recovery.
+- Add bounded redacted deployment logs and customer-visible rollback history before exposing a Deploy action.
 
 ### Gate 2 — Support server-rendered applications
 - Implement a dedicated isolated build plane and a separate application-node pool.
