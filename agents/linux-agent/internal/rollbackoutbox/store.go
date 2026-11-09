@@ -25,7 +25,61 @@ const (
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
-var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}// Package rollbackoutbox persists rollback intent and progress before network
+// acknowledgement. It deliberately does not execute rollback or trust API input.
+package rollbackoutbox
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	schemaVersion = 1
+	maxFileBytes = 1 << 20
+	maxOperations = 256
+)
+
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
+)\nvar hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?// Package rollbackoutbox persists rollback intent and progress before network
+// acknowledgement. It deliberately does not execute rollback or trust API input.
+package rollbackoutbox
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	schemaVersion = 1
+	maxFileBytes = 1 << 20
+	maxOperations = 256
+)
+
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
+)
 
 type Operation struct {
 	ID string `json:"id"`
@@ -36,6 +90,9 @@ type Operation struct {
 	ProjectID string `json:"projectId"`
 	OrganizationID string `json:"organizationId"`
 	NodeID string `json:"nodeId"`
+	HostingAccountID string `json:"hostingAccountId"`
+	Hostname string `json:"hostname"`
+	HealthCheckPath string `json:"healthCheckPath"`
 	ExpectedActiveReleaseID string `json:"expectedActiveReleaseId"`
 	ArtifactSHA256 string `json:"artifactSha256"`
 	State string `json:"state"`
@@ -171,11 +228,21 @@ func (s *Store) acquireLock() (func(), error) {
 }
 
 func validate(op Operation) error {
-	for _,v:=range []string{op.ID,op.FailedDeploymentID,op.FailedReleaseID,op.TargetDeploymentID,op.TargetReleaseID,op.ProjectID,op.OrganizationID,op.NodeID,op.ExpectedActiveReleaseID} {
+	for _,v:=range []string{op.ID,op.FailedDeploymentID,op.FailedReleaseID,op.TargetDeploymentID,op.TargetReleaseID,op.ProjectID,op.OrganizationID,op.NodeID,op.HostingAccountID,op.ExpectedActiveReleaseID} {
 		if !idPattern.MatchString(v) { return errors.New("rollback intent contains invalid identifier") }
 	}
 	if op.FailedReleaseID==op.TargetReleaseID || op.ExpectedActiveReleaseID!=op.FailedReleaseID {
 		return errors.New("rollback intent has inconsistent release transition")
+	}
+	if !hostnamePattern.MatchString(op.Hostname) || op.Hostname != strings.ToLower(op.Hostname) {
+		return errors.New("rollback intent hostname is invalid")
+	}
+	if op.HealthCheckPath == "" || len(op.HealthCheckPath) > 512 || op.HealthCheckPath[0] != '/' ||
+		strings.ContainsAny(op.HealthCheckPath, "?#\\\r\n") {
+		return errors.New("rollback intent health-check path is invalid")
+	}
+	for _, ch := range op.HealthCheckPath {
+		if ch < 0x20 || ch == 0x7f { return errors.New("rollback intent health-check path contains a control character") }
 	}
 	if !digestPattern.MatchString(op.ArtifactSHA256) { return errors.New("rollback intent artifact digest is invalid") }
 	return nil
@@ -185,6 +252,7 @@ func sameIntent(a,b Operation) bool {
 	return a.ID==b.ID && a.FailedDeploymentID==b.FailedDeploymentID && a.FailedReleaseID==b.FailedReleaseID &&
 		a.TargetDeploymentID==b.TargetDeploymentID && a.TargetReleaseID==b.TargetReleaseID &&
 		a.ProjectID==b.ProjectID && a.OrganizationID==b.OrganizationID && a.NodeID==b.NodeID &&
+		a.HostingAccountID==b.HostingAccountID && a.Hostname==b.Hostname && a.HealthCheckPath==b.HealthCheckPath &&
 		a.ExpectedActiveReleaseID==b.ExpectedActiveReleaseID && a.ArtifactSHA256==b.ArtifactSHA256
 }
 
