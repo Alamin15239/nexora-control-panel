@@ -28,7 +28,7 @@ type Config struct {
 
 // FetchAndPublish requests the deployment artifact as an authenticated runtime
 // node, then verifies its signed deployment identity and digest before extraction
-// and atomic release activation. Expected identity must come from trusted node
+// and immutable storage. Activation is a separate publisher step after vhost setup. Expected identity must come from trusted node
 // assignment data, not user-controlled workload input.
 func FetchAndPublish(ctx context.Context, config Config, deploymentID string) (artifactreceiver.Result, error) {
 	var empty artifactreceiver.Result
