@@ -5252,6 +5252,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   }>();
   const rollbackRows = await c.env.DB.prepare(
     "SELECT failed.deployment_id AS failedDeploymentId, target.deployment_id AS targetDeploymentId, " +
+    "failed.id AS failedReleaseId, target.id AS targetReleaseId, " +
     "failed.organization_id AS organizationId, failed.project_id AS projectId, " +
     "p.hosting_account_id AS hostingAccountId, lower(dom.name) AS hostname, " +
     "COALESCE(s.health_check_path, '/') AS healthCheckPath, " +
@@ -5272,7 +5273,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "AND NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements a WHERE a.failed_release_id = failed.id) " +
     "ORDER BY failed.finished_at ASC LIMIT 10",
   ).bind(node.id, node.nodePoolId, node.id, node.nodePoolId, node.id).all<{
-    failedDeploymentId: string; targetDeploymentId: string; organizationId: string;
+    failedDeploymentId: string; targetDeploymentId: string; failedReleaseId: string; targetReleaseId: string; organizationId: string;
     projectId: string; hostingAccountId: string; hostname: string;
     healthCheckPath: string; targetArtifactSha256: string;
   }>();
