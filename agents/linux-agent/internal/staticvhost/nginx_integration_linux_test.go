@@ -15,6 +15,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 )
 
 // TestNginxServesAtomicReleaseSwitch is an opt-in disposable-node integration
@@ -84,6 +87,18 @@ func TestNginxServesAtomicReleaseSwitch(t *testing.T) {
 	if err := os.Symlink(filepath.Join("releases","release-b"),next); err != nil { t.Fatal(err) }
 	if err := os.Rename(next,current); err != nil { t.Fatal(err) }
 	if got := fetch(); got != "release-b" { t.Fatalf("switched release body = %q",got) }
+
+	// Exercise the production compare-and-switch rollback against a real,
+	// isolated Nginx listener and verify the restored content through that
+	// same serving boundary before the test exits.
+	if err := releasepublisher.Rollback(tmp, "release-b", "release-a"); err != nil {
+		t.Fatalf("rollback release through production publisher: %v", err)
+	}
+	if got := fetch(); got != "release-a" { t.Fatalf("rolled-back release body = %q",got) }
+	probe := probeHTTPAt(context.Background(), binding.Hostname, "/", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if probe.Status != runtimehealth.Healthy || probe.HTTPStatus != http.StatusOK {
+		t.Fatalf("restored Nginx release failed serving-boundary health probe: %+v", probe)
+	}
 
 	req,_ := http.NewRequest(http.MethodGet,fmt.Sprintf("http://127.0.0.1:%d/index.php",port),nil)
 	req.Host = binding.Hostname
