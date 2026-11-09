@@ -91,7 +91,7 @@ func TestProbeAndReportReturnsRollbackGuidanceForUnhealthyWorkload(t *testing.T)
 		body, _ := io.ReadAll(r.Body)
 		if !json.Valid(body) { t.Fatal("health report is not valid JSON") }
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeIdentity\":\"previous-runtime-node\",\"rollbackTargetArtifactSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetReleaseId\":\"previous-release-row\",\"rollbackTargetNodeIdentity\":\"previous-runtime-node\",\"rollbackTargetArtifactSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"))
 	}))
 	defer api.Close()
 	digest := hex.EncodeToString(make([]byte, 32))
@@ -105,7 +105,8 @@ func TestProbeAndReportReturnsRollbackGuidanceForUnhealthyWorkload(t *testing.T)
 		t.Fatalf("unexpected unhealthy probe result: %+v", result)
 	}
 	if !ack.RollbackRequired || ack.RollbackTargetDeploymentID == nil ||
-		*ack.RollbackTargetDeploymentID != "previous-deployment" {
+		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.RollbackTargetReleaseID == nil ||
+		*ack.RollbackTargetReleaseID != "previous-release-row" {
 		t.Fatalf("missing rollback guidance: %+v", ack)
 	}
 }
