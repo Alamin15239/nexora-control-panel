@@ -67,8 +67,8 @@ type releaseManifest struct {
 
 // Receive verifies a short-lived signed envelope against independently supplied
 // deployment identity, verifies the complete artifact digest and archive, consumes
-// the envelope JTI, extracts into a new private staging directory, and publishes
-// an immutable release. BaseDir and all its parents must be operator-owned and
+// the envelope JTI, extracts into a new private staging directory, and stores
+// an immutable release without activating it. BaseDir and all its parents must be operator-owned and
 // inaccessible to untrusted local users. The caller owns durable replay storage.
 func Receive(ctx context.Context, request Request) (Result, error) {
 	var result Result
