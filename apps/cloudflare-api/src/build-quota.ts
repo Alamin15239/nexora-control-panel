@@ -9,7 +9,8 @@ export type BuildQuotaSnapshot = {
  *
  * This is a pre-dispatch gate; it does not terminate a build already running.
  */
-export function isBuildQuotaAvailable(snapshot: BuildQuotaSnapshot): boolean {
+export function isBuildQuotaAvailable(snapshot: BuildQuotaSnapshot | null | undefined): boolean {
+  if (!snapshot || typeof snapshot !== "object") return false;
   const { buildSecondsUsed, buildMinutesLimit } = snapshot;
   if (!Number.isSafeInteger(buildSecondsUsed) || buildSecondsUsed < 0 ||
       !Number.isSafeInteger(buildMinutesLimit) || buildMinutesLimit < 0 ||
