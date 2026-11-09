@@ -225,12 +225,17 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	poll := func() {
-		releases, err := fetchPending(ctx, httpClient, cfg, nodeKey)
+		if cfg.RollbackExecutionEnabled {
+			if err := resumeLocalRollbackOutbox(ctx, httpClient, cfg, rollbackStore, nodeKey); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "rollback outbox recovery:", err)
+			}
+		}
+		pending, err := fetchPending(ctx, httpClient, cfg, nodeKey)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "pending-release poll:", err)
 			return
 		}
-		for _, release := range releases {
+		for _, release := range pending.Releases {
 			if ctx.Err() != nil { return }
 			if !identityPattern.MatchString(release.HostingAccountID) {
 				fmt.Fprintf(os.Stderr, "skip deployment %s: invalid hosting account identifier\n", release.DeploymentID)
@@ -342,7 +347,32 @@ func run(configPath string) error {
 				continue
 			}
 			fmt.Printf("static release healthy and serving: deployment=%s release=%s sha256=%s bytes=%d probe_ms=%d already_published=%t\n",
-				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, probe.DurationMs, result.AlreadyPublished)		}
+				result.DeploymentID, result.ReleaseID, result.ArtifactSHA256, result.ArtifactBytes, probe.DurationMs, result.AlreadyPublished)
+		}
+		for _, pendingRollback := range pending.Rollbacks {
+			if !cfg.RollbackExecutionEnabled {
+				fmt.Fprintf(os.Stderr, "rollback required for failed deployment %s but execution is disabled\n", pendingRollback.FailedDeploymentID)
+				continue
+			}
+			if !identityPattern.MatchString(pendingRollback.HostingAccountID) {
+				fmt.Fprintf(os.Stderr, "skip rollback %s: invalid hosting account identifier\n", pendingRollback.FailedDeploymentID)
+				continue
+			}
+			baseDir := filepath.Join(cfg.PublisherRoot, "accounts", pendingRollback.HostingAccountID)
+			if err := verifyPrivateDirectory(baseDir); err != nil {
+				fmt.Fprintf(os.Stderr, "rollback %s: %v\n", pendingRollback.FailedDeploymentID, err)
+				continue
+			}
+			intent := rollbackIntentFromPending(pendingRollback, cfg.NodeIdentity)
+			rollbackOp, err := executeRollbackOperation(ctx, httpClient, cfg, rollbackStore, baseDir, intent, nodeKey)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "pending rollback %s did not complete safely (state=%s): %v\n",
+					pendingRollback.FailedDeploymentID, rollbackOp.State, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "pending rollback %s completed and acknowledged (operation=%s)\n",
+				pendingRollback.FailedDeploymentID, rollbackOp.ID)
+			}
 	}
 	poll()
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
