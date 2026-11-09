@@ -465,16 +465,21 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	if !acknowledgement.Accepted || acknowledgement.DeploymentID != report.DeploymentID ||
 		acknowledgement.ReleaseState != expectedState || acknowledgement.WorkloadHealth != expectedHealth ||
 		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetNodeIdentity != nil && acknowledgement.RollbackTargetArtifactSHA256 != nil) ||
-		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetNodeID == nil)) ||
+		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetNodeIdentity == nil)) ||
 		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetArtifactSHA256 == nil)) ||
 		(acknowledgement.RollbackTargetDeploymentID != nil &&
 			(!regexpID(*acknowledgement.RollbackTargetDeploymentID) ||
 				*acknowledgement.RollbackTargetDeploymentID == report.DeploymentID ||
-				!regexpID(*acknowledgement.RollbackTargetNodeID) ||
+				!regexpID(*acknowledgement.RollbackTargetNodeIdentity) ||
 				len(*acknowledgement.RollbackTargetArtifactSHA256) != 64 ||
 				strings.ToLower(*acknowledgement.RollbackTargetArtifactSHA256) != *acknowledgement.RollbackTargetArtifactSHA256))) ||
 		(report.HealthStatus == "healthy" && acknowledgement.RollbackRequired) {
 		return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement does not match the submitted result")
+	}
+	if acknowledgement.RollbackTargetArtifactSHA256 != nil {
+		if _, err := hex.DecodeString(*acknowledgement.RollbackTargetArtifactSHA256); err != nil {
+			return HealthCheckAcknowledgement{}, errors.New("health-check acknowledgement has an invalid rollback artifact digest")
+		}
 	}
 	return acknowledgement, nil
 }
