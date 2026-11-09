@@ -27,7 +27,7 @@ const (
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
-var hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+var hostnamePattern = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 type Operation struct {
 	ID string `json:"id"`
@@ -182,7 +182,7 @@ func validate(op Operation) error {
 	if op.FailedReleaseID==op.TargetReleaseID || op.ExpectedActiveReleaseID!=op.FailedReleaseID {
 		return errors.New("rollback intent has inconsistent release transition")
 	}
-	if !hostnamePattern.MatchString(op.Hostname) || op.Hostname != strings.ToLower(op.Hostname) {
+	if len(op.Hostname) > 253 || !hostnamePattern.MatchString(op.Hostname) || op.Hostname != strings.ToLower(op.Hostname) {
 		return errors.New("rollback intent hostname is invalid")
 	}
 	if op.HealthCheckPath == "" || len(op.HealthCheckPath) > 512 || op.HealthCheckPath[0] != '/' ||
