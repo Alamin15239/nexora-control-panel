@@ -39,7 +39,9 @@ class ArtifactD1 {
     healthCheckPath: "/ready",
     previousActiveReleaseId: "previous-release",
     previousDeploymentId: "previous-deployment",
+    previousArtifactDigest: "b".repeat(64),
     previousActiveNodeId: "previous-runtime-node",
+    previousActiveNodeIdentity: "previous-runtime-node",
   };
   nonces = new Set<string>();
   lastSignatureUpdated = false;
@@ -100,7 +102,9 @@ class ArtifactD1 {
                 healthCheckPath: db.release.healthCheckPath,
                 previousActiveReleaseId: db.release.previousActiveReleaseId,
                 previousDeploymentId: db.release.previousDeploymentId,
+                previousArtifactDigest: db.release.previousArtifactDigest,
                 previousActiveNodeId: db.release.previousActiveNodeId,
+                previousActiveNodeIdentity: db.release.previousActiveNodeIdentity,
               } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
@@ -705,11 +709,12 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(response.status, 200);
   const body = await response.json() as {
     releaseState: string; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+    rollbackTargetNodeIdentity: string | null;
   };
   assert.equal(body.releaseState, "failed");
   assert.equal(body.rollbackRequired, true);
   assert.equal(body.rollbackTargetDeploymentId, "previous-deployment");
-  assert.equal(body.rollbackTargetNodeId, "previous-runtime-node");
+  assert.equal(body.rollbackTargetNodeIdentity, "previous-runtime-node");
   assert.equal(db.release.state, "failed");
   assert.equal(db.workloadStatus, "unhealthy");
   assert.equal(db.githubDeploymentStatus, "failed");
