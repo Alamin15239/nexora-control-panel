@@ -134,3 +134,20 @@ func TestExecuteRefusesStaleRollbackAndPersistsBlockedState(t *testing.T) {
 	if readErr != nil { t.Fatal(readErr) }
 	if target != filepath.Join("releases", "release-newer") { t.Fatal("stale rollback overwrote newer release") }
 }
+
+func TestExecuteRecoversAfterSwitchBeforeOutboxProgressWasSaved(t *testing.T) {
+	store, base, intent := setup(t)
+	if _, err := store.Enqueue(intent); err != nil { t.Fatal(err) }
+	// Simulate a process crash after the atomic symlink switch but before the
+	// durable outbox could advance from pending to switched.
+	if err := os.Remove(filepath.Join(base, "current")); err != nil { t.Fatal(err) }
+	if err := os.Symlink(filepath.Join("releases", "release-old"), filepath.Join(base, "current")); err != nil { t.Fatal(err) }
+
+	probe := &fixedProbe{result: healthyProbe()}
+	reporter := &fixedReporter{}
+	executor := Executor{Enabled: true, Store: store, Publisher: RealPublisher{}, Prober: probe, Reporter: reporter}
+	op, err := executor.Execute(context.Background(), base, intent)
+	if err != nil { t.Fatal(err) }
+	if op.State != "reported" { t.Fatalf("state = %q, want reported", op.State) }
+	if reporter.calls != 1 { t.Fatalf("report calls = %d, want 1", reporter.calls) }
+}
