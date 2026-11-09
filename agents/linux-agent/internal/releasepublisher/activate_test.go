@@ -37,6 +37,23 @@ func TestPublishMovesImmutableReleaseAndActivatesAtomically(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(base, "staging", "stage-1")); !os.IsNotExist(err) { t.Fatal("staging directory was not moved") }
 }
 
+func TestStoreMovesImmutableReleaseWithoutActivating(t *testing.T) {
+	base := testLayout(t)
+	writeStage(t, base, "stage-store")
+	if err := Store(base, "stage-store", "release-stored"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "releases", "release-stored", "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "current")); !os.IsNotExist(err) {
+		t.Fatalf("Store unexpectedly created or changed current symlink: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(base, "staging", "stage-store")); !os.IsNotExist(err) {
+		t.Fatal("staging directory was not moved")
+	}
+}
+
 func TestPublishRejectsExistingReleaseWithoutOverwriting(t *testing.T) {
 	base := testLayout(t)
 	writeStage(t, base, "stage-1")
