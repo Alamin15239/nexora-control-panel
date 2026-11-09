@@ -173,32 +173,33 @@ func verifyPrivateDirectory(path string) error {
 	return nil
 }
 
-func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25519.PrivateKey) ([]PendingRelease, error) {
+func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25519.PrivateKey) (PendingResponse, error) {
+	var empty PendingResponse
 	body := []byte{}
 	proof, err := appnodeauth.Sign(key, cfg.NodeIdentity, http.MethodGet, pendingPath, body, time.Now().UTC())
-	if err != nil { return nil, fmt.Errorf("sign pending-release request: %w", err) }
+	if err != nil { return empty, fmt.Errorf("sign pending-release request: %w", err) }
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.ControlPlaneURL, "/")+pendingPath, nil)
-	if err != nil { return nil, err }
-	if err := proof.Apply(req, cfg.NodeIdentity); err != nil { return nil, err }
+	if err != nil { return empty, err }
+	if err := proof.Apply(req, cfg.NodeIdentity); err != nil { return empty, err }
 	safeClient := *client
 	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := safeClient.Do(req)
-	if err != nil { return nil, fmt.Errorf("poll pending static releases: %w", err) }
+	if err != nil { return empty, fmt.Errorf("poll pending static releases: %w", err) }
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil { return nil, err }
-	if len(data) > 1<<20 { return nil, errors.New("pending-release response exceeds 1 MiB") }
-	if resp.StatusCode != http.StatusOK { return nil, fmt.Errorf("pending-release API returned HTTP %d", resp.StatusCode) }
+	if err != nil { return empty, err }
+	if len(data) > 1<<20 { return empty, errors.New("pending-release response exceeds 1 MiB") }
+	if resp.StatusCode != http.StatusOK { return empty, fmt.Errorf("pending-release API returned HTTP %d", resp.StatusCode) }
 	var result PendingResponse
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil { return nil, fmt.Errorf("decode pending releases: %w", err) }
+	if err := decoder.Decode(&result); err != nil { return empty, fmt.Errorf("decode pending releases: %w", err) }
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF { return nil, errors.New("pending-release response contains trailing JSON") }
-	if result.NodeIdentity != cfg.NodeIdentity || result.PolledAt.IsZero() || len(result.Releases) > 10 {
-		return nil, errors.New("pending-release response violates the node assignment contract")
+	if err := decoder.Decode(&trailing); err != io.EOF { return empty, errors.New("pending-release response contains trailing JSON") }
+	if result.NodeIdentity != cfg.NodeIdentity || result.PolledAt.IsZero() || len(result.Releases) > 10 || len(result.Rollbacks) > 10 {
+		return empty, errors.New("pending-release response violates the node assignment contract")
 	}
-	return result.Releases, nil
+	return result, nil
 }
 
 func run(configPath string) error {
