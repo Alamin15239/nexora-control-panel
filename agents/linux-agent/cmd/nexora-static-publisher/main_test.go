@@ -157,3 +157,212 @@ func TestRollbackIntentFromPendingBindsAccountAndProbeMetadata(t *testing.T) {
 		t.Fatalf("rollback intent lost its trusted assignment: %+v", op)
 	}
 }
+
+func testAccountsRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestProvisionAccountDirectoriesCreatesPrivateSetgidLayout(t *testing.T) {
+	root := testAccountsRoot(t)
+
+	base, err := provisionAccountDirectories(root, "account_123-ABC")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{
+		base,
+		filepath.Join(base, "staging"),
+		filepath.Join(base, "releases"),
+	} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("%s is not a real directory", path)
+		}
+		if info.Mode().Perm() != 0750 || info.Mode()&os.ModeSetgid == 0 {
+			t.Fatalf("%s has unsafe mode %v", path, info.Mode())
+		}
+	}
+
+	if _, err := os.Lstat(filepath.Join(base, "current")); !os.IsNotExist(err) {
+		t.Fatal("provisioning must not create the current symlink")
+	}
+}
+
+func TestProvisionAccountDirectoriesRejectsInvalidIdentifiers(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "../escape", "a/b", "a\\b", "has space"} {
+		t.Run(id, func(t *testing.T) {
+			if _, err := provisionAccountDirectories(testAccountsRoot(t), id); err == nil {
+				t.Fatalf("invalid account ID %q was accepted", id)
+			}
+		})
+	}
+}
+
+func TestProvisionAccountDirectoriesRejectsSymlinkAccount(t *testing.T) {
+	root := testAccountsRoot(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "account_123")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisionAccountDirectories(root, "account_123"); err == nil {
+		t.Fatal("symlink account directory was accepted")
+	}
+}
+
+func TestProvisionAccountDirectoriesRejectsUnsafeExistingChild(t *testing.T) {
+	root := testAccountsRoot(t)
+	base := filepath.Join(root, "account_123")
+	if err := os.Mkdir(base, os.FileMode(0750)|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, os.FileMode(0750)|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(base, "staging"), 0770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provisionAccountDirectories(root, "account_123"); err == nil {
+		t.Fatal("unsafe existing staging directory was accepted")
+	}
+}
+
+func TestVerifyOwnedRegularFileAcceptsPrivateOwnedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private-file")
+	if err := os.WriteFile(path, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedRegularFile(path, 1024); err != nil {
+		t.Fatalf("expected private owned file to pass: %v", err)
+	}
+}
+
+func TestVerifyOwnedRegularFileRejectsUnsafeMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unsafe-file")
+	if err := os.WriteFile(path, []byte("private"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedRegularFile(path, 1024); err == nil {
+		t.Fatal("group-readable file was accepted")
+	}
+}
+
+func TestVerifyOwnedRegularFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedRegularFile(link, 1024); err == nil {
+		t.Fatal("symlink was accepted")
+	}
+}
+
+func TestVerifyOwnedRegularFileRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large-file")
+	if err := os.WriteFile(path, []byte("too large"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedRegularFile(path, 4); err == nil {
+		t.Fatal("oversized file was accepted")
+	}
+}
+
+func TestVerifyOwnedReplayDirectoryAcceptsOwnerOnlyDirectory(t *testing.T) {
+	path := t.TempDir()
+	if err := os.Chmod(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedReplayDirectory(path, uint32(os.Geteuid()), uint32(os.Getegid())); err != nil {
+		t.Fatalf("expected owner-only replay directory to pass: %v", err)
+	}
+}
+
+func TestVerifyOwnedReplayDirectoryRejectsGroupAccessibleDirectory(t *testing.T) {
+	path := t.TempDir()
+	if err := os.Chmod(path, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedReplayDirectory(path, uint32(os.Geteuid()), uint32(os.Getegid())); err == nil {
+		t.Fatal("group-accessible replay directory was accepted")
+	}
+}
+
+func TestVerifyOwnedReplayDirectoryRejectsWorldAccessibleDirectory(t *testing.T) {
+	path := t.TempDir()
+	if err := os.Chmod(path, 0701); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOwnedReplayDirectory(path, uint32(os.Geteuid()), uint32(os.Getegid())); err == nil {
+		t.Fatal("world-accessible replay directory was accepted")
+	}
+}
+
+func TestValidStaticDomain(t *testing.T) {
+	valid := []string{
+		"example.com",
+		"app.example.com",
+		"customer-1.example.co.uk",
+	}
+	for _, domain := range valid {
+		if !validStaticDomain(domain) {
+			t.Errorf("expected domain %q to be valid", domain)
+		}
+	}
+
+	invalid := []string{
+		"", "localhost", "example", ".example.com", "example.com.",
+		"example..com", "-bad.example.com", "bad-.example.com",
+		"bad domain.example.com", "a..b.example.com",
+	}
+	for _, domain := range invalid {
+		if validStaticDomain(domain) {
+			t.Errorf("expected domain %q to be rejected", domain)
+		}
+	}
+}
+
+func TestValidStaticHealthCheckPath(t *testing.T) {
+	valid := []string{"/", "/health", "/health/ready", "/api/v1/status"}
+	for _, path := range valid {
+		if !validStaticHealthCheckPath(path) {
+			t.Errorf("expected path %q to be valid", path)
+		}
+	}
+
+	invalid := []string{
+		"", "health", "//evil.example/path", "/health?debug=1",
+		"/health#fragment", "/../etc/passwd", "/health/../admin",
+		"/health\\\\admin", "/health\r\nHost: evil",
+		"/%2e%2e/secret",
+	}
+	for _, path := range invalid {
+		if validStaticHealthCheckPath(path) {
+			t.Errorf("expected path %q to be rejected", path)
+		}
+	}
+}
