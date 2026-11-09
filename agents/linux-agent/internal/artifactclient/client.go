@@ -478,3 +478,116 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	}
 	return acknowledgement, nil
 }
+
+
+const ArtifactRollbackCompletedReportPath = "/internal/v1/application-nodes/releases/rollback-completed"
+
+type RollbackCompletionReport struct {
+	OperationID string
+	FailedDeploymentID string
+	TargetDeploymentID string
+	TargetArtifactSHA256 string
+	HTTPStatus int
+	DurationMs int64
+}
+
+type RollbackCompletionAcknowledgement struct {
+	Accepted bool `json:"accepted"`
+	Duplicate bool `json:"duplicate"`
+	OperationID string `json:"operationId"`
+	State string `json:"state"`
+}
+
+// ReportRollbackCompleted sends a signed, replay-protected acknowledgement
+// only after the node has switched to and locally verified the target release.
+func ReportRollbackCompleted(ctx context.Context, client *http.Client, cfg Config, report RollbackCompletionReport) (RollbackCompletionAcknowledgement, error) {
+	var acknowledgement RollbackCompletionAcknowledgement
+	if len(cfg.PrivateKey) != ed25519.PrivateKeySize {
+		return acknowledgement, errors.New("application-node Ed25519 private key is invalid")
+	}
+	if cfg.NodeIdentity == "" || !regexpID(report.OperationID) ||
+		!regexpID(report.FailedDeploymentID) || !regexpID(report.TargetDeploymentID) ||
+		report.FailedDeploymentID == report.TargetDeploymentID ||
+		len(report.TargetArtifactSHA256) != 64 ||
+		strings.ToLower(report.TargetArtifactSHA256) != report.TargetArtifactSHA256 ||
+		report.HTTPStatus < 200 || report.HTTPStatus > 299 ||
+		report.DurationMs < 0 || report.DurationMs > 30000 {
+		return acknowledgement, errors.New("rollback completion report is outside permitted bounds")
+	}
+	if _, err := hex.DecodeString(report.TargetArtifactSHA256); err != nil {
+		return acknowledgement, errors.New("rollback target artifact digest is malformed")
+	}
+	base, err := url.Parse(strings.TrimRight(cfg.ControlPlaneURL, "/"))
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil ||
+		base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
+		return acknowledgement, errors.New("control plane URL must be an HTTPS origin without a path")
+	}
+	body, err := json.Marshal(struct {
+		OperationID string `json:"operationId"`
+		FailedDeploymentID string `json:"failedDeploymentId"`
+		TargetDeploymentID string `json:"targetDeploymentId"`
+		TargetArtifactSHA256 string `json:"targetArtifactSha256"`
+		HTTPStatus int `json:"httpStatus"`
+		DurationMs int64 `json:"durationMs"`
+	}{
+		OperationID: report.OperationID,
+		FailedDeploymentID: report.FailedDeploymentID,
+		TargetDeploymentID: report.TargetDeploymentID,
+		TargetArtifactSHA256: report.TargetArtifactSHA256,
+		HTTPStatus: report.HTTPStatus,
+		DurationMs: report.DurationMs,
+	})
+	if err != nil {
+		return acknowledgement, fmt.Errorf("encode rollback completion report: %w", err)
+	}
+	proof, err := appnodeauth.Sign(cfg.PrivateKey, cfg.NodeIdentity, http.MethodPost,
+		ArtifactRollbackCompletedReportPath, body, time.Now().UTC())
+	if err != nil {
+		return acknowledgement, fmt.Errorf("sign rollback completion report: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base.String()+ArtifactRollbackCompletedReportPath, bytes.NewReader(body))
+	if err != nil {
+		return acknowledgement, fmt.Errorf("create rollback completion request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if err := proof.Apply(request, cfg.NodeIdentity); err != nil {
+		return acknowledgement, fmt.Errorf("apply node request proof: %w", err)
+	}
+	activeClient := client
+	if activeClient == nil {
+		activeClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	safeClient := *activeClient
+	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := safeClient.Do(request)
+	if err != nil {
+		return acknowledgement, fmt.Errorf("submit rollback completion report: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+	if err != nil {
+		return acknowledgement, fmt.Errorf("read rollback completion acknowledgement: %w", err)
+	}
+	if len(responseBody) == 0 || len(responseBody) > 4096 {
+		return acknowledgement, errors.New("rollback completion acknowledgement is empty or too large")
+	}
+	if response.StatusCode != http.StatusOK {
+		return acknowledgement, fmt.Errorf("rollback completion endpoint returned HTTP %d: %s",
+			response.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&acknowledgement); err != nil {
+		return RollbackCompletionAcknowledgement{}, fmt.Errorf("decode rollback completion acknowledgement: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return RollbackCompletionAcknowledgement{}, errors.New("rollback completion acknowledgement contains trailing data")
+	}
+	if !acknowledgement.Accepted || acknowledgement.OperationID != report.OperationID ||
+		acknowledgement.State != "reported" {
+		return RollbackCompletionAcknowledgement{}, errors.New("rollback completion acknowledgement does not match the submitted operation")
+	}
+	return acknowledgement, nil
+}
