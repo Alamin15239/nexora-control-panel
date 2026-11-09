@@ -39,6 +39,10 @@ const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
 var identityPattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
 var accountIDPattern = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
+func validHostingAccountID(value string) bool {
+	return accountIDPattern.MatchString(value)
+}
+
 type Config struct {
 	ControlPlaneURL string `json:"control_plane_url"`
 	NodeIdentity string `json:"node_identity"`
