@@ -366,3 +366,16 @@ func TestValidStaticHealthCheckPath(t *testing.T) {
 		}
 	}
 }
+
+func TestValidHostingAccountID(t *testing.T) {
+	for _, value := range []string{"account_01", "hosting-test", "A1"} {
+		if !validHostingAccountID(value) {
+			t.Errorf("valid hosting account ID %q was rejected", value)
+		}
+	}
+	for _, value := range []string{"", ".", "..", "account.name", "account:name", "../outside", "account/name"} {
+		if validHostingAccountID(value) {
+			t.Errorf("unsafe hosting account ID %q was accepted", value)
+		}
+	}
+}
