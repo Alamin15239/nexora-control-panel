@@ -36,84 +36,8 @@ import (
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
-var identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}package main
-
-import (
-	"context"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
-	"errors"
-	"flag"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strings"
-	"syscall"
-	"time"
-
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactclient"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactdelivery"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
-)
-
-const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
-)
-var accountIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}package main
-
-import (
-	"context"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
-	"errors"
-	"flag"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"regexp"
-	"strings"
-	"syscall"
-	"time"
-
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactclient"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactdelivery"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
-)
-
-const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
-)
+var identityPattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
+var accountIDPattern = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
 type Config struct {
 	ControlPlaneURL string `json:"control_plane_url"`
