@@ -36,7 +36,84 @@ import (
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
-var identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$`)
+var identityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactclient"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactdelivery"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
+)
+
+const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
+)
+var accountIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}package main
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/appnodeauth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactclient"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactdelivery"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
+)
+
+const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
+)
 
 type Config struct {
 	ControlPlaneURL string `json:"control_plane_url"`
@@ -92,15 +169,106 @@ func main() {
 	}
 }
 
+func verifyOwnedRegularFile(path string, maxSize int64) error {
+	info, err := os.Lstat(path)
+	if err != nil { return err }
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 { return errors.New("must be a regular non-symlink file") }
+	if info.Mode().Perm() != 0600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return errors.New("must have exact owner-only mode 0600")
+	}
+	if info.Size() > maxSize { return fmt.Errorf("file exceeds maximum size of %d bytes", maxSize) }
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
+		return errors.New("file has unexpected owner or group")
+	}
+	return nil
+}
+
+func verifyOwnedDirectory(path string, uid, gid uint32) error {
+	info, err := os.Lstat(path)
+	if err != nil { return fmt.Errorf("inspect directory %s: %w", filepath.Base(path), err) }
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 { return fmt.Errorf("%s must be a real directory", filepath.Base(path)) }
+	if info.Mode().Perm()&0022 != 0 { return fmt.Errorf("%s is writable by group or others", filepath.Base(path)) }
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uid || stat.Gid != gid { return fmt.Errorf("%s has unexpected ownership", filepath.Base(path)) }
+	return nil
+}
+
+func verifyOwnedReplayDirectory(path string, uid, gid uint32) error {
+	if err := verifyOwnedDirectory(path, uid, gid); err != nil { return err }
+	info, err := os.Lstat(path)
+	if err != nil { return err }
+	if info.Mode().Perm() != 0700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return errors.New("replay directory must have exact owner-only mode 0700")
+	}
+	return nil
+}
+
+func ensurePrivateChild(path string, uid, gid uint32) error {
+	err := os.Mkdir(path, os.FileMode(0750)|os.ModeSetgid)
+	created := err == nil
+	if err != nil && !errors.Is(err, os.ErrExist) { return fmt.Errorf("create %s: %w", filepath.Base(path), err) }
+	if created {
+		if err := os.Chmod(path, os.FileMode(0750)|os.ModeSetgid); err != nil {
+			return fmt.Errorf("set permissions on %s: %w", filepath.Base(path), err)
+		}
+	}
+	if err := verifyOwnedDirectory(path, uid, gid); err != nil { return err }
+	info, err := os.Lstat(path)
+	if err != nil { return err }
+	if info.Mode().Perm() != 0750 || info.Mode()&os.ModeSetgid == 0 {
+		return fmt.Errorf("%s must have setgid mode 2750", filepath.Base(path))
+	}
+	return nil
+}
+
+func provisionAccountDirectories(accountsRoot, accountID string) (string, error) {
+	if !accountIDPattern.MatchString(accountID) { return "", errors.New("hosting account identifier is invalid") }
+	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
+	if err := verifyOwnedDirectory(accountsRoot, uid, gid); err != nil {
+		return "", fmt.Errorf("accounts root: %w", err)
+	}
+	base := filepath.Join(accountsRoot, accountID)
+	if err := ensurePrivateChild(base, uid, gid); err != nil { return "", fmt.Errorf("account directory: %w", err) }
+	for _, name := range []string{"staging", "releases"} {
+		if err := ensurePrivateChild(filepath.Join(base, name), uid, gid); err != nil {
+			return "", fmt.Errorf("%s directory: %w", name, err)
+		}
+	}
+	return base, nil
+}
+
+func validStaticDomain(domain string) bool {
+	if len(domain) < 3 || len(domain) > 253 || strings.Contains(domain, "..") ||
+		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || !strings.Contains(domain, ".") { return false }
+	for _, label := range strings.Split(domain, ".") {
+		if len(label) == 0 || len(label) > 63 ||
+			!regexp.MustCompile("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$").MatchString(label) { return false }
+	}
+	return true
+}
+
+func validStaticHealthCheckPath(path string) bool {
+	if len(path) == 0 || len(path) > 512 || !strings.HasPrefix(path, "/") ||
+		strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#\\") { return false }
+	for _, r := range path { if r < 0x20 || r == 0x7f { return false } }
+	decoded, err := url.PathUnescape(path)
+	if err != nil || strings.ContainsAny(decoded, "\\?#") { return false }
+	for _, r := range decoded { if r < 0x20 || r == 0x7f { return false } }
+	if !strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, "//") { return false }
+	for _, segment := range strings.Split(decoded, "/") {
+		if segment == "." || segment == ".." { return false }
+	}
+	return true
+}
+
 func loadConfig(path string) (Config, error) {
 	var cfg Config
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return cfg, errors.New("config path must be absolute and clean")
 	}
-	info, err := os.Lstat(path)
-	if err != nil { return cfg, err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
-		return cfg, errors.New("config must be a regular owner-only file")
+	if err := verifyOwnedRegularFile(path, 64<<10); err != nil {
+		return cfg, fmt.Errorf("config file security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil { return cfg, err }
@@ -133,10 +301,8 @@ func loadConfig(path string) (Config, error) {
 }
 
 func loadNodeKey(path string) (ed25519.PrivateKey, error) {
-	info, err := os.Lstat(path)
-	if err != nil { return nil, err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 || info.Size() > 256 {
-		return nil, errors.New("node key must be a small regular owner-only file")
+	if err := verifyOwnedRegularFile(path, 256); err != nil {
+		return nil, fmt.Errorf("node key security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil { return nil, err }
@@ -146,10 +312,8 @@ func loadNodeKey(path string) (ed25519.PrivateKey, error) {
 }
 
 func loadSigningKey(path string) (*rsa.PublicKey, error) {
-	info, err := os.Lstat(path)
-	if err != nil { return nil, err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0027 != 0 || info.Size() > 16<<10 {
-		return nil, errors.New("deployment signing public key must be a regular, non-world-readable file")
+	if err := verifyOwnedRegularFile(path, 16<<10); err != nil {
+		return nil, fmt.Errorf("deployment signing public key security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil { return nil, err }
@@ -201,6 +365,16 @@ func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25
 	if result.NodeIdentity != cfg.NodeIdentity || result.PolledAt.IsZero() || len(result.Releases) > 10 || len(result.Rollbacks) > 10 {
 		return empty, errors.New("pending-release response violates the node assignment contract")
 	}
+	for _, release := range result.Releases {
+		if !validStaticDomain(release.Hostname) || !validStaticHealthCheckPath(release.HealthCheckPath) {
+			return empty, fmt.Errorf("deployment %q has an invalid hostname or health-check path", release.DeploymentID)
+		}
+	}
+	for _, rollback := range result.Rollbacks {
+		if !validStaticDomain(rollback.Hostname) || !validStaticHealthCheckPath(rollback.HealthCheckPath) {
+			return empty, fmt.Errorf("rollback %q has an invalid hostname or health-check path", rollback.FailedDeploymentID)
+		}
+	}
 	return result, nil
 }
 
@@ -211,8 +385,14 @@ func run(configPath string) error {
 	if err != nil { return fmt.Errorf("load node signing key: %w", err) }
 	signingKey, err := loadSigningKey(cfg.DeploymentSigningPublicKeyFile)
 	if err != nil { return fmt.Errorf("load deployment trust key: %w", err) }
-	for _, dir := range []string{cfg.PublisherRoot, filepath.Join(cfg.PublisherRoot, "accounts"), cfg.ReplayDirectory} {
-		if err := verifyPrivateDirectory(dir); err != nil { return err }
+	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
+	for _, dir := range []string{cfg.PublisherRoot, filepath.Join(cfg.PublisherRoot, "accounts")} {
+		if err := verifyOwnedDirectory(dir, uid, gid); err != nil {
+			return fmt.Errorf("publisher directory ownership/security check: %w", err)
+		}
+	}
+	if err := verifyOwnedReplayDirectory(cfg.ReplayDirectory, uid, gid); err != nil {
+		return fmt.Errorf("replay directory ownership/security check: %w", err)
 	}
 	var rollbackStore *rollbackoutbox.Store
 	if cfg.RollbackExecutionEnabled {
@@ -239,13 +419,11 @@ func run(configPath string) error {
 		}
 		for _, release := range pending.Releases {
 			if ctx.Err() != nil { return }
-			if !identityPattern.MatchString(release.HostingAccountID) {
-				fmt.Fprintf(os.Stderr, "skip deployment %s: invalid hosting account identifier\n", release.DeploymentID)
-				continue
-			}
-			baseDir := filepath.Join(cfg.PublisherRoot, "accounts", release.HostingAccountID)
-			if err := verifyPrivateDirectory(baseDir); err != nil {
-				fmt.Fprintf(os.Stderr, "deployment %s: %v\n", release.DeploymentID, err)
+			baseDir, provisionErr := provisionAccountDirectories(
+				filepath.Join(cfg.PublisherRoot, "accounts"), release.HostingAccountID,
+			)
+			if provisionErr != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s: account provisioning rejected: %v\n", release.DeploymentID, provisionErr)
 				continue
 			}
 			expected := deployenvelope.Expected{
