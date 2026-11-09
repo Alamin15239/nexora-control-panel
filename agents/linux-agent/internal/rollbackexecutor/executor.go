@@ -69,11 +69,14 @@ func (e *Executor) Execute(ctx context.Context, baseDir string, intent rollbacko
 			if ctx.Err() != nil {
 				return op, ctx.Err()
 			}
-			blocked, transitionErr := e.Store.Transition(op.ID, "blocked", "rollback_switch_failed", 0, 0)
-			if transitionErr != nil {
-				return op, fmt.Errorf("rollback switch failed (%v) and could not persist blocked state: %w", err, transitionErr)
+			if !errors.Is(err, releasepublisher.ErrStaleRollback) {
+				return op, fmt.Errorf("rollback switch failed and remains pending for retry: %w", err)
 			}
-			return blocked, fmt.Errorf("rollback switch failed: %w", err)
+			blocked, transitionErr := e.Store.Transition(op.ID, "blocked", "stale_rollback_refused", 0, 0)
+			if transitionErr != nil {
+				return op, fmt.Errorf("stale rollback was refused (%v) and blocked state could not be persisted: %w", err, transitionErr)
+			}
+			return blocked, fmt.Errorf("stale rollback was refused: %w", err)
 		}
 		op, err = e.Store.Transition(op.ID, "switched", "", 0, 0)
 		if err != nil {
