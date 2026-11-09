@@ -229,3 +229,23 @@ The binding registry schema is represented by `agents/linux-agent/config.static-
 The publisher connects through `/run/nexora-static-vhost/vhost.sock`; the broker unit runs with primary group `nexora-static`, so systemd creates the runtime directory with that group and the daemon creates a `0660` socket without `chown` or `CAP_CHOWN`. The broker independently verifies the publisher UID. The publisher passes the original envelope only in memory; it is not written to logs.
 
 **Integration status:** broker code, daemon unit, publisher-to-broker request path, pinned trust-file validation, independent signed-envelope verification, root-owned account/domain binding validation, and CI unit coverage are in the branch. Package installation/upgrade wiring, provisioning and maintaining the root trust files and binding registry from authoritative host records, and disposable-VM end-to-end HTTP verification remain required. Do not enable the broker or customer static deployments on production until those are complete.
+
+
+## Rollback execution and acknowledgement
+
+The static publisher's rollback path is now backed by the Linux-agent durable outbox
+and the signed rollback-completion API. The operation is keyed deterministically by
+the failed deployment, persisted before switching, and progresses through pending,
+switched, verified, and reported. The publisher confirms the restored release using
+the configured hostname and health-check path, then sends a node-signed report
+bound to the failed deployment, target deployment, target artifact digest, HTTP
+status, and probe duration. The API checks the immutable release assignments and
+records an append-only acknowledgement before marking the existing workload healthy.
+
+Rollback execution is explicitly disabled in the sample publisher configuration:
+rollback_execution_enabled=false. Do not enable it until the API migration has been
+applied, the acknowledgement endpoint is deployed, the publisher has the matching
+binary, and same-node rollback has passed acceptance tests. Cross-node rollback is
+rejected by the local publisher and requires a separate scheduler/traffic-switch
+design. A durable local outbox does not itself authorize a rollback; the caller
+must first receive and validate the signed control-plane health-check response.
