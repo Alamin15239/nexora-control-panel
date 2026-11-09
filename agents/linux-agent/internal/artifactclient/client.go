@@ -350,7 +350,7 @@ type HealthCheckAcknowledgement struct {
 	WorkloadHealth string `json:"workloadHealth"`
 	RollbackRequired bool `json:"rollbackRequired"`
 	RollbackTargetDeploymentID *string `json:"rollbackTargetDeploymentId"`
-	RollbackTargetNodeID *string `json:"rollbackTargetNodeId"`
+	RollbackTargetNodeIdentity *string `json:"rollbackTargetNodeIdentity"`
 	RollbackTargetArtifactSHA256 *string `json:"rollbackTargetArtifactSha256"`
 }
 
@@ -464,7 +464,7 @@ func ReportHealthCheck(ctx context.Context, client *http.Client, cfg Config, rep
 	}
 	if !acknowledgement.Accepted || acknowledgement.DeploymentID != report.DeploymentID ||
 		acknowledgement.ReleaseState != expectedState || acknowledgement.WorkloadHealth != expectedHealth ||
-		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetNodeID != nil && acknowledgement.RollbackTargetArtifactSHA256 != nil) ||
+		acknowledgement.RollbackRequired != (acknowledgement.RollbackTargetDeploymentID != nil && acknowledgement.RollbackTargetNodeIdentity != nil && acknowledgement.RollbackTargetArtifactSHA256 != nil) ||
 		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetNodeID == nil)) ||
 		((acknowledgement.RollbackTargetDeploymentID == nil) != (acknowledgement.RollbackTargetArtifactSHA256 == nil)) ||
 		(acknowledgement.RollbackTargetDeploymentID != nil &&
