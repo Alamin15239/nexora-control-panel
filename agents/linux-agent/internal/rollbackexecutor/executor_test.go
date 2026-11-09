@@ -47,7 +47,8 @@ func setup(t *testing.T) (*rollbackoutbox.Store, string, rollbackoutbox.Operatio
 		ID: "rollback-op-001", FailedDeploymentID: "deploy-failed-001",
 		FailedReleaseID: "release-failed", TargetDeploymentID: "deploy-old-001",
 		TargetReleaseID: "release-old", ProjectID: "project-001",
-		OrganizationID: "org-001", NodeID: "node-001",
+		OrganizationID: "org-001", NodeID: "node-001", HostingAccountID: "hosting-001",
+		Hostname: "www.example.test", HealthCheckPath: "/",
 		ExpectedActiveReleaseID: "release-failed",
 		ArtifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
