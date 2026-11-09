@@ -31,6 +31,8 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
@@ -47,6 +49,7 @@ type Config struct {
 	PublisherRoot string `json:"publisher_root"`
 	ReplayDirectory string `json:"replay_directory"`
 	PollIntervalSeconds int `json:"poll_interval_seconds"`
+	RollbackExecutionEnabled bool `json:"rollback_execution_enabled"`
 }
 
 type PendingRelease struct {
@@ -196,6 +199,15 @@ func run(configPath string) error {
 	for _, dir := range []string{cfg.PublisherRoot, filepath.Join(cfg.PublisherRoot, "accounts"), cfg.ReplayDirectory} {
 		if err := verifyPrivateDirectory(dir); err != nil { return err }
 	}
+	var rollbackStore *rollbackoutbox.Store
+	if cfg.RollbackExecutionEnabled {
+		rollbackStateDir := filepath.Join(cfg.ReplayDirectory, "rollback-outbox")
+		if err := os.Mkdir(rollbackStateDir, 0700); err != nil && !os.IsExist(err) {
+			return fmt.Errorf("create rollback outbox directory: %w", err)
+		}
+		rollbackStore, err = rollbackoutbox.Open(filepath.Join(rollbackStateDir, "operations.json"))
+		if err != nil { return fmt.Errorf("open rollback outbox: %w", err) }
+	}
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -269,17 +281,43 @@ func run(configPath string) error {
 				continue
 			}
 			if healthAck.RollbackRequired {
-				rollbackProbe, rollbackErr := rollbackStaticRelease(baseDir, result.ReleaseID,
-					healthAck.RollbackTargetDeploymentID, healthAck.RollbackTargetNodeID,
-					cfg.NodeIdentity, func() runtimehealth.Result {
-						return staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
-					})
-				if rollbackErr != nil {
-					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback did not complete safely: %v\n", release.DeploymentID, rollbackErr)
+				if !cfg.RollbackExecutionEnabled {
+					fmt.Fprintf(os.Stderr, "deployment %s failed; rollback to %v is required but rollback execution is disabled\n",
+						release.DeploymentID, healthAck.RollbackTargetDeploymentID)
 					continue
 				}
-				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back; previous release is serving and healthy (HTTP %d)\n",
-					release.DeploymentID, rollbackProbe.HTTPStatus)
+				if healthAck.RollbackTargetDeploymentID == nil || healthAck.RollbackTargetNodeID == nil ||
+					healthAck.RollbackTargetArtifactSHA256 == nil || *healthAck.RollbackTargetNodeID != cfg.NodeIdentity {
+					fmt.Fprintf(os.Stderr, "deployment %s rollback target is incomplete or belongs to another node\n", release.DeploymentID)
+					continue
+				}
+				intent := rollbackoutbox.Operation{
+					ID: "rollback-" + result.DeploymentID,
+					FailedDeploymentID: result.DeploymentID,
+					FailedReleaseID: result.ReleaseID,
+					TargetDeploymentID: *healthAck.RollbackTargetDeploymentID,
+					TargetReleaseID: *healthAck.RollbackTargetDeploymentID,
+					ProjectID: release.ProjectID,
+					OrganizationID: release.OrganizationID,
+					NodeID: cfg.NodeIdentity,
+					ExpectedActiveReleaseID: result.ReleaseID,
+					ArtifactSHA256: *healthAck.RollbackTargetArtifactSHA256,
+				}
+				executor := rollbackexecutor.Executor{
+					Enabled: true,
+					Store: rollbackStore,
+					Publisher: rollbackexecutor.RealPublisher{},
+					Prober: staticRollbackProber{hostname: release.Hostname, path: healthCheckPath},
+					Reporter: staticRollbackReporter{client: httpClient, config: nodeArtifactConfig},
+				}
+				rollbackOp, rollbackErr := executor.Execute(ctx, baseDir, intent)
+				if rollbackErr != nil {
+					fmt.Fprintf(os.Stderr, "deployment %s automatic rollback did not complete safely (state=%s): %v\n",
+						release.DeploymentID, rollbackOp.State, rollbackErr)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "deployment %s automatically rolled back; previous release is serving and acknowledged (operation=%s)\n",
+					release.DeploymentID, rollbackOp.ID)
 				continue
 			}
 			if probe.Status != runtimehealth.Healthy {
@@ -301,6 +339,33 @@ func run(configPath string) error {
 	}
 }
 
+
+
+type staticRollbackProber struct {
+	hostname string
+	path string
+}
+
+func (p staticRollbackProber) Probe(ctx context.Context, _ rollbackoutbox.Operation) runtimehealth.Result {
+	return staticvhost.ProbeHTTP(ctx, p.hostname, p.path, 5*time.Second)
+}
+
+type staticRollbackReporter struct {
+	client *http.Client
+	config artifactclient.Config
+}
+
+func (r staticRollbackReporter) Report(ctx context.Context, op rollbackoutbox.Operation, result runtimehealth.Result) error {
+	_, err := artifactclient.ReportRollbackCompleted(ctx, r.client, r.config, artifactclient.RollbackCompletionReport{
+		OperationID: op.ID,
+		FailedDeploymentID: op.FailedDeploymentID,
+		TargetDeploymentID: op.TargetDeploymentID,
+		TargetArtifactSHA256: op.ArtifactSHA256,
+		HTTPStatus: result.HTTPStatus,
+		DurationMs: result.DurationMs,
+	})
+	return err
+}
 
 // rollbackStaticRelease performs a compare-and-switch rollback only when the
 // control plane's target belongs to this node. It verifies the restored release
