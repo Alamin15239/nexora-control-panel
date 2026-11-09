@@ -156,7 +156,7 @@ func (s *Store) acquireLock() (func(), error) {
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil { return nil, fmt.Errorf("open rollback outbox lock: %w", err) }
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || !ownedByEffectiveUser(info) {
 		_ = file.Close()
 		return nil, errors.New("rollback outbox lock must be a private regular file")
 	}
