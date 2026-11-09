@@ -41,7 +41,7 @@ class ArtifactD1 {
     previousDeploymentId: "previous-deployment",
     previousArtifactDigest: "b".repeat(64),
     previousActiveNodeId: "previous-runtime-node",
-    previousActiveNodeIdentity: "previous-runtime-node",
+    previousActiveNodeIdentity: "runtime-a",
   };
   nonces = new Set<string>();
   lastSignatureUpdated = false;
@@ -714,10 +714,36 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(body.releaseState, "failed");
   assert.equal(body.rollbackRequired, true);
   assert.equal(body.rollbackTargetDeploymentId, "previous-deployment");
-  assert.equal(body.rollbackTargetNodeIdentity, "previous-runtime-node");
+  assert.equal(body.rollbackTargetNodeIdentity, "runtime-a");
   assert.equal(db.release.state, "failed");
   assert.equal(db.workloadStatus, "unhealthy");
   assert.equal(db.githubDeploymentStatus, "failed");
+});
+
+test("failed health check on another node preserves the previous workload without requesting a local rollback", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  db.release.previousActiveNodeIdentity = "previous-runtime-node";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "unhealthy" as const, httpStatus: 503,
+    durationMs: 30, failureCode: "http_5xx",
+  };
+  const response = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    releaseState: string; rollbackRequired: boolean;
+    rollbackTargetDeploymentId: string | null; rollbackTargetNodeIdentity: string | null;
+  };
+  assert.equal(body.releaseState, "failed");
+  assert.equal(body.rollbackRequired, false);
+  assert.equal(body.rollbackTargetDeploymentId, null);
+  assert.equal(body.rollbackTargetNodeIdentity, null);
 });
 
 test("health-check report rejects mismatched configured path and digest", async () => {
