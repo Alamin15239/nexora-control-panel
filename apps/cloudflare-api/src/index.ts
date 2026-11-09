@@ -5943,6 +5943,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
       rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
         ? release.previousDeploymentId : null,
+      rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousActiveReleaseId && release.previousActiveNodeIdentity
+        ? release.previousActiveReleaseId : null,
       rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
         ? release.previousActiveNodeIdentity : null,
       rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
@@ -6037,6 +6039,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
     rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
       ? release.previousDeploymentId : null,
+    rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousActiveReleaseId && release.previousActiveNodeIdentity
+      ? release.previousActiveReleaseId : null,
     rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
       ? release.previousActiveNodeIdentity : null,
     rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
