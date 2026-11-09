@@ -230,6 +230,9 @@ func TestProvisionAccountDirectoriesRejectsUnsafeExistingChild(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(base, "staging"), 0770); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(filepath.Join(base, "staging"), 0770); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := provisionAccountDirectories(root, "account_123"); err == nil {
 		t.Fatal("unsafe existing staging directory was accepted")
 	}
