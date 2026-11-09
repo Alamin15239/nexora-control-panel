@@ -6007,6 +6007,12 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     return c.json({ message: "Health-check path does not match the project runtime settings." }, 409);
   }
 
+  // Rollback is executable only when the previously active release is still
+  // assigned to this exact node. A different-node workload remains untouched.
+  const sameNodeRollbackAvailable = healthStatus === "unhealthy" &&
+    Boolean(release.previousDeploymentId && release.previousActiveReleaseId &&
+      release.previousArtifactDigest && release.previousActiveNodeIdentity === nodeIdentity);
+
   const details = JSON.stringify({
     artifactSha256: body.artifactSha256,
     probePath: body.probePath,
@@ -6030,14 +6036,14 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
       releaseState: targetState,
       workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
-      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity),
-      rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+      rollbackRequired: sameNodeRollbackAvailable,
+      rollbackTargetDeploymentId: sameNodeRollbackAvailable
         ? release.previousDeploymentId : null,
-      rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+      rollbackTargetReleaseId: sameNodeRollbackAvailable
         ? release.previousActiveReleaseId : null,
-      rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+      rollbackTargetNodeIdentity: sameNodeRollbackAvailable
         ? release.previousActiveNodeIdentity : null,
-      rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+      rollbackTargetArtifactSha256: sameNodeRollbackAvailable
         ? release.previousArtifactDigest : null,
     });
   }
@@ -6129,14 +6135,14 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     deploymentId: body.deploymentId,
     releaseState: targetState,
     workloadHealth: healthStatus,
-    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity),
-    rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+    rollbackRequired: sameNodeRollbackAvailable,
+    rollbackTargetDeploymentId: sameNodeRollbackAvailable
       ? release.previousDeploymentId : null,
-    rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+    rollbackTargetReleaseId: sameNodeRollbackAvailable
       ? release.previousActiveReleaseId : null,
-    rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+    rollbackTargetNodeIdentity: sameNodeRollbackAvailable
       ? release.previousActiveNodeIdentity : null,
-    rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
+    rollbackTargetArtifactSha256: sameNodeRollbackAvailable
       ? release.previousArtifactDigest : null,
   });
 });
