@@ -11,6 +11,15 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 )
 
+type retryPublisher struct {
+	calls int
+	err error
+}
+func (p *retryPublisher) Rollback(string, string, string) error {
+	p.calls++
+	return p.err
+}
+
 type fixedProbe struct {
 	result runtimehealth.Result
 	calls int
@@ -151,4 +160,22 @@ func TestExecuteRecoversAfterSwitchBeforeOutboxProgressWasSaved(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if op.State != "reported" { t.Fatalf("state = %q, want reported", op.State) }
 	if reporter.calls != 1 { t.Fatalf("report calls = %d, want 1", reporter.calls) }
+}
+
+func TestExecuteKeepsTransientSwitchFailurePendingForRetry(t *testing.T) {
+	store, base, intent := setup(t)
+	publisher := &retryPublisher{err: errors.New("temporary filesystem error")}
+	probe := &fixedProbe{result: healthyProbe()}
+	reporter := &fixedReporter{}
+	executor := Executor{Enabled: true, Store: store, Publisher: publisher, Prober: probe, Reporter: reporter}
+
+	op, err := executor.Execute(context.Background(), base, intent)
+	if err == nil { t.Fatal("transient switch failure was hidden") }
+	if op.State != "pending" { t.Fatalf("transient switch failure state = %q, want pending", op.State) }
+	publisher.err = nil
+	op, err = executor.Execute(context.Background(), base, intent)
+	if err != nil { t.Fatal(err) }
+	if op.State != "reported" || publisher.calls != 2 || reporter.calls != 1 {
+		t.Fatalf("retry did not complete safely: state=%q switches=%d reports=%d", op.State, publisher.calls, reporter.calls)
+	}
 }
