@@ -5863,12 +5863,13 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
     "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
-    "previous.artifact_digest AS previousArtifactDigest, w.node_id AS previousActiveNodeId " +
+    "previous.artifact_digest AS previousArtifactDigest, previous_node.node_identity AS previousActiveNodeIdentity " +
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
+    "LEFT JOIN application_nodes previous_node ON previous_node.id = w.node_id " +
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
@@ -5876,7 +5877,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
     previousArtifactDigest: string | null;
-    previousActiveNodeId: string | null;
+    previousActiveNodeIdentity: string | null;
   }>();
   if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
   if (release.artifactDigest !== body.artifactSha256 ||
@@ -5911,10 +5912,10 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
       releaseState: targetState,
       workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
-      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeId),
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
       rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
         ? release.previousDeploymentId : null,
-      rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
+      rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
         ? release.previousActiveNodeId : null,
       rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeId
         ? release.previousArtifactDigest : null,
