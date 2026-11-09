@@ -350,6 +350,7 @@ type HealthCheckAcknowledgement struct {
 	WorkloadHealth string `json:"workloadHealth"`
 	RollbackRequired bool `json:"rollbackRequired"`
 	RollbackTargetDeploymentID *string `json:"rollbackTargetDeploymentId"`
+	RollbackTargetReleaseID *string `json:"rollbackTargetReleaseId"`
 	RollbackTargetNodeIdentity *string `json:"rollbackTargetNodeIdentity"`
 	RollbackTargetArtifactSHA256 *string `json:"rollbackTargetArtifactSha256"`
 }
