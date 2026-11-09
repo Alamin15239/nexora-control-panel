@@ -57,7 +57,7 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 	cfg := Config{ControlPlaneURL:server.URL,NodeIdentity:"runtime-node-test"}
 	pending, err := fetchPending(context.Background(),server.Client(),cfg,privateKey)
 	if err != nil { t.Fatal(err) }
-	if len(pending.Rollbacks)!=1 || pending.Rollbacks[0].TargetDeploymentID!="deployment_previous" || pending.Rollbacks[0].TargetArtifactSHA256!="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+	if len(pending.Rollbacks)!=1 || pending.Rollbacks[0].TargetDeploymentID!="deployment_previous" || pending.Rollbacks[0].FailedReleaseID!="release_failed" || pending.Rollbacks[0].TargetReleaseID!="release_previous" || pending.Rollbacks[0].TargetArtifactSHA256!="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("pending rollback was not preserved: %+v",pending.Rollbacks)
 	}
 	if len(pending.Releases)!=1 || pending.Releases[0].HealthCheckPath!="/healthz" {
