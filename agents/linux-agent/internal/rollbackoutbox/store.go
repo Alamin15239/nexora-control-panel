@@ -26,64 +26,8 @@ const (
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
-var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}// Package rollbackoutbox persists rollback intent and progress before network
-// acknowledgement. It deliberately does not execute rollback or trust API input.
-package rollbackoutbox
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
-)
-
-const (
-	schemaVersion = 1
-	maxFileBytes = 1 << 20
-	maxOperations = 256
-)
-
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
-)
-var hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?// Package rollbackoutbox persists rollback intent and progress before network
-// acknowledgement. It deliberately does not execute rollback or trust API input.
-package rollbackoutbox
-
-import (
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
-)
-
-const (
-	schemaVersion = 1
-	maxFileBytes = 1 << 20
-	maxOperations = 256
-)
-
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
-)
+var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 type Operation struct {
 	ID string `json:"id"`
