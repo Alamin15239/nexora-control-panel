@@ -1,8 +1,10 @@
 package rollbackoutbox
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -71,4 +73,33 @@ func TestRejectsInconsistentReleaseTransition(t *testing.T) {
 	s,op:=fixture(t)
 	op.ExpectedActiveReleaseID="rel-not-failed-001"
 	if _,err:=s.Enqueue(op); err==nil {t.Fatal("inconsistent expected active release accepted")}
+}
+
+func TestMultipleStoreInstancesSerializeConcurrentEnqueue(t *testing.T) {
+	first, base := fixture(t)
+	second, err := Open(first.path)
+	if err != nil { t.Fatal(err) }
+	const count = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, count)
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			op := base
+			op.ID = fmt.Sprintf("op-rollback-%03d", index)
+			op.FailedDeploymentID = fmt.Sprintf("dep-failed-%03d", index)
+			op.TargetDeploymentID = fmt.Sprintf("dep-good-%03d", index)
+			store := first
+			if index%2 == 1 { store = second }
+			_, enqueueErr := store.Enqueue(op)
+			if enqueueErr != nil { errs <- enqueueErr }
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs { t.Fatal(err) }
+	items, err := first.List()
+	if err != nil { t.Fatal(err) }
+	if len(items) != count { t.Fatalf("stored %d operations, want %d (lost concurrent update)", len(items), count) }
 }
