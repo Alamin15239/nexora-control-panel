@@ -5940,14 +5940,14 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
       releaseState: targetState,
       workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
-      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
-      rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity),
+      rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
         ? release.previousDeploymentId : null,
-      rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousActiveReleaseId && release.previousActiveNodeIdentity
+      rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
         ? release.previousActiveReleaseId : null,
-      rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+      rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
         ? release.previousActiveNodeIdentity : null,
-      rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+      rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
         ? release.previousArtifactDigest : null,
     });
   }
@@ -6036,14 +6036,14 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     deploymentId: body.deploymentId,
     releaseState: targetState,
     workloadHealth: healthStatus,
-    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
-    rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+    rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity),
+    rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
       ? release.previousDeploymentId : null,
-    rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousActiveReleaseId && release.previousActiveNodeIdentity
+    rollbackTargetReleaseId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
       ? release.previousActiveReleaseId : null,
-    rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+    rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
       ? release.previousActiveNodeIdentity : null,
-    rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+    rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveReleaseId && release.previousArtifactDigest && release.previousActiveNodeIdentity
       ? release.previousArtifactDigest : null,
   });
 });
