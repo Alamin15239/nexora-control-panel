@@ -50,6 +50,10 @@ jobs:
         run: pnpm --filter @nexora/cloudflare-api typecheck
       - name: Cloudflare API runtime admission regression tests
         run: node --experimental-strip-types --test apps/cloudflare-api/scripts/runtime-admission.test.ts
+      - name: Cloudflare D1 migration and tenant-isolation tests
+        run: python3 apps/cloudflare-api/scripts/test_migrations.py
+      - name: Application-node, artifact, release and rollback integration tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/application-*.integration.test.ts
       - name: Validate Nexora static deployment workflow security contract
         run: python3 scripts/test_nexora_deploy_workflow.py
       - name: Validate Prisma schema
