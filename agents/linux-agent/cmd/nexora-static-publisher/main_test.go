@@ -44,12 +44,21 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 				"repositoryId":"123456789","commitSha":"0123456789abcdef0123456789abcdef01234567",
 				"healthCheckPath":"/healthz",
 			}},
+			"rollbacks":[]any{map[string]any{
+				"failedDeploymentId":"deployment_failed","targetDeploymentId":"deployment_previous",
+				"organizationId":"org_test","projectId":"project_test","hostingAccountId":"hosting_test",
+				"hostname":"www.example.test","healthCheckPath":"/healthz",
+				"targetArtifactSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			}},
 		})
 	}))
 	defer server.Close()
 	cfg := Config{ControlPlaneURL:server.URL,NodeIdentity:"runtime-node-test"}
 	pending, err := fetchPending(context.Background(),server.Client(),cfg,privateKey)
 	if err != nil { t.Fatal(err) }
+	if len(pending.Rollbacks)!=1 || pending.Rollbacks[0].TargetDeploymentID!="deployment_previous" || pending.Rollbacks[0].TargetArtifactSHA256!="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("pending rollback was not preserved: %+v",pending.Rollbacks)
+	}
 	if len(pending.Releases)!=1 || pending.Releases[0].HealthCheckPath!="/healthz" {
 		t.Fatalf("configured health-check path was not preserved: %+v",pending.Releases)
 	}
