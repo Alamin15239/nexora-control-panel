@@ -91,7 +91,7 @@ func TestProbeAndReportReturnsRollbackGuidanceForUnhealthyWorkload(t *testing.T)
 		body, _ := io.ReadAll(r.Body)
 		if !json.Valid(body) { t.Fatal("health report is not valid JSON") }
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeId\":\"previous-runtime-node\"}"))
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"deploymentId\":\"deployment-a\",\"releaseState\":\"failed\",\"workloadHealth\":\"unhealthy\",\"rollbackRequired\":true,\"rollbackTargetDeploymentId\":\"previous-deployment\",\"rollbackTargetNodeIdentity\":\"previous-runtime-node\",\"rollbackTargetArtifactSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"))
 	}))
 	defer api.Close()
 	digest := hex.EncodeToString(make([]byte, 32))
