@@ -89,6 +89,8 @@ func Activate(baseDir, releaseID string) error {
 // Rollback switches from failedReleaseID to previousReleaseID only if the failed
 // release is still active. A retry after a successful rollback is idempotent;
 // a newer deployment or unexpected active target is never overwritten.
+var ErrStaleRollback = errors.New("refusing stale rollback because the failed release is no longer active")
+
 func Rollback(baseDir, failedReleaseID, previousReleaseID string) error {
 	if err := validateBase(baseDir); err != nil { return err }
 	if err := validateName(failedReleaseID); err != nil { return fmt.Errorf("invalid failed release: %w", err) }
@@ -114,7 +116,7 @@ func Rollback(baseDir, failedReleaseID, previousReleaseID string) error {
 	}
 	failedTarget := filepath.Join("releases", failedReleaseID)
 	if currentTarget != failedTarget {
-		return errors.New("refusing stale rollback because the failed release is no longer active")
+		return fmt.Errorf("%w", ErrStaleRollback)
 	}
 	return activateLocked(baseDir, previousReleaseID)
 }
