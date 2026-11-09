@@ -36,11 +36,21 @@ func validateName(name string) error {
 	return nil
 }
 
-// Publish moves a private staging directory into the immutable releases
-// directory, then atomically switches the active symlink. Staging and releases
-// must be on the same filesystem. Existing release identifiers are never
-// overwritten. If activation fails, the immutable release remains stored but inactive.
+// Publish stores a private staging directory and then atomically activates it.
 func Publish(baseDir, stagingID, releaseID string) error {
+	if err := Store(baseDir, stagingID, releaseID); err != nil {
+		return err
+	}
+	if err := Activate(baseDir, releaseID); err != nil {
+		return fmt.Errorf("release stored but activation failed: %w", err)
+	}
+	return nil
+}
+
+// Store moves a private staging directory into the immutable releases directory
+// without changing baseDir/current. Staging and releases must be on the same
+// filesystem. Existing release identifiers are never overwritten.
+func Store(baseDir, stagingID, releaseID string) error {
 	if err := validateBase(baseDir); err != nil { return err }
 	if err := validateName(stagingID); err != nil { return fmt.Errorf("invalid staging identifier: %w", err) }
 	if err := validateName(releaseID); err != nil { return err }
@@ -68,8 +78,8 @@ func Publish(baseDir, stagingID, releaseID string) error {
 	if err := syncDirectory(releasesRoot); err != nil {
 		return fmt.Errorf("sync release store: %w", err)
 	}
-	if err := Activate(baseDir, releaseID); err != nil {
-		return fmt.Errorf("release stored but activation failed: %w", err)
+	if err := syncDirectory(stagingRoot); err != nil {
+		return fmt.Errorf("sync staging directory after release move: %w", err)
 	}
 	return nil
 }
