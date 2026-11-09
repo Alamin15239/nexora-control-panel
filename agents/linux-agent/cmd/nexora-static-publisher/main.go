@@ -286,8 +286,8 @@ func run(configPath string) error {
 						release.DeploymentID, healthAck.RollbackTargetDeploymentID)
 					continue
 				}
-				if healthAck.RollbackTargetDeploymentID == nil || healthAck.RollbackTargetNodeID == nil ||
-					healthAck.RollbackTargetArtifactSHA256 == nil || *healthAck.RollbackTargetNodeID != cfg.NodeIdentity {
+				if healthAck.RollbackTargetDeploymentID == nil || healthAck.RollbackTargetNodeIdentity == nil ||
+					healthAck.RollbackTargetArtifactSHA256 == nil || *healthAck.RollbackTargetNodeIdentity != cfg.NodeIdentity {
 					fmt.Fprintf(os.Stderr, "deployment %s rollback target is incomplete or belongs to another node\n", release.DeploymentID)
 					continue
 				}
