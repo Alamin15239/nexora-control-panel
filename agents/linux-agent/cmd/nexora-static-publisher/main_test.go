@@ -132,3 +132,23 @@ func TestRollbackStaticReleaseRequiresHealthyRestoredProbe(t *testing.T) {
 	if readErr != nil { t.Fatal(readErr) }
 	if active != filepath.Join("releases","release_old") { t.Fatalf("rollback target was not activated: %q",active) }
 }
+
+func TestRollbackIntentFromPendingBindsAccountAndProbeMetadata(t *testing.T) {
+	pending := PendingRollback{
+		FailedDeploymentID: "deployment-failed",
+		TargetDeploymentID: "deployment-previous",
+		OrganizationID: "org-test",
+		ProjectID: "project-test",
+		HostingAccountID: "hosting-test",
+		Hostname: "www.example.test",
+		HealthCheckPath: "/healthz",
+		TargetArtifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	op := rollbackIntentFromPending(pending, "runtime-node-test")
+	if op.ID != "rollback-deployment-failed" || op.NodeID != "runtime-node-test" ||
+		op.FailedReleaseID != pending.FailedDeploymentID || op.TargetReleaseID != pending.TargetDeploymentID ||
+		op.HostingAccountID != pending.HostingAccountID || op.Hostname != pending.Hostname ||
+		op.HealthCheckPath != pending.HealthCheckPath || op.ArtifactSHA256 != pending.TargetArtifactSHA256 {
+		t.Fatalf("rollback intent lost its trusted assignment: %+v", op)
+	}
+}
