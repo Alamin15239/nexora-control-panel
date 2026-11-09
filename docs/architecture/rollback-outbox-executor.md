@@ -45,6 +45,8 @@ rollback.
 | After verified, before acknowledgement | Re-probe and retry the idempotent acknowledgement |
 | After acknowledgement, before reported persistence | Retry the acknowledgement with the same operation ID |
 
+The signed pending-static-releases poll also returns same-node rollback intents. This recovers the gap where a publisher could crash after the control plane marks a release failed but before the first local outbox write. Each durable operation stores its hosting-account ID, canonical hostname, and health-check path so the service can resume pending, switched, or verified work after restart. The publisher retries verified acknowledgements from its local outbox even after the API has marked the workload healthy.
+
 The outbox uses strict bounded JSON, private owner-only files, atomic replacement,
 file and directory fsync, and an advisory lock shared across store instances and
 processes. The operation ID is immutable: an identical retry returns the existing
