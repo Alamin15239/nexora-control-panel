@@ -5912,7 +5912,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
       releaseState: targetState,
       workloadHealth: healthStatus === "healthy" ? "healthy" : "unhealthy",
-      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentityentity),
+      rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
       rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
         ? release.previousDeploymentId : null,
       rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
@@ -6009,7 +6009,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     rollbackRequired: healthStatus === "unhealthy" && Boolean(release.previousDeploymentId && release.previousActiveNodeIdentity),
     rollbackTargetDeploymentId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
       ? release.previousDeploymentId : null,
-    rollbackTargetNodeId: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
+    rollbackTargetNodeIdentity: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
       ? release.previousActiveNodeIdentity : null,
     rollbackTargetArtifactSha256: healthStatus === "unhealthy" && release.previousDeploymentId && release.previousActiveNodeIdentity
       ? release.previousArtifactDigest : null,
