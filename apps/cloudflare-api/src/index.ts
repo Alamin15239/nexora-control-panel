@@ -6107,6 +6107,29 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     return c.json({ message: "Application-node request nonce has already been used." }, 409);
   }
 
+  const priorAcknowledgement = await c.env.DB.prepare(
+    "SELECT node_id AS nodeId, failed_deployment_id AS failedDeploymentId, " +
+    "target_deployment_id AS targetDeploymentId, target_artifact_sha256 AS targetArtifactSha256, " +
+    "http_status AS httpStatus, probe_duration_ms AS durationMs " +
+    "FROM application_rollback_acknowledgements WHERE operation_id = ? LIMIT 1",
+  ).bind(body.operationId).first<{
+    nodeId: string; failedDeploymentId: string; targetDeploymentId: string;
+    targetArtifactSha256: string; httpStatus: number; durationMs: number;
+  }>();
+  if (priorAcknowledgement) {
+    if (priorAcknowledgement.nodeId !== node.id ||
+        priorAcknowledgement.failedDeploymentId !== body.failedDeploymentId ||
+        priorAcknowledgement.targetDeploymentId !== body.targetDeploymentId ||
+        priorAcknowledgement.targetArtifactSha256 !== body.targetArtifactSha256 ||
+        priorAcknowledgement.httpStatus !== body.httpStatus ||
+        priorAcknowledgement.durationMs !== body.durationMs) {
+      return c.json({ message: "Rollback operation ID conflicts with an existing acknowledgement." }, 409);
+    }
+    return c.json({
+      accepted: true, duplicate: true, operationId: body.operationId, state: "reported",
+    }, 200, { "cache-control": "no-store" });
+  }
+
   // Local symlink rollback is permitted only when both immutable releases are
   // assigned to this same node. Cross-node recovery requires a separate traffic
   // and scheduler protocol and is deliberately rejected here.
