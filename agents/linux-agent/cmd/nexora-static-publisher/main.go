@@ -357,6 +357,60 @@ func run(configPath string) error {
 
 
 
+func rollbackIntentFromPending(p PendingRollback, nodeIdentity string) rollbackoutbox.Operation {
+	return rollbackoutbox.Operation{
+		ID: "rollback-" + p.FailedDeploymentID,
+		FailedDeploymentID: p.FailedDeploymentID,
+		FailedReleaseID: p.FailedDeploymentID,
+		TargetDeploymentID: p.TargetDeploymentID,
+		TargetReleaseID: p.TargetDeploymentID,
+		ProjectID: p.ProjectID,
+		OrganizationID: p.OrganizationID,
+		NodeID: nodeIdentity,
+		HostingAccountID: p.HostingAccountID,
+		Hostname: p.Hostname,
+		HealthCheckPath: p.HealthCheckPath,
+		ExpectedActiveReleaseID: p.FailedDeploymentID,
+		ArtifactSHA256: p.TargetArtifactSHA256,
+	}
+}
+
+func executeRollbackOperation(ctx context.Context, client *http.Client, cfg Config, store *rollbackoutbox.Store,
+	baseDir string, op rollbackoutbox.Operation, nodeKey ed25519.PrivateKey) (rollbackoutbox.Operation, error) {
+	executor := rollbackexecutor.Executor{
+		Enabled: true,
+		Store: store,
+		Publisher: rollbackexecutor.RealPublisher{},
+		Prober: staticRollbackProber{hostname: op.Hostname, path: op.HealthCheckPath},
+		Reporter: staticRollbackReporter{client: client, config: artifactclient.Config{
+			ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity, PrivateKey: nodeKey,
+		}},
+	}
+	return executor.Execute(ctx, baseDir, op)
+}
+
+func resumeLocalRollbackOutbox(ctx context.Context, client *http.Client, cfg Config,
+	store *rollbackoutbox.Store, nodeKey ed25519.PrivateKey) error {
+	operations, err := store.List()
+	if err != nil { return fmt.Errorf("list durable rollback operations: %w", err) }
+	for _, op := range operations {
+		if ctx.Err() != nil { return ctx.Err() }
+		if op.State == "reported" || op.State == "blocked" { continue }
+		if op.NodeID != cfg.NodeIdentity {
+			return fmt.Errorf("rollback operation %s belongs to another node identity", op.ID)
+		}
+		baseDir := filepath.Join(cfg.PublisherRoot, "accounts", op.HostingAccountID)
+		if err := verifyPrivateDirectory(baseDir); err != nil {
+			fmt.Fprintf(os.Stderr, "rollback operation %s: %v\n", op.ID, err)
+			continue
+		}
+		if _, err := executeRollbackOperation(ctx, client, cfg, store, baseDir, op, nodeKey); err != nil {
+			fmt.Fprintf(os.Stderr, "resume rollback operation %s (state=%s): %v\n", op.ID, op.State, err)
+		}
+	}
+	return nil
+}
+
 type staticRollbackProber struct {
 	hostname string
 	path string
