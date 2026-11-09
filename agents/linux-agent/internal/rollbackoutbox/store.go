@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -52,7 +54,8 @@ const (
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$`)
-)\nvar hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?// Package rollbackoutbox persists rollback intent and progress before network
+)
+var hostnamePattern = regexp.MustCompile(`^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?// Package rollbackoutbox persists rollback intent and progress before network
 // acknowledgement. It deliberately does not execute rollback or trust API input.
 package rollbackoutbox
 
@@ -67,6 +70,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -238,7 +242,7 @@ func validate(op Operation) error {
 		return errors.New("rollback intent hostname is invalid")
 	}
 	if op.HealthCheckPath == "" || len(op.HealthCheckPath) > 512 || op.HealthCheckPath[0] != '/' ||
-		strings.ContainsAny(op.HealthCheckPath, "?#\\\r\n") {
+		strings.ContainsAny(op.HealthCheckPath, "?#\r\n") || strings.Contains(op.HealthCheckPath, string(rune(92))) {
 		return errors.New("rollback intent health-check path is invalid")
 	}
 	for _, ch := range op.HealthCheckPath {
