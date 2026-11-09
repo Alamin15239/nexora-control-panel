@@ -63,10 +63,22 @@ type PendingRelease struct {
 	CommitSHA string `json:"commitSha"`
 	HealthCheckPath string `json:"healthCheckPath"`
 }
+type PendingRollback struct {
+	FailedDeploymentID string `json:"failedDeploymentId"`
+	TargetDeploymentID string `json:"targetDeploymentId"`
+	OrganizationID string `json:"organizationId"`
+	ProjectID string `json:"projectId"`
+	HostingAccountID string `json:"hostingAccountId"`
+	Hostname string `json:"hostname"`
+	HealthCheckPath string `json:"healthCheckPath"`
+	TargetArtifactSHA256 string `json:"targetArtifactSha256"`
+}
+
 type PendingResponse struct {
 	NodeIdentity string `json:"nodeIdentity"`
 	PolledAt time.Time `json:"polledAt"`
 	Releases []PendingRelease `json:"releases"`
+	Rollbacks []PendingRollback `json:"rollbacks"`
 }
 
 func main() {
