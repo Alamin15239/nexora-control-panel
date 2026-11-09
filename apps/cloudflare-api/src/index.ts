@@ -4894,6 +4894,68 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
   });
 });
 
+app.post("/internal/v1/operator/application-nodes", async (c) => {
+  if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
+    return c.json({ message: "Node operator controls are not configured." }, 503);
+  }
+  if (!await nodeOperatorAuthorized(c.req.raw, c.env)) {
+    return c.json({ message: "Node operator authorization required." }, 401);
+  }
+  const rawBody = await c.req.text();
+  if (rawBody.length < 2 || rawBody.length > 2048) {
+    return c.json({ message: "Request body must be between 2 and 2048 bytes." }, 413);
+  }
+  let input: unknown;
+  try { input = JSON.parse(rawBody); } catch {
+    return c.json({ message: "Invalid JSON body." }, 400);
+  }
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return c.json({ message: "A JSON object is required." }, 400);
+  }
+  const body = input as Record<string, unknown>;
+  if (Object.keys(body).some((key) => !["nodePoolId", "nodeIdentity"].includes(key)) ||
+      typeof body.nodePoolId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.nodePoolId) ||
+      typeof body.nodeIdentity !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$/.test(body.nodeIdentity)) {
+    return c.json({ message: "A valid nodePoolId and nodeIdentity are required." }, 400);
+  }
+  const nodeId = crypto.randomUUID();
+  const auditId = crypto.randomUUID();
+  const enrollmentToken = randomHex(32);
+  const enrollmentKeyHash = await sha256(enrollmentToken);
+  const metadata = JSON.stringify({ nodeIdentity: body.nodeIdentity, nodePoolId: body.nodePoolId, nodeRole: "runtime" });
+  let results: D1Result[];
+  try {
+    results = await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO application_nodes " +
+        "(id, node_pool_id, node_identity, enrollment_key_hash, node_role, status) " +
+        "SELECT ?, p.id, ?, ?, 'runtime', 'pending' FROM application_node_pools p " +
+        "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+        "ON CONFLICT(node_identity) DO NOTHING",
+      ).bind(nodeId, body.nodeIdentity, enrollmentKeyHash, body.nodePoolId),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs " +
+        "(id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) " +
+        "SELECT ?, NULL, NULL, 'application.node_enrollment_issued', 'application_node', ?, ? " +
+        "WHERE EXISTS (SELECT 1 FROM application_nodes WHERE id = ?)",
+      ).bind(auditId, nodeId, metadata, nodeId),
+    ]);
+  } catch {
+    return c.json({ message: "Node enrollment could not be issued safely." }, 500);
+  }
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1 ||
+      Number(results[1]?.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Node identity already exists, or the selected pool is not ready and isolated." }, 409);
+  }
+  return c.json({
+    created: true,
+    node: { id: nodeId, identity: body.nodeIdentity, nodePoolId: body.nodePoolId, role: "runtime", status: "pending" },
+    enrollmentToken,
+    tokenUsage: "single_use",
+    executionEnabled: false,
+  }, 201);
+});
+
 app.post("/internal/v1/operator/application-nodes/:nodeId/revoke", async (c) => {
   if (!c.env.APPLICATION_NODE_OPERATOR_TOKEN || c.env.APPLICATION_NODE_OPERATOR_TOKEN.length < 32) {
     return c.json({ message: "Node operator controls are not configured." }, 503);
@@ -5192,6 +5254,20 @@ app.get("/internal/v1/application-nodes/desired-state", async (c) => {
 });
 
 
+function validStaticHealthCheckPath(value: string): boolean {
+  if (!value || value.length > 512 || !value.startsWith("/") ||
+      value.startsWith("//") || /[?#\\\r\n\u0000-\u001f\u007f]/.test(value)) return false;
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.split("/").some((part) => part === "." || part === "..")) return false;
+    const parsed = new URL(value, "https://nexora.invalid");
+    return parsed.origin === "https://nexora.invalid" &&
+      parsed.pathname === value && !parsed.search && !parsed.hash;
+  } catch {
+    return false;
+  }
+}
+
 const STATIC_PENDING_RELEASES_PATH = "/internal/v1/application-nodes/pending-static-releases";
 
 app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
@@ -5284,7 +5360,9 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   return c.json({
     nodeIdentity,
     polledAt: new Date().toISOString(),
-    releases: rows.results ?? [],
+    releases: (rows.results ?? []).filter((row) =>
+      validStaticHealthCheckPath(row.healthCheckPath ?? "/") && validDomain(row.hostname),
+    ),
     rollbacks: rollbackRows.results ?? [],
   }, 200, { "cache-control": "no-store" });
 });
@@ -5860,7 +5938,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   if (Object.keys(body).some((key) => !allowedKeys.has(key)) ||
       typeof body.deploymentId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.deploymentId) ||
       typeof body.artifactSha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.artifactSha256) ||
-      typeof body.probePath !== "string" || !body.probePath.startsWith("/") ||
+      typeof body.probePath !== "string" || !validStaticHealthCheckPath(body.probePath) ||
       body.probePath.length > 512 || /[?#\r\n]/.test(body.probePath) ||
       /[\x00-\x1F\x7F]/.test(body.probePath) ||
       !["healthy", "unhealthy"].includes(String(body.healthStatus)) ||
