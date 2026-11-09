@@ -5891,7 +5891,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
     "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
-    "previous.artifact_digest AS previousArtifactDigest, previous_node.node_identity AS previousActiveNodeIdentity " +
+    "previous.artifact_digest AS previousArtifactDigest, previous_node.id AS previousActiveNodeId, " +
+    "previous_node.node_identity AS previousActiveNodeIdentity " +
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
@@ -5905,6 +5906,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
     previousArtifactDigest: string | null;
+    previousActiveNodeId: string | null;
     previousActiveNodeIdentity: string | null;
   }>();
   if (!release) return c.json({ message: "Assigned application release was not found." }, 404);
@@ -6011,9 +6013,12 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
       "VALUES (?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0) " +
       "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
-      "status = 'unhealthy', observed_replicas = 0, updated_at = datetime('now')",
+      "status = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
+      "THEN application_workloads.status ELSE 'unhealthy' END, " +
+      "observed_replicas = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
+      "THEN application_workloads.observed_replicas ELSE 0 END, updated_at = datetime('now')",
     ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
-      release.previousActiveReleaseId, node.id),
+      release.previousActiveReleaseId, release.previousActiveNodeId ?? node.id),
     c.env.DB.prepare(
       "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), " +
       "log_excerpt = 'Application health check failed.' " +
