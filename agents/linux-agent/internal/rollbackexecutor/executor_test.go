@@ -31,7 +31,8 @@ func (r *fixedReporter) Report(context.Context, rollbackoutbox.Operation, runtim
 
 func setup(t *testing.T) (*rollbackoutbox.Store, string, rollbackoutbox.Operation) {
 	t.Helper()
-	outboxDir := t.TempDir()
+	outboxDir := filepath.Join(t.TempDir(), "outbox")
+	if err := os.Mkdir(outboxDir, 0700); err != nil { t.Fatal(err) }
 	store, err := rollbackoutbox.Open(filepath.Join(outboxDir, "rollback.json"))
 	if err != nil { t.Fatal(err) }
 	base := t.TempDir()
