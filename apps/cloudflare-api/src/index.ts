@@ -6196,10 +6196,13 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
       "INSERT OR IGNORE INTO application_rollback_acknowledgements " +
       "(operation_id, organization_id, project_id, node_id, failed_release_id, target_release_id, " +
       "failed_deployment_id, target_deployment_id, target_artifact_sha256, http_status, probe_duration_ms) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
+      "WHERE EXISTS (SELECT 1 FROM application_workloads w WHERE w.id = ? " +
+      "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy'))",
     ).bind(body.operationId, binding.organizationId, binding.projectId, node.id,
       binding.failedReleaseId, binding.targetReleaseId, body.failedDeploymentId,
-      body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs),
+      body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs,
+      binding.workloadId, binding.targetReleaseId, node.id),
     c.env.DB.prepare(
       "UPDATE application_workloads SET status = 'healthy', desired_replicas = 1, " +
       "observed_replicas = 1, updated_at = datetime('now') " +
