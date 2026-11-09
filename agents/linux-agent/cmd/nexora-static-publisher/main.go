@@ -273,7 +273,13 @@ func run(configPath string) error {
 				continue
 			}
 			if err := staticvhost.RequestInstall(ctx, "", result.SignedEnvelope); err != nil {
-				fmt.Fprintf(os.Stderr, "deployment %s release is staged but vhost installation failed: %v\n", release.DeploymentID, err)
+				fmt.Fprintf(os.Stderr, "deployment %s release is stored but vhost installation failed: %v\n", release.DeploymentID, err)
+				continue
+			}
+			// The privileged broker installs and validates the Nginx vhost first.
+			// Only then may the unprivileged publisher switch the active release.
+			if err := releasepublisher.Activate(baseDir, result.ReleaseID); err != nil {
+				fmt.Fprintf(os.Stderr, "deployment %s vhost is installed but release activation failed: %v\n", release.DeploymentID, err)
 				continue
 			}
 			if err := artifactclient.ReportActivated(ctx, httpClient, nodeArtifactConfig, artifactclient.ActivationReport{
