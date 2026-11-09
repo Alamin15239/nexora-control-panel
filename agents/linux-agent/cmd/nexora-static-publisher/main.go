@@ -300,6 +300,9 @@ func run(configPath string) error {
 					ProjectID: release.ProjectID,
 					OrganizationID: release.OrganizationID,
 					NodeID: cfg.NodeIdentity,
+					HostingAccountID: release.HostingAccountID,
+					Hostname: release.Hostname,
+					HealthCheckPath: healthCheckPath,
 					ExpectedActiveReleaseID: result.ReleaseID,
 					ArtifactSHA256: *healthAck.RollbackTargetArtifactSHA256,
 				}
