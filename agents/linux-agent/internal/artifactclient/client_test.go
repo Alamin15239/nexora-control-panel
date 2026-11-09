@@ -199,7 +199,8 @@ func TestReportHealthCheckReturnsRollbackTargetForUnhealthyRelease(t *testing.T)
 	if err != nil { t.Fatal(err) }
 	if !ack.RollbackRequired || ack.RollbackTargetDeploymentID == nil ||
 		*ack.RollbackTargetDeploymentID != "previous-deployment" || ack.RollbackTargetNodeID == nil ||
-             *ack.RollbackTargetNodeID != "previous-runtime-node" || ack.ReleaseState != "failed" {
+             *ack.RollbackTargetNodeID != "previous-runtime-node" || ack.RollbackTargetArtifactSHA256 == nil ||
+		*ack.RollbackTargetArtifactSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" || ack.ReleaseState != "failed" {
 		t.Fatalf("unexpected rollback acknowledgement: %+v", ack)
 	}
 }
@@ -218,4 +219,87 @@ func TestReportHealthCheckRejectsContradictoryAcknowledgement(t *testing.T) {
 		ProbePath:"/ready", HealthStatus:"healthy", HTTPStatus:200, DurationMs:1,
 	})
 	if err == nil { t.Fatal("expected contradictory acknowledgement to be rejected") }
+}
+
+func TestReportRollbackCompletedSignsAndValidatesAcknowledgement(t *testing.T) {
+	publicKey, privateKey := testIdentity(t)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != ArtifactRollbackCompletedReportPath {
+			t.Fatalf("unexpected rollback report target: %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil { t.Fatal(err) }
+		proof := appnodeauth.Proof{
+			Timestamp: r.Header.Get("X-Nexora-Node-Timestamp"),
+			Nonce: r.Header.Get("X-Nexora-Node-Nonce"),
+			Signature: r.Header.Get("X-Nexora-Node-Signature"),
+		}
+		if err := appnodeauth.Verify(publicKey, r.Header.Get("X-Nexora-Node-Identity"),
+			r.Method, r.URL.Path, body, proof, nowFromTimestamp(t, proof.Timestamp)); err != nil {
+			t.Fatalf("rollback report signature invalid: %v", err)
+		}
+		var report map[string]any
+		if err := json.Unmarshal(body, &report); err != nil { t.Fatal(err) }
+		if report["operationId"] != "rollback-deployment-a" ||
+			report["failedDeploymentId"] != "deployment-a" ||
+			report["targetDeploymentId"] != "deployment-previous" ||
+			report["targetArtifactSha256"] != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ||
+			report["httpStatus"] != float64(200) || report["durationMs"] != float64(18) {
+			t.Fatalf("unexpected rollback report: %+v", report)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"accepted\":true,\"duplicate\":false,\"operationId\":\"rollback-deployment-a\",\"state\":\"reported\"}"))
+	}))
+	defer server.Close()
+
+	ack, err := ReportRollbackCompleted(context.Background(), server.Client(), Config{
+		ControlPlaneURL: server.URL, NodeIdentity: "runtime-a", PrivateKey: privateKey,
+	}, RollbackCompletionReport{
+		OperationID: "rollback-deployment-a",
+		FailedDeploymentID: "deployment-a",
+		TargetDeploymentID: "deployment-previous",
+		TargetArtifactSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		HTTPStatus: 200, DurationMs: 18,
+	})
+	if err != nil { t.Fatal(err) }
+	if !ack.Accepted || ack.Duplicate || ack.State != "reported" {
+		t.Fatalf("unexpected rollback acknowledgement: %+v", ack)
+	}
+}
+
+func TestReportRollbackCompletedRejectsInvalidClaimsAndAcknowledgements(t *testing.T) {
+	_, privateKey := testIdentity(t)
+	config := Config{ControlPlaneURL:"https://api.example.test",NodeIdentity:"runtime-a",PrivateKey:privateKey}
+	valid := RollbackCompletionReport{
+		OperationID:"rollback-deployment-a",FailedDeploymentID:"deployment-a",
+		TargetDeploymentID:"deployment-previous",
+		TargetArtifactSHA256:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		HTTPStatus:200,DurationMs:1,
+	}
+	invalid := []RollbackCompletionReport{valid,valid,valid,valid,valid}
+	invalid[0].HTTPStatus=503
+	invalid[1].DurationMs=30001
+	invalid[2].TargetDeploymentID=invalid[2].FailedDeploymentID
+	invalid[3].TargetArtifactSHA256="not-a-digest"
+	invalid[4].OperationID="../wrong"
+	for _, report := range invalid {
+		if _, err := ReportRollbackCompleted(context.Background(), nil, config, report); err == nil {
+			t.Fatalf("invalid rollback report accepted: %+v", report)
+		}
+	}
+
+	for _, response := range []string{
+		"{\"accepted\":false,\"duplicate\":false,\"operationId\":\"rollback-deployment-a\",\"state\":\"reported\"}",
+		"{\"accepted\":true,\"duplicate\":false,\"operationId\":\"other-operation\",\"state\":\"reported\"}",
+		"{\"accepted\":true,\"duplicate\":false,\"operationId\":\"rollback-deployment-a\",\"state\":\"verified\"}",
+	} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(response))
+		}))
+		_, err := ReportRollbackCompleted(context.Background(), server.Client(), Config{
+			ControlPlaneURL:server.URL,NodeIdentity:"runtime-a",PrivateKey:privateKey,
+		}, valid)
+		server.Close()
+		if err == nil { t.Fatalf("contradictory acknowledgement accepted: %s", response) }
+	}
 }
