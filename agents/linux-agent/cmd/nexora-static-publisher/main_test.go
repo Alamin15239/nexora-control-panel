@@ -48,10 +48,10 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := Config{ControlPlaneURL:server.URL,NodeIdentity:"runtime-node-test"}
-	releases, err := fetchPending(context.Background(),server.Client(),cfg,privateKey)
+	pending, err := fetchPending(context.Background(),server.Client(),cfg,privateKey)
 	if err != nil { t.Fatal(err) }
-	if len(releases)!=1 || releases[0].HealthCheckPath!="/healthz" {
-		t.Fatalf("configured health-check path was not preserved: %+v",releases)
+	if len(pending.Releases)!=1 || pending.Releases[0].HealthCheckPath!="/healthz" {
+		t.Fatalf("configured health-check path was not preserved: %+v",pending.Releases)
 	}
 }
 
