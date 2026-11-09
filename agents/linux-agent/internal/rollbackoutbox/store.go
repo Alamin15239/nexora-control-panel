@@ -76,6 +76,9 @@ func Open(path string) (*Store, error) {
 func (s *Store) Enqueue(op Operation) (Operation,error) {
 	if err:=validate(op); err!=nil { return Operation{},err }
 	s.mu.Lock(); defer s.mu.Unlock()
+	unlock, lockErr := s.acquireLock()
+	if lockErr != nil { return Operation{}, lockErr }
+	defer unlock()
 	state,err:=s.read()
 	if err!=nil && !os.IsNotExist(err) { return Operation{},err }
 	if state.Operations==nil { state=snapshot{Version:schemaVersion,Operations:map[string]Operation{}} }
@@ -99,6 +102,9 @@ func (s *Store) Enqueue(op Operation) (Operation,error) {
 func (s *Store) Transition(id,next,failureCode string,httpStatus int,durationMS int64) (Operation,error) {
 	if !idPattern.MatchString(id) { return Operation{},errors.New("invalid rollback operation ID") }
 	s.mu.Lock(); defer s.mu.Unlock()
+	unlock, lockErr := s.acquireLock()
+	if lockErr != nil { return Operation{}, lockErr }
+	defer unlock()
 	state,err:=s.read()
 	if err!=nil { return Operation{},err }
 	op,ok:=state.Operations[id]
@@ -125,6 +131,9 @@ func (s *Store) Transition(id,next,failureCode string,httpStatus int,durationMS 
 
 func (s *Store) List() ([]Operation,error) {
 	s.mu.Lock(); defer s.mu.Unlock()
+	unlock, lockErr := s.acquireLock()
+	if lockErr != nil { return nil, lockErr }
+	defer unlock()
 	state,err:=s.read()
 	if os.IsNotExist(err) { return []Operation{},nil }
 	if err!=nil { return nil,err }
@@ -132,6 +141,28 @@ func (s *Store) List() ([]Operation,error) {
 	for _,op:=range state.Operations { out=append(out,op) }
 	sort.Slice(out,func(i,j int)bool{return out[i].CreatedAt.Before(out[j].CreatedAt)})
 	return out,nil
+}
+
+
+// acquireLock serializes mutations across Store instances and processes. The
+// private parent directory prevents untrusted users from replacing this file.
+func (s *Store) acquireLock() (func(), error) {
+	lockPath := s.path + ".lock"
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil { return nil, fmt.Errorf("open rollback outbox lock: %w", err) }
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		_ = file.Close()
+		return nil, errors.New("rollback outbox lock must be a private regular file")
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock rollback outbox: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func validate(op Operation) error {
