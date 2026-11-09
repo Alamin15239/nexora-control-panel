@@ -50,6 +50,8 @@ jobs:
         run: pnpm --filter @nexora/cloudflare-api typecheck
       - name: Cloudflare API runtime admission regression tests
         run: node --experimental-strip-types --test apps/cloudflare-api/scripts/runtime-admission.test.ts
+      - name: Cloudflare API monthly build quota regression tests
+        run: node --experimental-strip-types --test apps/cloudflare-api/scripts/build-quota.test.ts
       - name: Cloudflare D1 migration and tenant-isolation tests
         run: python3 apps/cloudflare-api/scripts/test_migrations.py
       - name: Application-node, artifact, release and rollback integration tests
