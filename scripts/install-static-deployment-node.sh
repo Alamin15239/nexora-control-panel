@@ -40,6 +40,14 @@ grep -Fxq 'User=nexora-runtime' "$ARTIFACT_DIR/nexora-static-publisher.service"
 grep -Fxq 'Group=www-data' "$ARTIFACT_DIR/nexora-static-publisher.service"
 grep -Fxq 'SupplementaryGroups=nexora-static' "$ARTIFACT_DIR/nexora-static-publisher.service"
 TARGETS=(/usr/local/sbin/nexora-static-vhostd /usr/local/bin/nexora-static-publisher /etc/systemd/system/nexora-static-vhostd.service /etc/systemd/system/nexora-static-publisher.service)
+# Tests may redirect plan-only target inspection into a disposable root. Apply
+# mode deliberately ignores this variable and always uses the real system paths.
+if [[ "$MODE" == "plan" && -n "${NEXORA_STATIC_PLAN_ROOT:-}" ]]; then
+  [[ "$NEXORA_STATIC_PLAN_ROOT" == /* && "$NEXORA_STATIC_PLAN_ROOT" != "/" ]] || {
+    echo "NEXORA_STATIC_PLAN_ROOT must be a non-root absolute path" >&2; exit 2;
+  }
+  for i in "${!TARGETS[@]}"; do TARGETS[$i]="$NEXORA_STATIC_PLAN_ROOT${TARGETS[$i]}"; done
+fi
 if [[ "$MODE" == "plan" ]]; then
   printf 'PLAN ONLY: no machine changes will be made.\n'
   printf 'Artifact directory: %s\n' "$ARTIFACT_DIR"
