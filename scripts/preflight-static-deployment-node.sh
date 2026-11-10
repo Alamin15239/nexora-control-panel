@@ -88,7 +88,8 @@ except Exception as exc:
     sys.exit(1)
 
 required = {"issuer", "audience", "keyId"}
-if set(trust) != required or not all(isinstance(trust[k], str) and trust[k] for k in required):
+if (not isinstance(trust, dict) or set(trust) != required or
+    not all(isinstance(trust[k], str) and 1 <= len(trust[k]) <= 256 for k in required)):
     print("broker trust JSON must contain only non-empty issuer, audience, and keyId", file=sys.stderr)
     sys.exit(1)
 if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", trust["keyId"]):
@@ -106,7 +107,7 @@ expected_config = {
     "publisher_root", "replay_directory", "poll_interval_seconds",
     "rollback_execution_enabled",
 }
-if set(config) != expected_config:
+if not isinstance(config, dict) or set(config) != expected_config:
     print("publisher node config has missing or unknown fields", file=sys.stderr)
     sys.exit(1)
 if (config.get("private_key_file") != "/etc/nexora-static-publisher/node-ed25519.key" or
@@ -125,10 +126,10 @@ if (not isinstance(config.get("control_plane_url"), str) or
     not isinstance(config.get("rollback_execution_enabled"), bool)):
     print("publisher node config contains invalid endpoint, identity, polling, or rollback settings", file=sys.stderr)
     sys.exit(1)
-if (set(bindings) != {"accounts", "domains"} or
-    not isinstance(bindings.get("accounts"), list) or not bindings["accounts"] or
-    not isinstance(bindings.get("domains"), list) or not bindings["domains"]):
-    print("bindings registry must contain only account and domain lists, each non-empty", file=sys.stderr)
+if (not isinstance(bindings, dict) or set(bindings) != {"accounts", "domains"} or
+    not isinstance(bindings.get("accounts"), list) or not 1 <= len(bindings["accounts"]) <= 10000 or
+    not isinstance(bindings.get("domains"), list) or not 1 <= len(bindings["domains"]) <= 50000):
+    print("bindings registry must contain bounded, non-empty account and domain lists only", file=sys.stderr)
     sys.exit(1)
 
 node_key = (pub / "node-ed25519.key").read_text().strip()
@@ -148,7 +149,7 @@ for account in bindings["accounts"]:
         raise SystemExit("invalid hosting account ID in bindings registry")
     if not isinstance(username, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username):
         raise SystemExit("invalid Linux username in bindings registry")
-    if type(uid) is not int or uid < 1000 or username in {"root", "nobody", "nexora-runtime", "nexora-agent"}:
+    if type(uid) is not int or not 1000 <= uid <= 4294967295 or username in {"root", "nobody", "nexora-runtime", "nexora-agent"}:
         raise SystemExit("invalid or reserved Linux identity in bindings registry")
     if aid in account_ids or username in usernames or uid in uids:
         raise SystemExit("duplicate account ID, username, or UID in bindings registry")
