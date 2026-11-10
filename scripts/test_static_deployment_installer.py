@@ -47,6 +47,10 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
             "Refusing to install on protected development host nexora-server",
             "root:root:600", "Refusing to overwrite existing target",
             "Group=www-data", "SupplementaryGroups=nexora-static",
+            'runtime_uid" -lt 1000', 'runtime_home" == "/var/lib/nexora-static"',
+            'runtime_shell" == "/usr/sbin/nologin"',
+            "Existing nexora-runtime primary group is not www-data",
+            "Existing nexora-runtime shell is not /usr/sbin/nologin",
             "stopped and disabled",
         ):
             self.assertIn(required, source)
