@@ -6,8 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=nexora-runtime
-Group=nexora-static
-SupplementaryGroups=www-data
+# Nginx reads publisher-created release trees through www-data. Keep that as
+# the primary group so newly created directories inherit the serving group.
+Group=www-data
+# The broker socket is root:nexora-static; this group grants only IPC access.
+SupplementaryGroups=nexora-static
 ExecStart=/usr/local/bin/nexora-static-publisher --config /etc/nexora-static-publisher/node.json
 Restart=on-failure
 RestartSec=5
