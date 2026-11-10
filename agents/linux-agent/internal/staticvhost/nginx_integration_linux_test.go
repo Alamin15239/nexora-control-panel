@@ -30,6 +30,11 @@ func TestNginxServesAtomicReleaseSwitch(t *testing.T) {
 	nginx, err := exec.LookPath("nginx")
 	if err != nil { t.Skip("nginx binary is not installed") }
 	tmp := t.TempDir()
+	// Keep the fixture compatible with the production rollback directory
+	// permission check; testing.T.TempDir may inherit a group-writable umask.
+	if err := os.Chmod(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{"release-a", "release-b"} {
 		root := filepath.Join(tmp, "releases", id)
 		if err := os.MkdirAll(root, 0755); err != nil { t.Fatal(err) }
