@@ -88,7 +88,8 @@ getent group nexora-static >/dev/null || groupadd --system nexora-static
 if ! getent passwd nexora-runtime >/dev/null; then
   useradd --system --home-dir /var/lib/nexora-static --no-create-home --shell /usr/sbin/nologin --gid www-data --groups nexora-static nexora-runtime
 else
-  IFS=: read -r runtime_name _ runtime_uid runtime_gid runtime_home runtime_shell < <(getent passwd nexora-runtime)
+  # passwd fields are name:password:uid:gid:gecos:home:shell; retain GECOS so HOME and SHELL are read correctly.
+  IFS=: read -r runtime_name _ runtime_uid runtime_gid runtime_gecos runtime_home runtime_shell < <(getent passwd nexora-runtime)
   [[ "$runtime_name" == "nexora-runtime" && "$runtime_uid" -lt 1000 ]] || { echo "Existing nexora-runtime account is not a system account" >&2; exit 5; }
   [[ "$runtime_home" == "/var/lib/nexora-static" ]] || { echo "Existing nexora-runtime home is not /var/lib/nexora-static" >&2; exit 5; }
   [[ "$runtime_shell" == "/usr/sbin/nologin" ]] || { echo "Existing nexora-runtime shell is not /usr/sbin/nologin" >&2; exit 5; }
