@@ -39,10 +39,12 @@ check "publisher has supplementary broker IPC group" has_group nexora-runtime ne
 check "Nginx serving group exists" getent group www-data
 check "broker IPC group exists" getent group nexora-static
 
-check "broker binary installed" is_executable_regular /usr/local/sbin/nexora-static-vhostd
-check "publisher binary installed" is_executable_regular /usr/local/bin/nexora-static-publisher
-check "broker unit installed" test -f /etc/systemd/system/nexora-static-vhostd.service
-check "publisher unit installed" test -f /etc/systemd/system/nexora-static-publisher.service
+check "broker binary is root:root 755" expect_owner_mode /usr/local/sbin/nexora-static-vhostd root root 755
+check "publisher binary is root:root 755" expect_owner_mode /usr/local/bin/nexora-static-publisher root root 755
+check "broker unit is root:root 644" expect_owner_mode /etc/systemd/system/nexora-static-vhostd.service root root 644
+check "publisher unit is root:root 644" expect_owner_mode /etc/systemd/system/nexora-static-publisher.service root root 644
+check "broker runs as root with broker IPC group" bash -c 'grep -Fxq "User=root" /etc/systemd/system/nexora-static-vhostd.service && grep -Fxq "Group=nexora-static" /etc/systemd/system/nexora-static-vhostd.service'
+check "publisher runs unprivileged with Nginx primary group and broker supplementary group" bash -c 'grep -Fxq "User=nexora-runtime" /etc/systemd/system/nexora-static-publisher.service && grep -Fxq "Group=www-data" /etc/systemd/system/nexora-static-publisher.service && grep -Fxq "SupplementaryGroups=nexora-static" /etc/systemd/system/nexora-static-publisher.service'
 
 check "broker trust directory is root:root 750" expect_owner_mode /etc/nexora-static-vhost root root 750
 check "broker trust JSON is root:root 600" expect_owner_mode /etc/nexora-static-vhost/trust.json root root 600
@@ -86,16 +88,42 @@ except Exception as exc:
     sys.exit(1)
 
 required = {"issuer", "audience", "keyId"}
-if not required.issubset(trust) or not all(isinstance(trust[k], str) and trust[k] for k in required):
-    print("broker trust JSON is missing issuer, audience, or keyId", file=sys.stderr)
+if set(trust) != required or not all(isinstance(trust[k], str) and trust[k] for k in required):
+    print("broker trust JSON must contain only non-empty issuer, audience, and keyId", file=sys.stderr)
+    sys.exit(1)
+if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", trust["keyId"]):
+    print("broker trust keyId has an invalid format", file=sys.stderr)
     sys.exit(1)
 if (config.get("deployment_envelope_issuer") != trust["issuer"] or
     config.get("deployment_envelope_audience") != trust["audience"] or
     config.get("deployment_signing_key_id") != trust["keyId"]):
     print("publisher envelope trust settings do not match broker trust", file=sys.stderr)
     sys.exit(1)
-if config.get("publisher_root") != "/var/lib/nexora-static" or config.get("replay_directory") != "/var/lib/nexora-static/replay":
-    print("publisher storage paths do not match the provisioned layout", file=sys.stderr)
+expected_config = {
+    "control_plane_url", "node_identity", "private_key_file",
+    "deployment_signing_public_key_file", "deployment_signing_key_id",
+    "deployment_envelope_issuer", "deployment_envelope_audience",
+    "publisher_root", "replay_directory", "poll_interval_seconds",
+    "rollback_execution_enabled",
+}
+if set(config) != expected_config:
+    print("publisher node config has missing or unknown fields", file=sys.stderr)
+    sys.exit(1)
+if (config.get("private_key_file") != "/etc/nexora-static-publisher/node-ed25519.key" or
+    config.get("deployment_signing_public_key_file") != "/etc/nexora-static-publisher/deployment-envelope-public.pem" or
+    config.get("publisher_root") != "/var/lib/nexora-static" or
+    config.get("replay_directory") != "/var/lib/nexora-static/replay"):
+    print("publisher key or storage paths do not match the provisioned layout", file=sys.stderr)
+    sys.exit(1)
+if (not isinstance(config.get("control_plane_url"), str) or
+    not re.fullmatch(r"https://[^/]+", config["control_plane_url"]) or
+    not isinstance(config.get("node_identity"), str) or
+    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,127}", config["node_identity"]) or
+    not isinstance(config.get("poll_interval_seconds"), int) or
+    isinstance(config.get("poll_interval_seconds"), bool) or
+    not 15 <= config["poll_interval_seconds"] <= 600 or
+    not isinstance(config.get("rollback_execution_enabled"), bool)):
+    print("publisher node config contains invalid endpoint, identity, polling, or rollback settings", file=sys.stderr)
     sys.exit(1)
 if not isinstance(bindings.get("accounts"), list) or not bindings["accounts"] or not isinstance(bindings.get("domains"), list) or not bindings["domains"]:
     print("bindings registry must contain at least one account and one domain", file=sys.stderr)
@@ -103,13 +131,15 @@ if not isinstance(bindings.get("accounts"), list) or not bindings["accounts"] or
 
 account_ids, usernames, uids = set(), set(), set()
 for account in bindings["accounts"]:
+    if not isinstance(account, dict) or set(account) != {"hostingAccountId", "linuxUsername", "linuxUid"}:
+        raise SystemExit("account registry entry has missing or unknown fields")
     aid, username, uid = account.get("hostingAccountId"), account.get("linuxUsername"), account.get("linuxUid")
     if not isinstance(aid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", aid):
         raise SystemExit("invalid hosting account ID in bindings registry")
     if not isinstance(username, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username):
         raise SystemExit("invalid Linux username in bindings registry")
-    if not isinstance(uid, int) or uid < 1000:
-        raise SystemExit("invalid Linux UID in bindings registry")
+    if type(uid) is not int or uid < 1000 or username in {"root", "nobody", "nexora-runtime", "nexora-agent"}:
+        raise SystemExit("invalid or reserved Linux identity in bindings registry")
     if aid in account_ids or username in usernames or uid in uids:
         raise SystemExit("duplicate account ID, username, or UID in bindings registry")
     account_ids.add(aid); usernames.add(username); uids.add(uid)
@@ -122,6 +152,8 @@ for account in bindings["accounts"]:
 
 domain_ids, hostnames = set(), set()
 for domain in bindings["domains"]:
+    if not isinstance(domain, dict) or set(domain) != {"domainId", "hostingAccountId", "hostname"}:
+        raise SystemExit("domain registry entry has missing or unknown fields")
     did, aid, hostname = domain.get("domainId"), domain.get("hostingAccountId"), domain.get("hostname")
     if not isinstance(did, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", did):
         raise SystemExit("invalid domain ID in bindings registry")
