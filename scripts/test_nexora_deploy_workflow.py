@@ -5,6 +5,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "docs/templates/nexora-deploy.yml").read_text(encoding="utf-8")
+api_source = (ROOT / "apps/cloudflare-api/src/index.ts").read_text(encoding="utf-8")
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -55,5 +56,12 @@ require("OIDC_AUDIENCE" in source and "/oidc/exchange" in source,
         "workflow must exchange a GitHub OIDC token for a scoped upload capability")
 require('/v1/github/deployments/$DEPLOYMENT_ID/artifact"' in source,
         "workflow must upload only to the deployment-scoped artifact endpoint")
+
+require("output_directory: project.outputDirectory" in api_source,
+        "control-plane dispatch must pass the saved output directory to GitHub Actions")
+require('runtimeAssignment.profileKey !== "static-v1"' in api_source and
+        'runtimeAssignment.runtimeFamily !== "static"' in api_source and
+        'runtimeAssignment.buildMethod !== "static"' in api_source,
+        "static-only workflow dispatch must reject unsupported runtime profiles")
 
 print("PASS: Nexora static deployment workflow security contract")
