@@ -76,6 +76,10 @@ jobs:
           sudo install -D -o root -g root -m 0755 /tmp/nexora-runtime-node /usr/local/bin/nexora-runtime-node
           sudo install -D -o root -g root -m 0755 /tmp/nexora-static-publisher /usr/local/bin/nexora-static-publisher
           systemd-analyze verify systemd/nexora-provisiond.service systemd/nexora-runtime-node.service systemd/nexora-static-publisher.service systemd/nexora-static-vhostd.service
+      - name: Validate static deployment node installer
+        run: |
+          bash -n ../../scripts/install-static-deployment-node.sh
+          python3 ../../scripts/test_static_deployment_installer.py
       - name: Validate Cloudflare Tunnel installer syntax
         run: |
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
