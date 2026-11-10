@@ -58,9 +58,19 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "not isinstance(trust, dict)",
             "not isinstance(config, dict)",
             "not isinstance(bindings, dict)",
+            "string_fields = (",
+            "not isinstance(config[field], str)",
+            "publisher deployment trust metadata is invalid or oversized",
             're.fullmatch(r"https://[^/?#@]+", config["control_plane_url"])',
         ):
             self.assertIn(required, self.source)
+
+    def test_rejects_non_object_config_before_reading_fields(self):
+        type_check = self.source.index("if not isinstance(config, dict) or set(config) != expected_config:")
+        first_field_access = self.source.index('config["deployment_envelope_issuer"]')
+        self.assertLess(type_check, first_field_access)
+        self.assertIn("not isinstance(config[field], str)", self.source)
+        self.assertIn("len(config[field]) > 2048", self.source)
 
     def test_does_not_activate_services(self):
         self.assertIn("nginx -t", self.source)
