@@ -12,6 +12,7 @@ const validRelease = {
   repositoryId: "123456789",
   commitSha: "0123456789abcdef0123456789abcdef01234567",
   healthCheckPath: "/ready",
+  previousDeploymentId: "",
 };
 
 const validRollback = {
@@ -135,7 +136,7 @@ test("static pending poll returns only well-formed assigned releases and same-no
   const releaseQuery = db.queries.find((query) => query.includes("FROM application_releases r"));
   const rollbackQuery = db.queries.find((query) => query.includes("FROM application_releases failed"));
   assert.ok(releaseQuery);
-  assert.match(releaseQuery, /r\.state = 'artifact_uploaded'/);
+  assert.match(releaseQuery, /r\.state IN \('artifact_uploaded','publishing'\)/);
   assert.match(releaseQuery, /rp\.enabled = 1/);
   assert.match(releaseQuery, /r\.assigned_node_id = \?/);
   assert.ok(rollbackQuery);

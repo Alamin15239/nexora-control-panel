@@ -69,6 +69,9 @@ func TestFetchPendingPreservesConfiguredHealthCheckPath(t *testing.T) {
 func rollbackTestLayout(t *testing.T) string {
 	t.Helper()
 	base := t.TempDir()
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, name := range []string{"staging", "releases"} {
 		if err := os.Mkdir(filepath.Join(base, name), 0700); err != nil { t.Fatal(err) }
 	}

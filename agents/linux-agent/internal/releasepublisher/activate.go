@@ -51,18 +51,30 @@ func Publish(baseDir, stagingID, releaseID string) error {
 // without changing baseDir/current. Staging and releases must be on the same
 // filesystem. Existing release identifiers are never overwritten.
 func Store(baseDir, stagingID, releaseID string) error {
-	if err := validateBase(baseDir); err != nil { return err }
-	if err := validateName(stagingID); err != nil { return fmt.Errorf("invalid staging identifier: %w", err) }
-	if err := validateName(releaseID); err != nil { return err }
+	if err := validateBase(baseDir); err != nil {
+		return err
+	}
+	if err := validateName(stagingID); err != nil {
+		return fmt.Errorf("invalid staging identifier: %w", err)
+	}
+	if err := validateName(releaseID); err != nil {
+		return err
+	}
 
 	stagingRoot := filepath.Join(baseDir, "staging")
 	releasesRoot := filepath.Join(baseDir, "releases")
-	if err := validateChildDirectory(stagingRoot); err != nil { return err }
-	if err := validateChildDirectory(releasesRoot); err != nil { return err }
+	if err := validateChildDirectory(stagingRoot); err != nil {
+		return err
+	}
+	if err := validateChildDirectory(releasesRoot); err != nil {
+		return err
+	}
 
 	stage := filepath.Join(stagingRoot, stagingID)
 	stageInfo, err := os.Lstat(stage)
-	if err != nil { return fmt.Errorf("inspect staging release: %w", err) }
+	if err != nil {
+		return fmt.Errorf("inspect staging release: %w", err)
+	}
 	if !stageInfo.IsDir() || stageInfo.Mode()&os.ModeSymlink != 0 || stageInfo.Mode().Perm()&0022 != 0 {
 		return errors.New("staging release must be a private, real directory")
 	}
@@ -88,11 +100,66 @@ func Store(baseDir, stagingID, releaseID string) error {
 // All activations are serialized with an advisory lock so a rollback compare-and-switch
 // cannot race another deployment activation.
 func Activate(baseDir, releaseID string) error {
-	if err := validateBase(baseDir); err != nil { return err }
-	if err := validateName(releaseID); err != nil { return err }
+	if err := validateBase(baseDir); err != nil {
+		return err
+	}
+	if err := validateName(releaseID); err != nil {
+		return err
+	}
 	unlock, err := acquireActivationLock(baseDir)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer unlock()
+	return activateLocked(baseDir, releaseID)
+}
+
+// ActivateIfCurrent changes current only when it still points to the expected
+// previous release. An empty expectedCurrentReleaseID means no release may be
+// active. Retrying an already completed activation is idempotent.
+var ErrStaleActivation = errors.New("refusing stale activation because the active release changed")
+
+func ActivateIfCurrent(baseDir, expectedCurrentReleaseID, releaseID string) error {
+	if err := validateBase(baseDir); err != nil {
+		return err
+	}
+	if err := validateName(releaseID); err != nil {
+		return err
+	}
+	if expectedCurrentReleaseID != "" {
+		if err := validateName(expectedCurrentReleaseID); err != nil {
+			return fmt.Errorf("invalid expected active release: %w", err)
+		}
+	}
+
+	unlock, err := acquireActivationLock(baseDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if err := validateReleaseDirectory(baseDir, releaseID); err != nil {
+		return fmt.Errorf("activation target is not safe: %w", err)
+	}
+
+	active := filepath.Join(baseDir, "current")
+	currentTarget, err := os.Readlink(active)
+	if err == nil {
+		if currentTarget == filepath.Join("releases", releaseID) {
+			return nil
+		}
+		if expectedCurrentReleaseID == "" ||
+			currentTarget != filepath.Join("releases", expectedCurrentReleaseID) {
+			return ErrStaleActivation
+		}
+	} else if os.IsNotExist(err) {
+		if expectedCurrentReleaseID != "" {
+			return ErrStaleActivation
+		}
+	} else {
+		return fmt.Errorf("read active release before guarded activation: %w", err)
+	}
+
 	return activateLocked(baseDir, releaseID)
 }
 
@@ -102,14 +169,22 @@ func Activate(baseDir, releaseID string) error {
 var ErrStaleRollback = errors.New("refusing stale rollback because the failed release is no longer active")
 
 func Rollback(baseDir, failedReleaseID, previousReleaseID string) error {
-	if err := validateBase(baseDir); err != nil { return err }
-	if err := validateName(failedReleaseID); err != nil { return fmt.Errorf("invalid failed release: %w", err) }
-	if err := validateName(previousReleaseID); err != nil { return fmt.Errorf("invalid previous release: %w", err) }
+	if err := validateBase(baseDir); err != nil {
+		return err
+	}
+	if err := validateName(failedReleaseID); err != nil {
+		return fmt.Errorf("invalid failed release: %w", err)
+	}
+	if err := validateName(previousReleaseID); err != nil {
+		return fmt.Errorf("invalid previous release: %w", err)
+	}
 	if failedReleaseID == previousReleaseID {
 		return errors.New("failed and previous release identifiers must differ")
 	}
 	unlock, err := acquireActivationLock(baseDir)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
 	if err := validateReleaseDirectory(baseDir, previousReleaseID); err != nil {
@@ -141,7 +216,9 @@ func acquireActivationLock(baseDir string) (func(), error) {
 		return nil, fmt.Errorf("inspect activation lock: %w", err)
 	}
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
-	if err != nil { return nil, fmt.Errorf("open activation lock: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("open activation lock: %w", err)
+	}
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
 		_ = file.Close()
@@ -158,11 +235,19 @@ func acquireActivationLock(baseDir string) (func(), error) {
 }
 
 func activateLocked(baseDir, releaseID string) error {
-	if err := validateBase(baseDir); err != nil { return err }
-	if err := validateName(releaseID); err != nil { return err }
+	if err := validateBase(baseDir); err != nil {
+		return err
+	}
+	if err := validateName(releaseID); err != nil {
+		return err
+	}
 	releasesRoot := filepath.Join(baseDir, "releases")
-	if err := validateChildDirectory(releasesRoot); err != nil { return err }
-	if err := validateReleaseDirectory(baseDir, releaseID); err != nil { return err }
+	if err := validateChildDirectory(releasesRoot); err != nil {
+		return err
+	}
+	if err := validateReleaseDirectory(baseDir, releaseID); err != nil {
+		return err
+	}
 
 	active := filepath.Join(baseDir, "current")
 	if currentInfo, statErr := os.Lstat(active); statErr == nil {
@@ -199,7 +284,9 @@ func activateLocked(baseDir, releaseID string) error {
 func validateReleaseDirectory(baseDir, releaseID string) error {
 	releasePath := filepath.Join(baseDir, "releases", releaseID)
 	info, err := os.Lstat(releasePath)
-	if err != nil { return fmt.Errorf("inspect target release: %w", err) }
+	if err != nil {
+		return fmt.Errorf("inspect target release: %w", err)
+	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
 		return errors.New("target release must be a real directory not writable by group or others")
 	}
@@ -208,7 +295,9 @@ func validateReleaseDirectory(baseDir, releaseID string) error {
 
 func validateChildDirectory(path string) error {
 	info, err := os.Lstat(path)
-	if err != nil { return fmt.Errorf("inspect managed directory %q: %w", filepath.Base(path), err) }
+	if err != nil {
+		return fmt.Errorf("inspect managed directory %q: %w", filepath.Base(path), err)
+	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
 		return fmt.Errorf("managed directory %q must be real and not group/world writable", filepath.Base(path))
 	}
@@ -217,7 +306,9 @@ func validateChildDirectory(path string) error {
 
 func syncDirectory(path string) error {
 	dir, err := os.Open(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer dir.Close()
 	return dir.Sync()
 }

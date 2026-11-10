@@ -56,6 +56,9 @@ func setup(t *testing.T) (*rollbackoutbox.Store, string, rollbackoutbox.Operatio
 	store, err := rollbackoutbox.Open(filepath.Join(outboxDir, "rollback.json"))
 	if err != nil { t.Fatal(err) }
 	base := t.TempDir()
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, dir := range []string{"staging", "releases"} {
 		if err := os.Mkdir(filepath.Join(base, dir), 0700); err != nil { t.Fatal(err) }
 	}

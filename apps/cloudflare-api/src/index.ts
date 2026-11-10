@@ -5329,7 +5329,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
     "dom.id AS domainId, lower(dom.name) AS hostname, " +
     "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha, " +
-    "COALESCE(s.health_check_path, '/') AS healthCheckPath " +
+    "COALESCE(s.health_check_path, '/') AS healthCheckPath, " +
+    "COALESCE(previous.deployment_id, '') AS previousDeploymentId " +
     "FROM application_releases r " +
     "JOIN github_projects p ON p.id = r.project_id AND p.organization_id = r.organization_id " +
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
@@ -5339,7 +5340,12 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "JOIN application_nodes n ON n.id = r.assigned_node_id AND n.node_pool_id = r.node_pool_id " +
     "JOIN application_node_pools pool ON pool.id = n.node_pool_id " +
-    "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? AND r.state = 'artifact_uploaded' " +
+    "LEFT JOIN application_workloads w ON w.organization_id = r.organization_id " +
+    "AND w.project_id = r.project_id AND w.workload_kind = 'web' " +
+    "LEFT JOIN application_releases previous ON previous.id = w.active_release_id " +
+    "AND previous.organization_id = r.organization_id AND previous.project_id = r.project_id " +
+    "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? " +
+"AND r.state IN ('artifact_uploaded','publishing') " +
     "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
@@ -5348,7 +5354,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     deploymentId: string; organizationId: string; projectId: string;
-    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string;
+    hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string; previousDeploymentId: string;
   }>();
   const rollbackRows = await c.env.DB.prepare(
     "SELECT failed.deployment_id AS failedDeploymentId, target.deployment_id AS targetDeploymentId, " +

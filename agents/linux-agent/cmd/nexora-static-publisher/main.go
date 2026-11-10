@@ -28,14 +28,15 @@ import (
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/artifactreceiver"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployarchive"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/deployenvelope"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/releasepublisher"
-	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
 	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackexecutor"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/rollbackoutbox"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/runtimehealth"
+	"github.com/alamin15239/nexora-control-panel/agents/linux-agent/internal/staticvhost"
 )
 
 const pendingPath = "/internal/v1/application-nodes/pending-static-releases"
+
 var identityPattern = regexp.MustCompile("^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$")
 var accountIDPattern = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
@@ -44,48 +45,49 @@ func validHostingAccountID(value string) bool {
 }
 
 type Config struct {
-	ControlPlaneURL string `json:"control_plane_url"`
-	NodeIdentity string `json:"node_identity"`
-	PrivateKeyFile string `json:"private_key_file"`
+	ControlPlaneURL                string `json:"control_plane_url"`
+	NodeIdentity                   string `json:"node_identity"`
+	PrivateKeyFile                 string `json:"private_key_file"`
 	DeploymentSigningPublicKeyFile string `json:"deployment_signing_public_key_file"`
-	DeploymentSigningKeyID string `json:"deployment_signing_key_id"`
-	DeploymentEnvelopeIssuer string `json:"deployment_envelope_issuer"`
-	DeploymentEnvelopeAudience string `json:"deployment_envelope_audience"`
-	PublisherRoot string `json:"publisher_root"`
-	ReplayDirectory string `json:"replay_directory"`
-	PollIntervalSeconds int `json:"poll_interval_seconds"`
-	RollbackExecutionEnabled bool `json:"rollback_execution_enabled"`
+	DeploymentSigningKeyID         string `json:"deployment_signing_key_id"`
+	DeploymentEnvelopeIssuer       string `json:"deployment_envelope_issuer"`
+	DeploymentEnvelopeAudience     string `json:"deployment_envelope_audience"`
+	PublisherRoot                  string `json:"publisher_root"`
+	ReplayDirectory                string `json:"replay_directory"`
+	PollIntervalSeconds            int    `json:"poll_interval_seconds"`
+	RollbackExecutionEnabled       bool   `json:"rollback_execution_enabled"`
 }
 
 type PendingRelease struct {
-	DeploymentID string `json:"deploymentId"`
-	OrganizationID string `json:"organizationId"`
-	ProjectID string `json:"projectId"`
-	HostingAccountID string `json:"hostingAccountId"`
-	DomainID string `json:"domainId"`
-	Hostname string `json:"hostname"`
-	RepositoryID string `json:"repositoryId"`
-	CommitSHA string `json:"commitSha"`
-	HealthCheckPath string `json:"healthCheckPath"`
+	DeploymentID         string `json:"deploymentId"`
+	OrganizationID       string `json:"organizationId"`
+	ProjectID            string `json:"projectId"`
+	HostingAccountID     string `json:"hostingAccountId"`
+	DomainID             string `json:"domainId"`
+	Hostname             string `json:"hostname"`
+	RepositoryID         string `json:"repositoryId"`
+	CommitSHA            string `json:"commitSha"`
+	HealthCheckPath      string `json:"healthCheckPath"`
+	PreviousDeploymentID string `json:"previousDeploymentId"`
 }
 type PendingRollback struct {
-	FailedDeploymentID string `json:"failedDeploymentId"`
-	TargetDeploymentID string `json:"targetDeploymentId"`
-	FailedReleaseID string `json:"failedReleaseId"`
-	TargetReleaseID string `json:"targetReleaseId"`
-	OrganizationID string `json:"organizationId"`
-	ProjectID string `json:"projectId"`
-	HostingAccountID string `json:"hostingAccountId"`
-	Hostname string `json:"hostname"`
-	HealthCheckPath string `json:"healthCheckPath"`
+	FailedDeploymentID   string `json:"failedDeploymentId"`
+	TargetDeploymentID   string `json:"targetDeploymentId"`
+	FailedReleaseID      string `json:"failedReleaseId"`
+	TargetReleaseID      string `json:"targetReleaseId"`
+	OrganizationID       string `json:"organizationId"`
+	ProjectID            string `json:"projectId"`
+	HostingAccountID     string `json:"hostingAccountId"`
+	Hostname             string `json:"hostname"`
+	HealthCheckPath      string `json:"healthCheckPath"`
 	TargetArtifactSHA256 string `json:"targetArtifactSha256"`
 }
 
 type PendingResponse struct {
-	NodeIdentity string `json:"nodeIdentity"`
-	PolledAt time.Time `json:"polledAt"`
-	Releases []PendingRelease `json:"releases"`
-	Rollbacks []PendingRollback `json:"rollbacks"`
+	NodeIdentity string            `json:"nodeIdentity"`
+	PolledAt     time.Time         `json:"polledAt"`
+	Releases     []PendingRelease  `json:"releases"`
+	Rollbacks    []PendingRollback `json:"rollbacks"`
 }
 
 func main() {
@@ -99,12 +101,18 @@ func main() {
 
 func verifyOwnedRegularFile(path string, maxSize int64) error {
 	info, err := os.Lstat(path)
-	if err != nil { return err }
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 { return errors.New("must be a regular non-symlink file") }
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("must be a regular non-symlink file")
+	}
 	if info.Mode().Perm() != 0600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return errors.New("must have exact owner-only mode 0600")
 	}
-	if info.Size() > maxSize { return fmt.Errorf("file exceeds maximum size of %d bytes", maxSize) }
+	if info.Size() > maxSize {
+		return fmt.Errorf("file exceeds maximum size of %d bytes", maxSize)
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || stat.Gid != uint32(os.Getegid()) {
 		return errors.New("file has unexpected owner or group")
@@ -114,18 +122,30 @@ func verifyOwnedRegularFile(path string, maxSize int64) error {
 
 func verifyOwnedDirectory(path string, uid, gid uint32) error {
 	info, err := os.Lstat(path)
-	if err != nil { return fmt.Errorf("inspect directory %s: %w", filepath.Base(path), err) }
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 { return fmt.Errorf("%s must be a real directory", filepath.Base(path)) }
-	if info.Mode().Perm()&0022 != 0 { return fmt.Errorf("%s is writable by group or others", filepath.Base(path)) }
+	if err != nil {
+		return fmt.Errorf("inspect directory %s: %w", filepath.Base(path), err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must be a real directory", filepath.Base(path))
+	}
+	if info.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("%s is writable by group or others", filepath.Base(path))
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uid || stat.Gid != gid { return fmt.Errorf("%s has unexpected ownership", filepath.Base(path)) }
+	if !ok || stat.Uid != uid || stat.Gid != gid {
+		return fmt.Errorf("%s has unexpected ownership", filepath.Base(path))
+	}
 	return nil
 }
 
 func verifyOwnedReplayDirectory(path string, uid, gid uint32) error {
-	if err := verifyOwnedDirectory(path, uid, gid); err != nil { return err }
+	if err := verifyOwnedDirectory(path, uid, gid); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	if info.Mode().Perm() != 0700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
 		return errors.New("replay directory must have exact owner-only mode 0700")
 	}
@@ -135,15 +155,21 @@ func verifyOwnedReplayDirectory(path string, uid, gid uint32) error {
 func ensurePrivateChild(path string, uid, gid uint32) error {
 	err := os.Mkdir(path, os.FileMode(0750)|os.ModeSetgid)
 	created := err == nil
-	if err != nil && !errors.Is(err, os.ErrExist) { return fmt.Errorf("create %s: %w", filepath.Base(path), err) }
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("create %s: %w", filepath.Base(path), err)
+	}
 	if created {
 		if err := os.Chmod(path, os.FileMode(0750)|os.ModeSetgid); err != nil {
 			return fmt.Errorf("set permissions on %s: %w", filepath.Base(path), err)
 		}
 	}
-	if err := verifyOwnedDirectory(path, uid, gid); err != nil { return err }
+	if err := verifyOwnedDirectory(path, uid, gid); err != nil {
+		return err
+	}
 	info, err := os.Lstat(path)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	if info.Mode().Perm() != 0750 || info.Mode()&os.ModeSetgid == 0 {
 		return fmt.Errorf("%s must have setgid mode 2750", filepath.Base(path))
 	}
@@ -151,13 +177,17 @@ func ensurePrivateChild(path string, uid, gid uint32) error {
 }
 
 func provisionAccountDirectories(accountsRoot, accountID string) (string, error) {
-	if !validHostingAccountID(accountID) { return "", errors.New("hosting account identifier is invalid") }
+	if !validHostingAccountID(accountID) {
+		return "", errors.New("hosting account identifier is invalid")
+	}
 	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
 	if err := verifyOwnedDirectory(accountsRoot, uid, gid); err != nil {
 		return "", fmt.Errorf("accounts root: %w", err)
 	}
 	base := filepath.Join(accountsRoot, accountID)
-	if err := ensurePrivateChild(base, uid, gid); err != nil { return "", fmt.Errorf("account directory: %w", err) }
+	if err := ensurePrivateChild(base, uid, gid); err != nil {
+		return "", fmt.Errorf("account directory: %w", err)
+	}
 	for _, name := range []string{"staging", "releases"} {
 		if err := ensurePrivateChild(filepath.Join(base, name), uid, gid); err != nil {
 			return "", fmt.Errorf("%s directory: %w", name, err)
@@ -168,24 +198,44 @@ func provisionAccountDirectories(accountsRoot, accountID string) (string, error)
 
 func validStaticDomain(domain string) bool {
 	if len(domain) < 3 || len(domain) > 253 || strings.Contains(domain, "..") ||
-		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || !strings.Contains(domain, ".") { return false }
+		strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || !strings.Contains(domain, ".") {
+		return false
+	}
 	for _, label := range strings.Split(domain, ".") {
 		if len(label) == 0 || len(label) > 63 ||
-			!regexp.MustCompile("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$").MatchString(label) { return false }
+			!regexp.MustCompile("(?i)^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$").MatchString(label) {
+			return false
+		}
 	}
 	return true
 }
 
 func validStaticHealthCheckPath(path string) bool {
 	if len(path) == 0 || len(path) > 512 || !strings.HasPrefix(path, "/") ||
-		strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#\\") { return false }
-	for _, r := range path { if r < 0x20 || r == 0x7f { return false } }
+		strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#\\") {
+		return false
+	}
+	for _, r := range path {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
 	decoded, err := url.PathUnescape(path)
-	if err != nil || strings.ContainsAny(decoded, "\\?#") { return false }
-	for _, r := range decoded { if r < 0x20 || r == 0x7f { return false } }
-	if !strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, "//") { return false }
+	if err != nil || strings.ContainsAny(decoded, "\\?#") {
+		return false
+	}
+	for _, r := range decoded {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if !strings.HasPrefix(decoded, "/") || strings.HasPrefix(decoded, "//") {
+		return false
+	}
 	for _, segment := range strings.Split(decoded, "/") {
-		if segment == "." || segment == ".." { return false }
+		if segment == "." || segment == ".." {
+			return false
+		}
 	}
 	return true
 }
@@ -199,24 +249,34 @@ func loadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("config file security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil { return cfg, err }
+	if err != nil {
+		return cfg, err
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil { return cfg, fmt.Errorf("decode config: %w", err) }
+	if err := decoder.Decode(&cfg); err != nil {
+		return cfg, fmt.Errorf("decode config: %w", err)
+	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF { return cfg, errors.New("config contains trailing JSON data") }
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return cfg, errors.New("config contains trailing JSON data")
+	}
 	u, err := url.Parse(cfg.ControlPlaneURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return cfg, errors.New("control_plane_url must be an HTTPS origin")
 	}
-	if !identityPattern.MatchString(cfg.NodeIdentity) { return cfg, errors.New("node_identity is invalid") }
+	if !identityPattern.MatchString(cfg.NodeIdentity) {
+		return cfg, errors.New("node_identity is invalid")
+	}
 	for name, value := range map[string]string{
-		"private_key_file": cfg.PrivateKeyFile,
+		"private_key_file":                   cfg.PrivateKeyFile,
 		"deployment_signing_public_key_file": cfg.DeploymentSigningPublicKeyFile,
-		"publisher_root": cfg.PublisherRoot,
-		"replay_directory": cfg.ReplayDirectory,
+		"publisher_root":                     cfg.PublisherRoot,
+		"replay_directory":                   cfg.ReplayDirectory,
 	} {
-		if !filepath.IsAbs(value) || filepath.Clean(value) != value { return cfg, fmt.Errorf("%s must be an absolute clean path", name) }
+		if !filepath.IsAbs(value) || filepath.Clean(value) != value {
+			return cfg, fmt.Errorf("%s must be an absolute clean path", name)
+		}
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`).MatchString(cfg.DeploymentSigningKeyID) ||
 		cfg.DeploymentEnvelopeIssuer == "" || cfg.DeploymentEnvelopeAudience == "" {
@@ -233,9 +293,13 @@ func loadNodeKey(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("node key security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
-	if err != nil || len(key) != ed25519.PrivateKeySize { return nil, errors.New("node key must contain a 64-byte Ed25519 private key in hex") }
+	if err != nil || len(key) != ed25519.PrivateKeySize {
+		return nil, errors.New("node key must contain a 64-byte Ed25519 private key in hex")
+	}
 	return ed25519.PrivateKey(key), nil
 }
 
@@ -244,12 +308,20 @@ func loadSigningKey(path string) (*rsa.PublicKey, error) {
 		return nil, fmt.Errorf("deployment signing public key security check: %w", err)
 	}
 	raw, err := os.ReadFile(path)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	block, _ := pem.Decode(raw)
-	if block == nil { return nil, errors.New("deployment signing public key is not PEM encoded") }
+	if block == nil {
+		return nil, errors.New("deployment signing public key is not PEM encoded")
+	}
 	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		if key, pkcs1Err := x509.ParsePKCS1PublicKey(block.Bytes); pkcs1Err == nil { parsed = key } else { return nil, errors.New("unable to parse deployment signing public key") }
+		if key, pkcs1Err := x509.ParsePKCS1PublicKey(block.Bytes); pkcs1Err == nil {
+			parsed = key
+		} else {
+			return nil, errors.New("unable to parse deployment signing public key")
+		}
 	}
 	key, ok := parsed.(*rsa.PublicKey)
 	if !ok || key.N == nil || key.N.BitLen() < 2048 || key.E < 3 {
@@ -260,7 +332,9 @@ func loadSigningKey(path string) (*rsa.PublicKey, error) {
 
 func verifyPrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
-	if err != nil { return fmt.Errorf("inspect %s: %w", filepath.Base(path), err) }
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", filepath.Base(path), err)
+	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
 		return fmt.Errorf("%s must be a real directory not writable by group or others", filepath.Base(path))
 	}
@@ -271,25 +345,43 @@ func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25
 	var empty PendingResponse
 	body := []byte{}
 	proof, err := appnodeauth.Sign(key, cfg.NodeIdentity, http.MethodGet, pendingPath, body, time.Now().UTC())
-	if err != nil { return empty, fmt.Errorf("sign pending-release request: %w", err) }
+	if err != nil {
+		return empty, fmt.Errorf("sign pending-release request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cfg.ControlPlaneURL, "/")+pendingPath, nil)
-	if err != nil { return empty, err }
-	if err := proof.Apply(req, cfg.NodeIdentity); err != nil { return empty, err }
+	if err != nil {
+		return empty, err
+	}
+	if err := proof.Apply(req, cfg.NodeIdentity); err != nil {
+		return empty, err
+	}
 	safeClient := *client
 	safeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := safeClient.Do(req)
-	if err != nil { return empty, fmt.Errorf("poll pending static releases: %w", err) }
+	if err != nil {
+		return empty, fmt.Errorf("poll pending static releases: %w", err)
+	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil { return empty, err }
-	if len(data) > 1<<20 { return empty, errors.New("pending-release response exceeds 1 MiB") }
-	if resp.StatusCode != http.StatusOK { return empty, fmt.Errorf("pending-release API returned HTTP %d", resp.StatusCode) }
+	if err != nil {
+		return empty, err
+	}
+	if len(data) > 1<<20 {
+		return empty, errors.New("pending-release response exceeds 1 MiB")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return empty, fmt.Errorf("pending-release API returned HTTP %d", resp.StatusCode)
+	}
 	var result PendingResponse
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil { return empty, fmt.Errorf("decode pending releases: %w", err) }
+	if err := decoder.Decode(&result); err != nil {
+		return empty, fmt.Errorf("decode pending releases: %w", err)
+	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF { return empty, errors.New("pending-release response contains trailing JSON") }
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return empty, errors.New("pending-release response contains trailing JSON")
+	}
 	if result.NodeIdentity != cfg.NodeIdentity || result.PolledAt.IsZero() || len(result.Releases) > 10 || len(result.Rollbacks) > 10 {
 		return empty, errors.New("pending-release response violates the node assignment contract")
 	}
@@ -308,11 +400,17 @@ func fetchPending(ctx context.Context, client *http.Client, cfg Config, key ed25
 
 func run(configPath string) error {
 	cfg, err := loadConfig(configPath)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	nodeKey, err := loadNodeKey(cfg.PrivateKeyFile)
-	if err != nil { return fmt.Errorf("load node signing key: %w", err) }
+	if err != nil {
+		return fmt.Errorf("load node signing key: %w", err)
+	}
 	signingKey, err := loadSigningKey(cfg.DeploymentSigningPublicKeyFile)
-	if err != nil { return fmt.Errorf("load deployment trust key: %w", err) }
+	if err != nil {
+		return fmt.Errorf("load deployment trust key: %w", err)
+	}
 	uid, gid := uint32(os.Geteuid()), uint32(os.Getegid())
 	for _, dir := range []string{cfg.PublisherRoot, filepath.Join(cfg.PublisherRoot, "accounts")} {
 		if err := verifyOwnedDirectory(dir, uid, gid); err != nil {
@@ -329,7 +427,9 @@ func run(configPath string) error {
 			return fmt.Errorf("create rollback outbox directory: %w", err)
 		}
 		rollbackStore, err = rollbackoutbox.Open(filepath.Join(rollbackStateDir, "operations.json"))
-		if err != nil { return fmt.Errorf("open rollback outbox: %w", err) }
+		if err != nil {
+			return fmt.Errorf("open rollback outbox: %w", err)
+		}
 	}
 	httpClient := &http.Client{Timeout: 2 * time.Minute}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -346,7 +446,9 @@ func run(configPath string) error {
 			return
 		}
 		for _, release := range pending.Releases {
-			if ctx.Err() != nil { return }
+			if ctx.Err() != nil {
+				return
+			}
 			baseDir, provisionErr := provisionAccountDirectories(
 				filepath.Join(cfg.PublisherRoot, "accounts"), release.HostingAccountID,
 			)
@@ -366,13 +468,13 @@ func run(configPath string) error {
 				PrivateKey: nodeKey, Purpose: "validate",
 			}
 			result, publishErr := artifactdelivery.FetchAndPublish(ctx, artifactdelivery.Config{
-				HTTPClient: httpClient,
-				ArtifactClient: nodeArtifactConfig,
-				Expected: expected,
+				HTTPClient:         httpClient,
+				ArtifactClient:     nodeArtifactConfig,
+				Expected:           expected,
 				TrustedSigningKeys: map[string]*rsa.PublicKey{cfg.DeploymentSigningKeyID: signingKey},
-				BaseDir: baseDir,
-				ReplayGuard: artifactreceiver.FileReplayGuard{Directory: cfg.ReplayDirectory},
-				ArchiveLimits: deployarchive.Limits{},
+				BaseDir:            baseDir,
+				ReplayGuard:        artifactreceiver.FileReplayGuard{Directory: cfg.ReplayDirectory},
+				ArchiveLimits:      deployarchive.Limits{},
 			}, release.DeploymentID)
 			if publishErr != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s publication failed: %v\n", release.DeploymentID, publishErr)
@@ -384,29 +486,31 @@ func run(configPath string) error {
 			}
 			// The privileged broker installs and validates the Nginx vhost first.
 			// Only then may the unprivileged publisher switch the active release.
-			if err := releasepublisher.Activate(baseDir, result.ReleaseID); err != nil {
+			if err := releasepublisher.ActivateIfCurrent(baseDir, release.PreviousDeploymentID, result.ReleaseID); err != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s vhost is installed but release activation failed: %v\n", release.DeploymentID, err)
 				continue
 			}
 			if err := artifactclient.ReportActivated(ctx, httpClient, nodeArtifactConfig, artifactclient.ActivationReport{
-				DeploymentID: result.DeploymentID,
-				ReleaseID: result.ReleaseID,
+				DeploymentID:   result.DeploymentID,
+				ReleaseID:      result.ReleaseID,
 				ArtifactSHA256: result.ArtifactSHA256,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s is routed by Nginx but activation acknowledgement failed: %v\n", release.DeploymentID, err)
 				continue
 			}
 			healthCheckPath := release.HealthCheckPath
-			if healthCheckPath == "" { healthCheckPath = "/" }
+			if healthCheckPath == "" {
+				healthCheckPath = "/"
+			}
 			probe := staticvhost.ProbeHTTP(ctx, release.Hostname, healthCheckPath, 5*time.Second)
 			healthAck, healthErr := artifactclient.ReportHealthCheck(ctx, httpClient, nodeArtifactConfig, artifactclient.HealthCheckReport{
-				DeploymentID: result.DeploymentID,
+				DeploymentID:   result.DeploymentID,
 				ArtifactSHA256: result.ArtifactSHA256,
-				ProbePath: healthCheckPath,
-				HealthStatus: string(probe.Status),
-				HTTPStatus: probe.HTTPStatus,
-				DurationMs: probe.DurationMs,
-				FailureCode: probe.FailureCode,
+				ProbePath:      healthCheckPath,
+				HealthStatus:   string(probe.Status),
+				HTTPStatus:     probe.HTTPStatus,
+				DurationMs:     probe.DurationMs,
+				FailureCode:    probe.FailureCode,
 			})
 			if healthErr != nil {
 				fmt.Fprintf(os.Stderr, "deployment %s health report failed: %v\n", release.DeploymentID, healthErr)
@@ -424,26 +528,26 @@ func run(configPath string) error {
 					continue
 				}
 				intent := rollbackoutbox.Operation{
-					ID: "rollback-" + result.DeploymentID,
-					FailedDeploymentID: result.DeploymentID,
-					FailedReleaseID: result.ReleaseID,
-					TargetDeploymentID: *healthAck.RollbackTargetDeploymentID,
-					TargetReleaseID: *healthAck.RollbackTargetReleaseID,
-					ProjectID: release.ProjectID,
-					OrganizationID: release.OrganizationID,
-					NodeID: cfg.NodeIdentity,
-					HostingAccountID: release.HostingAccountID,
-					Hostname: release.Hostname,
-					HealthCheckPath: healthCheckPath,
+					ID:                      "rollback-" + result.DeploymentID,
+					FailedDeploymentID:      result.DeploymentID,
+					FailedReleaseID:         result.ReleaseID,
+					TargetDeploymentID:      *healthAck.RollbackTargetDeploymentID,
+					TargetReleaseID:         *healthAck.RollbackTargetReleaseID,
+					ProjectID:               release.ProjectID,
+					OrganizationID:          release.OrganizationID,
+					NodeID:                  cfg.NodeIdentity,
+					HostingAccountID:        release.HostingAccountID,
+					Hostname:                release.Hostname,
+					HealthCheckPath:         healthCheckPath,
 					ExpectedActiveReleaseID: result.ReleaseID,
-					ArtifactSHA256: *healthAck.RollbackTargetArtifactSHA256,
+					ArtifactSHA256:          *healthAck.RollbackTargetArtifactSHA256,
 				}
 				executor := rollbackexecutor.Executor{
-					Enabled: true,
-					Store: rollbackStore,
+					Enabled:   true,
+					Store:     rollbackStore,
 					Publisher: rollbackexecutor.RealPublisher{},
-					Prober: staticRollbackProber{hostname: release.Hostname, path: healthCheckPath},
-					Reporter: staticRollbackReporter{client: httpClient, config: nodeArtifactConfig},
+					Prober:    staticRollbackProber{hostname: release.Hostname, path: healthCheckPath},
+					Reporter:  staticRollbackReporter{client: httpClient, config: nodeArtifactConfig},
 				}
 				rollbackOp, rollbackErr := executor.Execute(ctx, baseDir, intent)
 				if rollbackErr != nil {
@@ -483,7 +587,9 @@ func run(configPath string) error {
 				fmt.Fprintf(os.Stderr, "rollback %s: inspect local outbox: %v\n", pendingRollback.FailedDeploymentID, existsErr)
 				continue
 			}
-			if exists { continue } // Existing operation was already resumed at the start of this poll.
+			if exists {
+				continue
+			} // Existing operation was already resumed at the start of this poll.
 			intent := rollbackIntentFromPending(pendingRollback, cfg.NodeIdentity)
 			rollbackOp, err := executeRollbackOperation(ctx, httpClient, cfg, rollbackStore, baseDir, intent, nodeKey)
 			if err != nil {
@@ -493,46 +599,46 @@ func run(configPath string) error {
 			}
 			fmt.Fprintf(os.Stderr, "pending rollback %s completed and acknowledged (operation=%s)\n",
 				pendingRollback.FailedDeploymentID, rollbackOp.ID)
-			}
+		}
 	}
 	poll()
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSeconds) * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done(): return nil
-		case <-ticker.C: poll()
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			poll()
 		}
 	}
 }
 
-
-
 func rollbackIntentFromPending(p PendingRollback, nodeIdentity string) rollbackoutbox.Operation {
 	return rollbackoutbox.Operation{
-		ID: "rollback-" + p.FailedDeploymentID,
-		FailedDeploymentID: p.FailedDeploymentID,
-		FailedReleaseID: p.FailedReleaseID,
-		TargetDeploymentID: p.TargetDeploymentID,
-		TargetReleaseID: p.TargetReleaseID,
-		ProjectID: p.ProjectID,
-		OrganizationID: p.OrganizationID,
-		NodeID: nodeIdentity,
-		HostingAccountID: p.HostingAccountID,
-		Hostname: p.Hostname,
-		HealthCheckPath: p.HealthCheckPath,
+		ID:                      "rollback-" + p.FailedDeploymentID,
+		FailedDeploymentID:      p.FailedDeploymentID,
+		FailedReleaseID:         p.FailedReleaseID,
+		TargetDeploymentID:      p.TargetDeploymentID,
+		TargetReleaseID:         p.TargetReleaseID,
+		ProjectID:               p.ProjectID,
+		OrganizationID:          p.OrganizationID,
+		NodeID:                  nodeIdentity,
+		HostingAccountID:        p.HostingAccountID,
+		Hostname:                p.Hostname,
+		HealthCheckPath:         p.HealthCheckPath,
 		ExpectedActiveReleaseID: p.FailedReleaseID,
-		ArtifactSHA256: p.TargetArtifactSHA256,
+		ArtifactSHA256:          p.TargetArtifactSHA256,
 	}
 }
 
 func executeRollbackOperation(ctx context.Context, client *http.Client, cfg Config, store *rollbackoutbox.Store,
 	baseDir string, op rollbackoutbox.Operation, nodeKey ed25519.PrivateKey) (rollbackoutbox.Operation, error) {
 	executor := rollbackexecutor.Executor{
-		Enabled: true,
-		Store: store,
+		Enabled:   true,
+		Store:     store,
 		Publisher: rollbackexecutor.RealPublisher{},
-		Prober: staticRollbackProber{hostname: op.Hostname, path: op.HealthCheckPath},
+		Prober:    staticRollbackProber{hostname: op.Hostname, path: op.HealthCheckPath},
 		Reporter: staticRollbackReporter{client: client, config: artifactclient.Config{
 			ControlPlaneURL: cfg.ControlPlaneURL, NodeIdentity: cfg.NodeIdentity, PrivateKey: nodeKey,
 		}},
@@ -542,9 +648,13 @@ func executeRollbackOperation(ctx context.Context, client *http.Client, cfg Conf
 
 func localRollbackOperationExists(store *rollbackoutbox.Store, operationID string) (bool, error) {
 	operations, err := store.List()
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	for _, operation := range operations {
-		if operation.ID == operationID { return true, nil }
+		if operation.ID == operationID {
+			return true, nil
+		}
 	}
 	return false, nil
 }
@@ -552,10 +662,16 @@ func localRollbackOperationExists(store *rollbackoutbox.Store, operationID strin
 func resumeLocalRollbackOutbox(ctx context.Context, client *http.Client, cfg Config,
 	store *rollbackoutbox.Store, nodeKey ed25519.PrivateKey) error {
 	operations, err := store.List()
-	if err != nil { return fmt.Errorf("list durable rollback operations: %w", err) }
+	if err != nil {
+		return fmt.Errorf("list durable rollback operations: %w", err)
+	}
 	for _, op := range operations {
-		if ctx.Err() != nil { return ctx.Err() }
-		if op.State == "reported" || op.State == "blocked" { continue }
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if op.State == "reported" || op.State == "blocked" {
+			continue
+		}
 		if op.NodeID != cfg.NodeIdentity {
 			return fmt.Errorf("rollback operation %s belongs to another node identity", op.ID)
 		}
@@ -573,7 +689,7 @@ func resumeLocalRollbackOutbox(ctx context.Context, client *http.Client, cfg Con
 
 type staticRollbackProber struct {
 	hostname string
-	path string
+	path     string
 }
 
 func (p staticRollbackProber) Probe(ctx context.Context, _ rollbackoutbox.Operation) runtimehealth.Result {
@@ -587,12 +703,12 @@ type staticRollbackReporter struct {
 
 func (r staticRollbackReporter) Report(ctx context.Context, op rollbackoutbox.Operation, result runtimehealth.Result) error {
 	_, err := artifactclient.ReportRollbackCompleted(ctx, r.client, r.config, artifactclient.RollbackCompletionReport{
-		OperationID: op.ID,
-		FailedDeploymentID: op.FailedDeploymentID,
-		TargetDeploymentID: op.TargetDeploymentID,
+		OperationID:          op.ID,
+		FailedDeploymentID:   op.FailedDeploymentID,
+		TargetDeploymentID:   op.TargetDeploymentID,
 		TargetArtifactSHA256: op.ArtifactSHA256,
-		HTTPStatus: result.HTTPStatus,
-		DurationMs: result.DurationMs,
+		HTTPStatus:           result.HTTPStatus,
+		DurationMs:           result.DurationMs,
 	})
 	return err
 }
