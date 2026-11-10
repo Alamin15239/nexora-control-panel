@@ -13,6 +13,26 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
         self.assertIn("--apply", result.stdout)
         self.assertIn("never starts", result.stdout)
 
+    def test_plan_lists_installation_without_mutating_host(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for name in ("nexora-static-vhostd", "nexora-static-publisher"):
+                path = root / name
+                path.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+                path.chmod(0o755)
+            (root / "nexora-static-vhostd.service").write_text(
+                "[Service]\\nUser=root\\nGroup=nexora-static\\n", encoding="utf-8")
+            (root / "nexora-static-publisher.service").write_text(
+                "[Service]\\nUser=nexora-runtime\\nGroup=www-data\\nSupplementaryGroups=nexora-static\\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--artifact-dir", str(root), "--plan"],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("PLAN ONLY", result.stdout)
+            self.assertIn("stopped and disabled", result.stdout)
+            self.assertNotIn("systemctl", result.stdout)
+
     def test_plan_requires_artifact_directory(self):
         result = subprocess.run(["bash", str(SCRIPT), "--plan"], text=True, capture_output=True)
         self.assertEqual(result.returncode, 2)
