@@ -57,6 +57,43 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
         for forbidden in ("systemctl start", "systemctl enable", "systemctl restart", "systemctl daemon-reload"):
             self.assertNotIn(forbidden, source)
 
+    def test_plan_rejects_service_unit_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            for name in ("nexora-static-vhostd", "nexora-static-publisher"):
+                path = root / name
+                path.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+                path.chmod(0o755)
+            (root / "nexora-static-vhostd.service").write_text(
+                "[Service]\\nUser=root\\nGroup=nexora-static\\n", encoding="utf-8")
+            (root / "nexora-static-publisher.service").write_text(
+                "[Service]\\nUser=nexora-runtime\\nGroup=www-data\\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--artifact-dir", str(root), "--plan"],
+                text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
+    def test_plan_rejects_symlinked_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            real = root / "real-publisher"
+            real.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+            real.chmod(0o755)
+            (root / "nexora-static-vhostd").write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+            (root / "nexora-static-vhostd").chmod(0o755)
+            (root / "nexora-static-publisher").symlink_to(real)
+            (root / "nexora-static-vhostd.service").write_text(
+                "[Service]\\nUser=root\\nGroup=nexora-static\\n", encoding="utf-8")
+            (root / "nexora-static-publisher.service").write_text(
+                "[Service]\\nUser=nexora-runtime\\nGroup=www-data\\nSupplementaryGroups=nexora-static\\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                ["bash", str(SCRIPT), "--artifact-dir", str(root), "--plan"],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Missing regular artifact", result.stderr)
+
     def test_artifact_paths_reject_symlinks(self):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('[[ -d "$ARTIFACT_DIR" && ! -L "$ARTIFACT_DIR" ]]', source)
