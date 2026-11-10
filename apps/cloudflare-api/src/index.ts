@@ -6032,8 +6032,17 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   }
 
   // Rollback is executable only when the previously active release is still
-  // assigned to this exact node. A different-node workload remains untouched.
+  // assigned to this exact node and no completion has already been acknowledged.
+  // A different-node workload remains untouched; an acknowledged rollback must
+  // not be advertised again by a retried terminal health-check report.
+  const rollbackAcknowledgement = healthStatus === "unhealthy"
+    ? await c.env.DB.prepare(
+        "SELECT operation_id AS operationId FROM application_rollback_acknowledgements " +
+        "WHERE failed_release_id = ? LIMIT 1",
+      ).bind(release.releaseRowId).first<{ operationId: string }>()
+    : null;
   const sameNodeRollbackAvailable = healthStatus === "unhealthy" &&
+    !rollbackAcknowledgement &&
     Boolean(release.previousDeploymentId && release.previousActiveReleaseId &&
       release.previousArtifactDigest && release.previousActiveNodeIdentity === nodeIdentity);
 
