@@ -27,9 +27,11 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
             (root / "nexora-static-publisher.service").write_text(
                 "[Service]\nUser=nexora-runtime\nGroup=www-data\nSupplementaryGroups=nexora-static\n",
                 encoding="utf-8")
+            install_root = root / "isolated-install-root"
+            env = dict(os.environ, NEXORA_STATIC_PLAN_ROOT=str(install_root))
             result = subprocess.run(
                 ["bash", str(SCRIPT), "--artifact-dir", str(root), "--plan"],
-                text=True, capture_output=True)
+                text=True, capture_output=True, env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("PLAN ONLY", result.stdout)
             self.assertIn("stopped and disabled", result.stdout)
