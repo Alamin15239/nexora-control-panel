@@ -9,6 +9,8 @@ on:
       - "scripts/update-linux-agent.sh"
       - "scripts/preflight-static-deployment-node.sh"
       - "scripts/test_static_deployment_preflight.py"
+      - "scripts/install-static-deployment-node.sh"
+      - "scripts/test_static_deployment_installer.py"
       - "docs/cloudflare-tunnel-node.md"
       - ".github/workflows/linux-agent.yml"
   pull_request:
@@ -16,6 +18,8 @@ on:
       - "agents/linux-agent/**"
       - "scripts/preflight-static-deployment-node.sh"
       - "scripts/test_static_deployment_preflight.py"
+      - "scripts/install-static-deployment-node.sh"
+      - "scripts/test_static_deployment_installer.py"
       - ".github/workflows/linux-agent.yml"
 
 permissions:
