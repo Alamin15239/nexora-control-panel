@@ -7,11 +7,15 @@ on:
       - "scripts/setup-cloudflare-tunnel.sh"
       - "scripts/start-cloudflare-quick-tunnel.sh"
       - "scripts/update-linux-agent.sh"
+      - "scripts/preflight-static-deployment-node.sh"
+      - "scripts/test_static_deployment_preflight.py"
       - "docs/cloudflare-tunnel-node.md"
       - ".github/workflows/linux-agent.yml"
   pull_request:
     paths:
       - "agents/linux-agent/**"
+      - "scripts/preflight-static-deployment-node.sh"
+      - "scripts/test_static_deployment_preflight.py"
       - ".github/workflows/linux-agent.yml"
 
 permissions:
@@ -73,3 +77,5 @@ jobs:
           bash -n ../../scripts/setup-cloudflare-tunnel.sh
           bash -n ../../scripts/start-cloudflare-quick-tunnel.sh
           bash -n ../../scripts/update-linux-agent.sh
+          bash -n ../../scripts/preflight-static-deployment-node.sh
+          python3 ../../scripts/test_static_deployment_preflight.py
