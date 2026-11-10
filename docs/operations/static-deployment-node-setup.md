@@ -112,6 +112,14 @@ sudo stat -c '%U:%G:%a %n' \
 
 Expected broker trust permissions are root-owned, directory `750` or stricter, trust JSON and binding registry `600`, and public PEM `644` or stricter. Publisher config/key files must be owned by `nexora-runtime:www-data` with mode `600`; publisher root/accounts directories must be `nexora-runtime:www-data` mode `750`, and replay storage `nexora-runtime:www-data` mode `700`. The broker refuses symlinked or group/world-writable trust files and rejects a missing or inconsistent account/domain registry.
 
+Run the repository's read-only preflight after installing the reviewed binaries, units, trust files, publisher config and directory layout. From the reviewed checkout:
+
+```sh
+sudo bash scripts/preflight-static-deployment-node.sh
+```
+
+The preflight checks service identities and group membership, exact file ownership/modes, both copies of the deployment public key, matching issuer/audience/key ID, NSS UID mappings, unique account/domain bindings, Nginx traversal, `nginx -t`, and systemd unit validity. It does not create or modify files and never starts, stops, enables, or reloads services. A non-zero exit means the node is not ready; correct the issue through the approved operator process and rerun it. A successful preflight is necessary but does not replace the disposable-hostname deployment, health, rollback, or Cloudflare-path acceptance tests.
+
 Do not enable the services until all of the following are true:
 
 - The signing key ID, issuer, audience, and public key match the deployed Worker environment.
