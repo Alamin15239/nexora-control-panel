@@ -5324,8 +5324,20 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Application-node request nonce has already been used." }, 409);
   }
+  // Releases are returned in three lifecycle states:
+  //   - artifact_uploaded / publishing: the publisher must download, validate,
+  //     extract, install the Nginx vhost, activate and report.
+  //   - health_checking: the publisher has already activated and acknowledged;
+  //     a process restart must NOT republish or reactivate. The publisher
+  //     enters the recovery path: verify the local active symlink and the
+  //     trusted manifest, then probe and report.
+  // Terminal states (succeeded / failed) are never returned; once a release
+  // reaches a terminal state, the workload's active_release_id and the
+  // release's own state are the durable decision and a retried poll must not
+  // reprocess the release.
   const rows = await c.env.DB.prepare(
-    "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
+    "SELECT r.id AS releaseId, r.state AS state, r.artifact_digest AS artifactSha256, " +
+    "r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
     "r.project_id AS projectId, p.hosting_account_id AS hostingAccountId, " +
     "dom.id AS domainId, lower(dom.name) AS hostname, " +
     "p.github_repository_id AS repositoryId, r.source_commit_sha AS commitSha, " +
@@ -5345,7 +5357,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id " +
     "AND previous.organization_id = r.organization_id AND previous.project_id = r.project_id " +
     "WHERE r.assigned_node_id = ? AND r.node_pool_id = ? " +
-"AND r.state IN ('artifact_uploaded','publishing') " +
+    "AND r.state IN ('artifact_uploaded','publishing','health_checking') " +
+    "AND r.artifact_digest IS NOT NULL " +
     "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
@@ -5353,6 +5366,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "AND pool.status = 'ready' AND pool.isolation_level IN ('rootless','microvm') " +
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
+    releaseId: string; state: string; artifactSha256: string;
     deploymentId: string; organizationId: string; projectId: string;
     hostingAccountId: string; domainId: string; hostname: string; repositoryId: string; commitSha: string; healthCheckPath: string; previousDeploymentId: string;
   }>();
@@ -5393,8 +5407,28 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     releases: (rows.results ?? []).filter((row) =>
       validStaticHealthCheckPath(row.healthCheckPath ?? "/") &&
       validDomain(row.hostname) &&
-      /^[a-f0-9]{40}$/i.test(row.commitSha),
-    ),
+      /^[a-f0-9]{40}$/i.test(row.commitSha) &&
+      // Every returned release must carry a release row ID, a known
+      // non-terminal lifecycle state, and the artifact SHA-256 that the
+      // publisher will verify against the local trusted manifest.
+      /^[A-Za-z0-9_-]{1,128}$/.test(row.releaseId ?? "") &&
+      ["artifact_uploaded", "publishing", "health_checking"].includes(row.state) &&
+      /^[a-f0-9]{64}$/i.test(row.artifactSha256 ?? ""),
+    ).map((row) => ({
+      releaseId: row.releaseId,
+      state: row.state,
+      artifactSha256: row.artifactSha256,
+      deploymentId: row.deploymentId,
+      organizationId: row.organizationId,
+      projectId: row.projectId,
+      hostingAccountId: row.hostingAccountId,
+      domainId: row.domainId,
+      hostname: row.hostname,
+      repositoryId: row.repositoryId,
+      commitSha: row.commitSha,
+      healthCheckPath: row.healthCheckPath,
+      previousDeploymentId: row.previousDeploymentId,
+    })),
     rollbacks: (rollbackRows.results ?? []).filter((row) =>
       validStaticHealthCheckPath(row.healthCheckPath ?? "/") &&
       validDomain(row.hostname) &&
