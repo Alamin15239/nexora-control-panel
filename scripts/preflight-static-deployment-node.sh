@@ -95,11 +95,6 @@ if (not isinstance(trust, dict) or set(trust) != required or
 if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", trust["keyId"]):
     print("broker trust keyId has an invalid format", file=sys.stderr)
     sys.exit(1)
-if (config.get("deployment_envelope_issuer") != trust["issuer"] or
-    config.get("deployment_envelope_audience") != trust["audience"] or
-    config.get("deployment_signing_key_id") != trust["keyId"]):
-    print("publisher envelope trust settings do not match broker trust", file=sys.stderr)
-    sys.exit(1)
 expected_config = {
     "control_plane_url", "node_identity", "private_key_file",
     "deployment_signing_public_key_file", "deployment_signing_key_id",
@@ -108,7 +103,27 @@ expected_config = {
     "rollback_execution_enabled",
 }
 if not isinstance(config, dict) or set(config) != expected_config:
-    print("publisher node config has missing or unknown fields", file=sys.stderr)
+    print("publisher node config must be an object with the exact required fields", file=sys.stderr)
+    sys.exit(1)
+string_fields = (
+    "control_plane_url", "node_identity", "private_key_file",
+    "deployment_signing_public_key_file", "deployment_signing_key_id",
+    "deployment_envelope_issuer", "deployment_envelope_audience",
+    "publisher_root", "replay_directory",
+)
+if any(not isinstance(config[field], str) or not config[field] or len(config[field]) > 2048
+       for field in string_fields):
+    print("publisher node config contains an empty, non-string, or oversized string field", file=sys.stderr)
+    sys.exit(1)
+if (not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", config["deployment_signing_key_id"]) or
+    len(config["deployment_envelope_issuer"]) > 256 or
+    len(config["deployment_envelope_audience"]) > 256):
+    print("publisher deployment trust metadata is invalid or oversized", file=sys.stderr)
+    sys.exit(1)
+if (config["deployment_envelope_issuer"] != trust["issuer"] or
+    config["deployment_envelope_audience"] != trust["audience"] or
+    config["deployment_signing_key_id"] != trust["keyId"]):
+    print("publisher envelope trust settings do not match broker trust", file=sys.stderr)
     sys.exit(1)
 if (config.get("private_key_file") != "/etc/nexora-static-publisher/node-ed25519.key" or
     config.get("deployment_signing_public_key_file") != "/etc/nexora-static-publisher/deployment-envelope-public.pem" or
