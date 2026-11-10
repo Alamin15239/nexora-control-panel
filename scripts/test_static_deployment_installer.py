@@ -19,12 +19,12 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
             root = pathlib.Path(temp)
             for name in ("nexora-static-vhostd", "nexora-static-publisher"):
                 path = root / name
-                path.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
+                path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 path.chmod(0o755)
             (root / "nexora-static-vhostd.service").write_text(
-                "[Service]\\nUser=root\\nGroup=nexora-static\\n", encoding="utf-8")
+                "[Service]\nUser=root\nGroup=nexora-static\n", encoding="utf-8")
             (root / "nexora-static-publisher.service").write_text(
-                "[Service]\\nUser=nexora-runtime\\nGroup=www-data\\nSupplementaryGroups=nexora-static\\n",
+                "[Service]\nUser=nexora-runtime\nGroup=www-data\nSupplementaryGroups=nexora-static\n",
                 encoding="utf-8")
             result = subprocess.run(
                 ["bash", str(SCRIPT), "--artifact-dir", str(root), "--plan"],
