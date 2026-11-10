@@ -36,12 +36,19 @@ require("git rev-parse HEAD" in source and 'actual" == "$EXPECTED_COMMIT"' in so
         "workflow must verify the checked-out commit before building")
 
 require("npm ci" in source and "npm run build" in source, "static npm build profile is incomplete")
-require("test -d dist" in source, "the initial artifact output must be dist/")
+require("output_directory:" in source and "OUTPUT_DIRECTORY: ${{ inputs.output_directory }}" in source,
+        "workflow must receive the configured static output directory")
+require('[[ "$OUTPUT_DIRECTORY" =~ ^[A-Za-z0-9._/-]{1,160}$ ]]' in source,
+        "output directory must be constrained to a safe relative path")
+require('test -d "$OUTPUT_DIRECTORY"' in source,
+        "workflow must verify the configured output directory exists")
 require("build_command" not in source and "install_command" not in source,
         "customer-provided commands must not be interpolated into the workflow")
 
-require("find dist -type l" in source, "symlink rejection is required")
-require("find dist ! -type d ! -type f" in source, "special-file rejection is required")
+require('find "$OUTPUT_DIRECTORY" -type l' in source, "symlink rejection is required")
+require('find "$OUTPUT_DIRECTORY" ! -type d ! -type f' in source, "special-file rejection is required")
+require('-C "$OUTPUT_DIRECTORY" -czf "$artifact" .' in source,
+        "archive must contain the configured output directory, not a hard-coded dist/")
 require("bytes > 104857600" in source, "compressed artifact must be capped at 100 MiB")
 require('sha256sum "$artifact"' in source, "artifact SHA-256 must be calculated")
 require("OIDC_AUDIENCE" in source and "/oidc/exchange" in source,
