@@ -131,8 +131,25 @@ if (config.get("private_key_file") != "/etc/nexora-static-publisher/node-ed25519
     config.get("replay_directory") != "/var/lib/nexora-static/replay"):
     print("publisher key or storage paths do not match the provisioned layout", file=sys.stderr)
     sys.exit(1)
-if (not isinstance(config.get("control_plane_url"), str) or
-    not re.fullmatch(r"https://[^/?#@]+", config["control_plane_url"]) or
+control_plane_url_valid = False
+try:
+    from urllib.parse import urlsplit
+    parsed_control_plane = urlsplit(config["control_plane_url"])
+    # Accessing .port also rejects malformed ports; reject credentials and
+    # non-origin URL components just as the publisher's Go URL validation does.
+    _ = parsed_control_plane.port
+    control_plane_url_valid = (
+        parsed_control_plane.scheme == "https" and
+        bool(parsed_control_plane.hostname) and
+        parsed_control_plane.username is None and
+        parsed_control_plane.password is None and
+        parsed_control_plane.path in ("", "/") and
+        not parsed_control_plane.query and
+        not parsed_control_plane.fragment
+    )
+except (ValueError, TypeError):
+    control_plane_url_valid = False
+if (not control_plane_url_valid or
     not isinstance(config.get("node_identity"), str) or
     not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,127}", config["node_identity"]) or
     not isinstance(config.get("poll_interval_seconds"), int) or
