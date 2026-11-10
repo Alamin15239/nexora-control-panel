@@ -102,6 +102,21 @@ class TestD1 {
                 accountDiskLimitBytes: 10 * 1024 * 1024 * 1024,
               } as T) : null;
         }
+        if (query.includes("FROM github_projects p") && query.includes("LEFT JOIN application_project_settings") &&
+            query.includes("github_repository_id AS repositoryId")) {
+          const [projectId, organizationId] = values;
+          if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
+          return ({
+            id: "project-a",
+            repositoryId: "12345",
+            repositoryFullName: "Alamin15239/example-app",
+            installationId: "installation-a",
+            productionBranch: "main",
+            trustedWorkflowSha: "a".repeat(40),
+            status: "active",
+            outputDirectory: "dist",
+          } as T);
+        }
         if (query.includes("FROM github_projects WHERE id = ? AND organization_id = ?")) {
           const [projectId, organizationId] = values;
           if (projectId !== "project-a" || organizationId !== db.projectOrganizationId) return null;
