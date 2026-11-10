@@ -43,7 +43,7 @@ These are foundations and integration components. A code path or Wrangler bindin
 
 The repository does **not** yet provide a complete customer-facing build-to-live deployment path.
 
-1. The sample workflow at `docs/templates/nexora-deploy.yml` remains a static-only artifact-staging scaffold. It is not installed as `.github/workflows/nexora-deploy.yml` in every customer repository and assumes npm, `package-lock.json` and `dist/`.
+1. The sample workflow at `docs/templates/nexora-deploy.yml` remains a static-only artifact-staging scaffold. It is not installed as `.github/workflows/nexora-deploy.yml` in every customer repository; it assumes npm, `package-lock.json`, `npm run build` and a repository-root build context. The API passes the effective configured static output directory to the workflow (default `dist`), and dispatch rejects non-`static-v1` runtime profiles until their dedicated pipelines exist.
 2. The control plane can dispatch the named workflow only when GitHub App credentials/permissions are configured and the project has an administrator-reviewed workflow SHA.
 3. The static publisher is implemented and CI-tested, but is not installed or enabled on a runtime node. Its `static-v1` profile remains disabled by default.
 4. Static activation requires operator-provisioned account release directories, a dedicated read-only web-server group, Nginx document-root routing, a node signing key and the matching deployment-envelope public key. These live prerequisites have not been verified.
