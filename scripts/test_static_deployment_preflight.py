@@ -50,6 +50,9 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "reserved Linux identity",
             "private_key_file",
             "deployment_signing_public_key_file",
+            'set(bindings) != {"accounts", "domains"}',
+            "publisher node private key must encode exactly 64 Ed25519 bytes",
+            're.fullmatch(r"https://[^/?#@]+", config["control_plane_url"])',
         ):
             self.assertIn(required, self.source)
 
