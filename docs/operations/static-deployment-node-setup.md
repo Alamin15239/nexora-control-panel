@@ -2,6 +2,58 @@
 
 This is an operator runbook for a **disposable, explicitly approved static publisher node**. It does not authorize enrolling the existing development VM or enabling production deployments. Complete the architecture acceptance gates before running these commands.
 
+## 0. Install reviewed binaries on an approved disposable node
+
+The repository includes `scripts/install-static-deployment-node.sh`. It defaults to
+a read-only plan and accepts only a directory containing these four reviewed
+artifacts:
+
+- `nexora-static-vhostd`
+- `nexora-static-publisher`
+- `nexora-static-vhostd.service`
+- `nexora-static-publisher.service`
+
+First inspect the plan without changing the node:
+
+```sh
+bash scripts/install-static-deployment-node.sh --artifact-dir /path/to/reviewed-artifacts --plan
+```
+
+Applying requires all of the following: an explicitly disposable test node, a
+root-owned approval file with mode `0600`, an exact node identity match, and
+the explicit `--apply` flag. The approval file schema is exactly:
+
+```json
+{
+  "environment": "disposable-test",
+  "node_identity": "YOUR_APPROVED_NODE_ID",
+  "allow_static_publisher_install": true
+}
+```
+
+Create that approval file only through the authenticated operator process on
+the disposable test node. Never create it on the existing development VM
+(`nexora-server`) or a production host. The installer independently refuses
+the protected hostname `nexora-server`.
+
+After the approval file and reviewed artifacts are present, the explicit
+installation command is:
+
+```sh
+sudo bash scripts/install-static-deployment-node.sh \
+  --artifact-dir /path/to/reviewed-artifacts \
+  --node-id YOUR_APPROVED_NODE_ID --apply
+```
+
+The installer creates/verifies the dedicated service identity and data
+directories, then installs root-owned binaries and unit files. It refuses to
+overwrite existing binary/unit targets. It does **not** install private keys,
+trust JSON, account/domain bindings, or publisher configuration. It does not
+run `systemctl daemon-reload`, start, enable, or reload either service.
+Complete the remaining operator trust/configuration steps below, then run the
+read-only preflight. Service activation remains a separate, explicit
+acceptance decision and is not authorized by a successful install or preflight.
+
 ## 1. Create the deployment-envelope signing key pair
 
 Generate a dedicated RSA key pair on a trusted operator workstation. Keep the private key outside the repository and outside every hosting node.
