@@ -4382,7 +4382,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     poolStatus: string | null; isolationLevel: string | null; assignedNodeId: string | null;
   }>();
   // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
-  if (!isRuntimeAssignmentAdmitted(runtimeAssignment)) {
+  if (!runtimeAssignment || !isRuntimeAssignmentAdmitted(runtimeAssignment)) {
     return c.json({
       message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
