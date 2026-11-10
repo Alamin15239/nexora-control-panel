@@ -48,6 +48,7 @@ class ArtifactD1 {
   validationEventDetails: string | null = null;
   activationEventDetails: string | null = null;
   healthEventDetails: string | null = null;
+  rollbackAcknowledged = false;
   workloadStatus: string | null = null;
   githubDeploymentStatus = "building";
 
@@ -78,6 +79,10 @@ class ArtifactD1 {
             nodePoolId: db.node.nodePoolId,
             signingPublicKey: db.node.signingPublicKey,
           } as T) : null;
+        }
+        if (query.includes("FROM application_rollback_acknowledgements") &&
+            query.includes("failed_release_id = ?")) {
+          return db.rollbackAcknowledged ? ({ operationId: "rollback-operation-a" } as T) : null;
         }
         if (query.includes("SELECT id FROM application_release_events")) {
           if (query.includes("release_files_activated")) {
@@ -718,6 +723,41 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(db.release.state, "failed");
   assert.equal(db.workloadStatus, "unhealthy");
   assert.equal(db.githubDeploymentStatus, "failed");
+});
+
+test("duplicate failed health check stops requesting rollback after acknowledgement", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "unhealthy" as const, httpStatus: 503,
+    durationMs: 30000, failureCode: "http_5xx",
+  };
+  const env = { DB: db as unknown as D1Database };
+  const first = await worker.fetch(await signedHealthCheckRequest(
+    node.privateKey, report, "a".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const firstBody = await first.json() as {
+    rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+  };
+  assert.equal(firstBody.rollbackRequired, true);
+  assert.equal(firstBody.rollbackTargetDeploymentId, "previous-deployment");
+
+  // Model the durable acknowledgement written by the rollback-completion route.
+  db.rollbackAcknowledged = true;
+  const duplicate = await worker.fetch(await signedHealthCheckRequest(
+    node.privateKey, report, "b".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(duplicate.status, 200);
+  const duplicateBody = await duplicate.json() as {
+    duplicate: boolean; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+  };
+  assert.equal(duplicateBody.duplicate, true);
+  assert.equal(duplicateBody.rollbackRequired, false);
+  assert.equal(duplicateBody.rollbackTargetDeploymentId, null);
 });
 
 test("failed health check on another node preserves the previous workload without requesting a local rollback", async () => {
