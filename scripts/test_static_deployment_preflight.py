@@ -61,7 +61,11 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "string_fields = (",
             "not isinstance(config[field], str)",
             "publisher deployment trust metadata is invalid or oversized",
-            're.fullmatch(r"https://[^/?#@]+", config["control_plane_url"])',
+            "from urllib.parse import urlsplit",
+            'parsed_control_plane.scheme == "https"',
+            "bool(parsed_control_plane.hostname)",
+            "parsed_control_plane.username is None",
+            'parsed_control_plane.path in ("", "/")',
         ):
             self.assertIn(required, self.source)
 
