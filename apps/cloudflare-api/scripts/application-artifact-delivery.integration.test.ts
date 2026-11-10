@@ -51,6 +51,7 @@ class ArtifactD1 {
   rollbackAcknowledged = false;
   rollbackAcknowledgement: {
     operationId: string; nodeId: string; failedReleaseId: string; targetReleaseId: string;
+    failedDeploymentId: string; targetDeploymentId: string;
     targetArtifactSha256: string; httpStatus: number; durationMs: number;
   } | null = null;
   workloadActiveReleaseId = "target-release";
@@ -92,11 +93,20 @@ class ArtifactD1 {
           }
           if (query.includes("operation_id = ?")) {
             const ack = db.rollbackAcknowledgement;
-            return ack && ack.operationId === values[0] ? ({
+            if (!ack || ack.operationId !== values[0]) return null;
+            if (query.includes("failed_deployment_id AS failedDeploymentId")) {
+              return ({
+                nodeId: ack.nodeId, failedDeploymentId: ack.failedDeploymentId,
+                targetDeploymentId: ack.targetDeploymentId,
+                targetArtifactSha256: ack.targetArtifactSha256,
+                httpStatus: ack.httpStatus, durationMs: ack.durationMs,
+              } as T);
+            }
+            return ({
               nodeId: ack.nodeId, failedReleaseId: ack.failedReleaseId,
               targetReleaseId: ack.targetReleaseId, targetArtifactSha256: ack.targetArtifactSha256,
               httpStatus: ack.httpStatus, durationMs: ack.durationMs,
-            } as T) : null;
+            } as T);
           }
         }
         if (query.includes("FROM application_releases failed")) {
@@ -190,6 +200,7 @@ class ArtifactD1 {
           db.rollbackAcknowledgement = {
             operationId: String(values[0]), nodeId: String(values[3]),
             failedReleaseId: String(values[4]), targetReleaseId: String(values[5]),
+            failedDeploymentId: String(values[6]), targetDeploymentId: String(values[7]),
             targetArtifactSha256: String(values[8]), httpStatus: Number(values[9]),
             durationMs: Number(values[10]),
           };
