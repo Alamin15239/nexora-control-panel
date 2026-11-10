@@ -58,6 +58,11 @@ jobs:
       - name: Verify provisioning systemd unit
         run: |
           sudo install -D -o root -g root -m 0755 /tmp/nexora-provisiond /usr/local/sbin/nexora-provisiond
+          # The publisher's primary group must be www-data so its new release
+          # directories are traversable by Nginx; broker IPC stays supplementary.
+          grep -Fxq 'User=nexora-runtime' systemd/nexora-static-publisher.service
+          grep -Fxq 'Group=www-data' systemd/nexora-static-publisher.service
+          grep -Fxq 'SupplementaryGroups=nexora-static' systemd/nexora-static-publisher.service
           sudo install -D -o root -g root -m 0755 /tmp/nexora-static-vhostd /usr/local/sbin/nexora-static-vhostd
           sudo install -D -o root -g root -m 0644 systemd/nexora-static-vhostd.service /etc/systemd/system/nexora-static-vhostd.service
           sudo install -D -o root -g root -m 0755 /tmp/nexora-runtime-node /usr/local/bin/nexora-runtime-node
