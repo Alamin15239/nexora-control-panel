@@ -11,7 +11,7 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
         cls.source = SCRIPT.read_text(encoding="utf-8")
 
     def test_preflight_is_explicitly_read_only(self):
-        self.assertIn("read-only acceptance preflight", self.source)
+        self.assertIn("Read-only acceptance preflight", self.source)
         self.assertIn("No services will be started, stopped, enabled, or reloaded.", self.source)
         for forbidden in (
             "systemctl start", "systemctl enable", "systemctl restart",
