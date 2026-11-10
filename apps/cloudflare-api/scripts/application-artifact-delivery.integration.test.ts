@@ -140,7 +140,11 @@ class ArtifactD1 {
             return db.activationEventDetails === values[1] ? ({ id: "activation-event" } as T) : null;
           }
           if (values[1] === "health_check_succeeded" || values[1] === "health_check_failed") {
-            return db.healthEventDetails === values[2] ? ({ id: "health-event" } as T) : null;
+            // The Worker matches a prior health-check event by (releaseId,
+            // eventCode) only — probe duration and HTTP status are not part
+            // of the durable decision — so any recorded event for this code
+            // is a duplicate match.
+            return db.healthEventDetails !== null ? ({ id: "health-event" } as T) : null;
           }
           return db.validationEventDetails === values[1] ? ({ id: "validation-event" } as T) : null;
         }
@@ -990,7 +994,11 @@ test("health-check report rejects mismatched configured path and digest", async 
   assert.equal(db.release.state, "health_checking");
 });
 
-test("successful health-check report is idempotent only for an exact duplicate", async () => {
+test("successful health-check report is idempotent for same-outcome retries including different probe duration", async () => {
+  // PROJECT_STATUS item 3: health-report retries must be idempotent when
+  // probe duration changes. The durable decision is the health outcome, not
+  // the per-probe timing details, so a same-outcome retry with a different
+  // durationMs is accepted as a duplicate rather than rejected as a conflict.
   const db = new ArtifactD1();
   db.release.state = "health_checking";
   const node = await keyPair("Ed25519");
@@ -1004,11 +1012,22 @@ test("successful health-check report is idempotent only for an exact duplicate",
   const env = { DB: db as unknown as D1Database };
   const first = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "1".repeat(32)), env, {} as ExecutionContext);
   assert.equal(first.status, 200);
+  // Exact duplicate (same details, fresh nonce) is idempotent.
   const duplicate = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "2".repeat(32)), env, {} as ExecutionContext);
   assert.equal(duplicate.status, 200);
-  const body = await duplicate.json() as { duplicate: boolean; releaseState: string };
-  assert.equal(body.duplicate, true);
-  assert.equal(body.releaseState, "succeeded");
+  const duplicateBody = await duplicate.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(duplicateBody.duplicate, true);
+  assert.equal(duplicateBody.releaseState, "succeeded");
+  // Retry with a different probe duration is also idempotent: same outcome,
+  // different timing details, must still be a duplicate rather than a 409.
+  const jitteredRetry = await worker.fetch(await signedHealthCheckRequest(node.privateKey, { ...report, durationMs: 191 }, "3".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(jitteredRetry.status, 200);
+  const jitteredBody = await jitteredRetry.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(jitteredBody.duplicate, true);
+  assert.equal(jitteredBody.releaseState, "succeeded");
+  // A retry that disagrees with the terminal outcome is still rejected.
+  const conflicting = await worker.fetch(await signedHealthCheckRequest(node.privateKey, { ...report, healthStatus: "unhealthy" as const, httpStatus: 503, durationMs: 5, failureCode: "http_5xx" }, "4".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(conflicting.status, 409);
 });
 
 

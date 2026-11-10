@@ -6060,6 +6060,15 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     durationMs,
     failureCode: failureCode || null,
   });
+  // A retried health-check report for an already-terminal release is idempotent
+  // when the outcome agrees with the recorded terminal state. Probe duration
+  // and HTTP status may vary slightly between retries (network jitter, probe
+  // restart); the durable decision is the outcome itself, so we match on the
+  // release and event_code only. A retry that disagrees with the terminal
+  // outcome remains a conflict and is rejected. A terminal release with no
+  // corresponding health-check event in history is treated as a data-integrity
+  // failure and rejected so a stale or replayed report cannot silently agree
+  // with a state that was reached by a different path.
   const eventCode = healthStatus === "healthy" ? "health_check_succeeded" : "health_check_failed";
   const targetState = healthStatus === "healthy" ? "succeeded" : "failed";
   if (release.state === "succeeded" || release.state === "failed") {
@@ -6068,8 +6077,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     }
     const prior = await c.env.DB.prepare(
       "SELECT id FROM application_release_events WHERE release_id = ? AND event_code = ? " +
-      "AND details_redacted_json = ? LIMIT 1",
-    ).bind(release.releaseRowId, eventCode, details).first<{ id: string }>();
+      "LIMIT 1",
+    ).bind(release.releaseRowId, eventCode).first<{ id: string }>();
     if (!prior) return c.json({ message: "Terminal release has no matching health-check event." }, 409);
     return c.json({
       accepted: true, duplicate: true, deploymentId: body.deploymentId,
