@@ -58,7 +58,7 @@ jobs:
             exit 1
           }
 
-      # This example deliberately supports only a static npm project with dist/ output.
+      # This example deliberately supports only a static npm project with a configured output directory.
       # Build commands run on a disposable GitHub-hosted runner, never on Nexora servers.
       - name: Build static site
         shell: bash
