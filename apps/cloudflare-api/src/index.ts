@@ -4347,12 +4347,16 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     return c.json({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
   }
   const project = await c.env.DB.prepare(
-    `SELECT id, github_repository_id AS repositoryId, repository_full_name AS repositoryFullName,
-            github_installation_id AS installationId, production_branch AS productionBranch, trusted_workflow_sha AS trustedWorkflowSha, status
-     FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1`,
+    `SELECT p.id, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName,
+            p.github_installation_id AS installationId, p.production_branch AS productionBranch,
+            p.trusted_workflow_sha AS trustedWorkflowSha, p.status,
+            COALESCE(NULLIF(s.output_directory, ''), p.output_directory) AS outputDirectory
+     FROM github_projects p
+     LEFT JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
   ).bind(c.req.param("projectId"), identity.organizationId).first<{
     id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
-    productionBranch: string; trustedWorkflowSha: string | null; status: string;
+    productionBranch: string; trustedWorkflowSha: string | null; status: string; outputDirectory: string;
   }>();
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   if (!project.installationId) return c.json({ message: "Reconnect the GitHub App and relink this repository." }, 409);
@@ -4361,7 +4365,8 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   }
   const runtimeAssignment = await c.env.DB.prepare(
     "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
-    "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, p.status AS poolStatus, " +
+    "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, rp.profile_key AS profileKey, " +
+    "rp.runtime_family AS runtimeFamily, s.build_method AS buildMethod, p.status AS poolStatus, " +
     "p.isolation_level AS isolationLevel, " +
     "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
@@ -4373,14 +4378,29 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
   ).bind(project.id, identity.organizationId).first<{
     runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
-    runtimeEnabled: number; poolStatus: string | null; isolationLevel: string | null;
-    assignedNodeId: string | null;
+    runtimeEnabled: number; profileKey: string; runtimeFamily: string; buildMethod: string;
+    poolStatus: string | null; isolationLevel: string | null; assignedNodeId: string | null;
   }>();
   // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
   if (!isRuntimeAssignmentAdmitted(runtimeAssignment)) {
     return c.json({
       message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
+  }
+  // The checked-in customer workflow currently stages static artifacts only.
+  // Do not dispatch OCI/managed profiles through that incompatible pipeline.
+  if (runtimeAssignment.profileKey !== "static-v1" ||
+      runtimeAssignment.runtimeFamily !== "static" ||
+      runtimeAssignment.buildMethod !== "static") {
+    return c.json({
+      message: "This deployment workflow currently supports only the static-v1 runtime with static output. Other runtime profiles remain disabled until their dedicated build and execution pipelines pass acceptance.",
+    }, 409);
+  }
+  if (typeof project.outputDirectory !== "string" ||
+      !/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) ||
+      project.outputDirectory.startsWith("/") ||
+      project.outputDirectory.split("/").some((part) => part === "." || part === "..")) {
+    return c.json({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
   }
 
   const active = await c.env.DB.prepare(
@@ -4445,7 +4465,11 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
         },
         body: JSON.stringify({
           ref: project.productionBranch,
-          inputs: { deployment_id: deploymentId, commit_sha: commitData.sha },
+          inputs: {
+            deployment_id: deploymentId,
+            commit_sha: commitData.sha,
+            output_directory: project.outputDirectory,
+          },
         }),
       },
     );
