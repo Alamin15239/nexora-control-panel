@@ -116,7 +116,7 @@ if (config.get("private_key_file") != "/etc/nexora-static-publisher/node-ed25519
     print("publisher key or storage paths do not match the provisioned layout", file=sys.stderr)
     sys.exit(1)
 if (not isinstance(config.get("control_plane_url"), str) or
-    not re.fullmatch(r"https://[^/]+", config["control_plane_url"]) or
+    not re.fullmatch(r"https://[^/?#@]+", config["control_plane_url"]) or
     not isinstance(config.get("node_identity"), str) or
     not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{2,127}", config["node_identity"]) or
     not isinstance(config.get("poll_interval_seconds"), int) or
@@ -125,9 +125,19 @@ if (not isinstance(config.get("control_plane_url"), str) or
     not isinstance(config.get("rollback_execution_enabled"), bool)):
     print("publisher node config contains invalid endpoint, identity, polling, or rollback settings", file=sys.stderr)
     sys.exit(1)
-if not isinstance(bindings.get("accounts"), list) or not bindings["accounts"] or not isinstance(bindings.get("domains"), list) or not bindings["domains"]:
-    print("bindings registry must contain at least one account and one domain", file=sys.stderr)
+if (set(bindings) != {"accounts", "domains"} or
+    not isinstance(bindings.get("accounts"), list) or not bindings["accounts"] or
+    not isinstance(bindings.get("domains"), list) or not bindings["domains"]):
+    print("bindings registry must contain only account and domain lists, each non-empty", file=sys.stderr)
     sys.exit(1)
+
+node_key = (pub / "node-ed25519.key").read_text().strip()
+try:
+    decoded_node_key = bytes.fromhex(node_key)
+except ValueError:
+    raise SystemExit("publisher node private key is not valid hexadecimal")
+if len(decoded_node_key) != 64:
+    raise SystemExit("publisher node private key must encode exactly 64 Ed25519 bytes")
 
 account_ids, usernames, uids = set(), set(), set()
 for account in bindings["accounts"]:
