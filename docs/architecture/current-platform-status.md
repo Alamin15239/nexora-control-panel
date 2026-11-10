@@ -1,6 +1,6 @@
 # Nexora platform status and source-of-truth architecture
 
-**Status snapshot: 2026-11-09**
+**Status snapshot: 2026-11-10**
 
 This document reconciles the current repository implementation with older architecture notes. It describes code and configuration present in the repository; it does not assert that every binding, secret, migration, service, or workflow is installed in the live Cloudflare account or on a production host.
 
@@ -29,6 +29,7 @@ Cloudflare Workers are not general-purpose Linux VPS instances. A Workers-only d
 - D1 schema for projects, deployment/release records, runtime profiles, node pools, node identities, quotas and build-usage events.
 - Authenticated application-node enrollment, heartbeat, signed desired-state polling, artifact delivery and release/health-check protocol foundations.
 - Dedicated static artifact publisher daemon: assigned-node polling, trusted RS256 envelope verification, durable replay protection, SHA-256 verification, archive validation, private account-directory provisioning, immutable releases and atomic activation.
+- The publisher service now runs with `www-data` as its primary group for Nginx read/traverse access, while `nexora-static` remains supplementary for broker-socket access. CI checks the systemd group contract and verifies provisioned account directories inherit the publisher primary GID without group-write permission.
 - Static publishing installs and validates the Nginx vhost through the privileged broker before switching the active release; it then reports activation to the API.
 - The publisher performs a bounded local HTTP origin probe and submits a signed health result. Same-node automatic rollback uses a durable outbox, compare-and-switch semantics, a second serving probe and a signed, idempotent API acknowledgement. Cross-node previous workloads are preserved rather than incorrectly rolled back by the new node.
 - GitHub Actions currently verifies the Linux agent with full Go tests, race tests, real Nginx release-switching/PHP-isolation integration, vet, binary builds and systemd unit validation. Cloudflare API CI verifies TypeScript, all D1 migrations, tenant constraints, runtime admission and application integration contracts.
