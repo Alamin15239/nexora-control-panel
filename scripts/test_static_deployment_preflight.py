@@ -29,6 +29,12 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "/var/lib/nexora-static/accounts",
             "/var/lib/nexora-static/replay",
             "runuser -u www-data -- test -x",
+            "broker binary is root:root 755",
+            "publisher binary is root:root 755",
+            "broker unit is root:root 644",
+            "publisher unit is root:root 644",
+            'grep -Fxq "Group=www-data"',
+            'grep -Fxq "SupplementaryGroups=nexora-static"',
         ):
             self.assertIn(required, self.source)
 
@@ -38,6 +44,12 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "deployment_signing_key_id", "linuxUsername", "linuxUid",
             "domainId", "hostingAccountId", "hostname",
             "duplicate domain ID or hostname",
+            "set(config) != expected_config",
+            "set(account) != {\"hostingAccountId\", \"linuxUsername\", \"linuxUid\"}",
+            "set(domain) != {\"domainId\", \"hostingAccountId\", \"hostname\"}",
+            "reserved Linux identity",
+            "private_key_file",
+            "deployment_signing_public_key_file",
         ):
             self.assertIn(required, self.source)
 
