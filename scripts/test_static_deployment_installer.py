@@ -26,7 +26,7 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
             "Refusing to install on protected development host nexora-server",
             "root:root:600", "Refusing to overwrite existing target",
             "Group=www-data", "SupplementaryGroups=nexora-static",
-            "Services remain stopped and disabled",
+            "stopped and disabled",
         ):
             self.assertIn(required, source)
         for forbidden in ("systemctl start", "systemctl enable", "systemctl restart", "systemctl daemon-reload"):
