@@ -52,6 +52,12 @@ class StaticDeploymentPreflightContractTests(unittest.TestCase):
             "deployment_signing_public_key_file",
             'set(bindings) != {"accounts", "domains"}',
             "publisher node private key must encode exactly 64 Ed25519 bytes",
+            "1 <= len(bindings[\"accounts\"]) <= 10000",
+            "1 <= len(bindings[\"domains\"]) <= 50000",
+            "1000 <= uid <= 4294967295",
+            "not isinstance(trust, dict)",
+            "not isinstance(config, dict)",
+            "not isinstance(bindings, dict)",
             're.fullmatch(r"https://[^/?#@]+", config["control_plane_url"])',
         ):
             self.assertIn(required, self.source)
