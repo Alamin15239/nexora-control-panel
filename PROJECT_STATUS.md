@@ -1635,6 +1635,31 @@ real-SQLite concurrency tests. The subsequent branch-head commit
 SQLite tests do not prove behavior of remote Cloudflare D1; a controlled D1
 environment check remains required before production release.
 
+## 5f. Domain Removal UI and Agent-Claim Correction (2026-11-11)
+
+The domain inventory now exposes a guarded Remove action for non-primary
+domains and refreshes live Cloudflare hostname/SSL state when the inventory
+loads. The API's existing domain DELETE route performs an organization-scoped
+soft delete, queues `REMOVE_DOMAIN`, and records an audit event; a failed
+agent result restores the domain row to ACTIVE.
+
+A pipeline trace found that the agent job-claim query only joined a domain
+row for `ADD_DOMAIN`. As a result, `REMOVE_DOMAIN` jobs could be claimed
+without the target domain name, causing the agent to reject the job as an
+invalid payload. The lookup now resolves the target domain from the
+`remove-domain:<domain-id>` idempotency key as well as the existing
+`add-domain:<domain-id>` key. The domain remains available to the claim
+query while soft-deleted so the agent can safely remove its Nginx server
+block.
+
+The primary-domain guard is now unconditional in both the API and dashboard:
+a primary domain cannot be removed even when its hosting account is
+suspended. The user must first make another domain primary.
+
+Verification boundary: the API and dashboard CI runs for these latest
+changes must pass before this batch is marked CI-verified. Live Nginx
+removal/reload and rollback still require Ubuntu acceptance testing.
+
 ## 6. Development Commands
 
 ### Go agent tests
