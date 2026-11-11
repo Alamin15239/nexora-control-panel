@@ -2736,13 +2736,30 @@ app.post("/v1/hosting-accounts/:id/backups", async (c) => {
   const jobId = crypto.randomUUID();
   const now = new Date().toISOString();
   const requestPayload = JSON.stringify({ backupId, databaseNames });
+  // Atomic exclusion: conditional INSERT (NOT EXISTS) checks for an active
+  // backup AND inserts in a single SQL statement. D1's atomic execution
+  // guarantees no race. The partial unique index
+  // idx_hosting_backups_active_exclusion is the database-level backstop.
+  // If changes() = 0, another active backup exists → 409 Conflict.
+  const insertResult = await c.env.DB.prepare(
+    "INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) " +
+    "SELECT ?, ?, ?, ?, 'QUEUED', ?, ?, ? " +
+    "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
+  ).bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now, account.id).run();
+  if ((insertResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "A backup is already queued or running for this hosting account. Wait for it to complete before requesting another." }, 409);
+  }
+  // Backup row inserted. Now queue the job + audit. If this fails, clean
+  // up the orphan backup so the exclusion is released.
   try {
     await c.env.DB.batch([
-      c.env.DB.prepare("INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) VALUES (?, ?, ?, ?, 'QUEUED', ?, ?, ?)").bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now),
       c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, account.id, "backup-create:" + backupId, requestPayload),
       c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup.create_requested', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, backupId, JSON.stringify({ accountId: account.id, username: account.username, databaseCount: databaseNames.length })),
     ]);
-  } catch { return c.json({ message: "Unable to queue the hosting backup" }, 500); }
+  } catch {
+    await c.env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND status = 'QUEUED'").bind(backupId).run();
+    return c.json({ message: "Unable to queue the hosting backup" }, 500);
+  }
   return c.json({ backup: { id: backupId, status: "QUEUED", databaseNames }, job: { id: jobId, status: "QUEUED" }, message: "Backup queued for the connected Linux agent." }, 202);
 });
 
@@ -7537,34 +7554,49 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
       default: continue;
     }
 
-    // Idempotency: skip if a QUEUED or RUNNING backup already exists for
-    // this account (e.g., a manual backup was queued between the claim
-    // and the INSERT). Release the lease so the next tick can re-evaluate.
-    const existing = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')",
-    ).bind(schedule.accountId, schedule.organizationId).first<{ count: number }>();
-    if ((existing?.count ?? 0) > 0) {
+    // Atomic exclusion: conditional INSERT (NOT EXISTS) checks for an
+    // active backup AND inserts in a single SQL statement. Replaces the
+    // non-atomic SELECT-COUNT-then-INSERT that allowed races. The partial
+    // unique index idx_hosting_backups_active_exclusion is the DB backstop.
+    // If changes() = 0, another backup won the race. Release the lease,
+    // do NOT advance next_run_at (the scheduled backup was not created),
+    // and skip. next_run_at stays at its current value so the scheduler
+    // retries on the next tick once the winning backup completes.
+    const backupId = crypto.randomUUID();
+    const insertResult = await env.DB.prepare(
+      "INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) " +
+      "SELECT ?, ?, ?, 'QUEUED', ? " +
+      "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
+    ).bind(backupId, schedule.accountId, schedule.organizationId, nowIso, schedule.accountId).run();
+    if ((insertResult.meta?.changes ?? 0) !== 1) {
+      // Another backup won the race. Release the lease, do NOT advance
+      // next_run_at or last_run_at — the scheduled backup was not created.
       await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
       continue;
     }
 
-    const backupId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
     const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
     const databaseNames = (databases.results ?? []).map((db) => db.name);
-    // Batch: insert backup row + provisioning job + update schedule
-    // (last_run_at, next_run_at, and persist the inferred anchor if one
-    // was computed) + audit log. The inferred anchor is persisted so
-    // subsequent ticks use the stable value — this is the one-time
-    // backward-compatibility upgrade for pre-migration schedules.
+    // Backup row inserted. Now queue the job, update the schedule, and
+    // audit log. If this batch fails, clean up the orphan backup row so
+    // the exclusion is released and the next tick can retry. Do NOT
+    // advance next_run_at — the scheduled backup failed to create the job.
     const scheduleUpdate = inferredAnchor !== null
       ? env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ?, anchor_day_of_month = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), inferredAnchor, schedule.accountId)
       : env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId);
-    await env.DB.batch([
-      env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'QUEUED', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
-      env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
-      scheduleUpdate,
-      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString(), anchorDayOfMonth: schedule.anchorDayOfMonth ?? inferredAnchor })),
-    ]);
+    try {
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
+        scheduleUpdate,
+        env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString(), anchorDayOfMonth: schedule.anchorDayOfMonth ?? inferredAnchor })),
+      ]);
+    } catch {
+      // Clean up the orphan backup row so the exclusion is released.
+      // Do NOT advance next_run_at — retry on the next tick.
+      await env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND status = 'QUEUED'").bind(backupId).run();
+      await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
+      continue;
+    }
   }
 }
