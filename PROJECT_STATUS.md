@@ -1715,12 +1715,14 @@ provisioning jobs exist for `ADD_DOMAIN`, file operations, and
 backups.
 
 Remaining:
-- Domain row DELETE endpoint (currently only retry + Cloudflare sync).
-- Fix `websites-domains/page.tsx:138` column mismatch and replace the
-  hardcoded `Not issued` SSL span with a real Cloudflare-hostname
-  status fetch.
-- Fix `login/page.tsx:72` so "Forgot password?" links to the local
-  `/forgot-password` route instead of an external URL.
+- Domain DELETE endpoint, organization-scoped soft deletion, audit event,
+  and queued `REMOVE_DOMAIN` agent job are implemented. The dashboard now
+  exposes a guarded Remove action and refreshes the inventory after queueing.
+- Cloudflare hostname GET status is now fetched when the domain inventory
+  loads, so SSL/hostname status is not limited to stale values from the
+  last page load. The proxy allowlist already supports this GET route.
+- The forgot-password link already points to the local `/forgot-password`
+  route; no change was required.
 
 ### Phase 5 — Databases, email, PHP, runtime management
 
@@ -1728,9 +1730,10 @@ Remaining:
 - Email: outbound only. Mailbox/forwarding/filter CRUD requires a
   mailserver integration (Dovecot/Postfix admin API or cPanel-style
   forward file generation). Out of scope without a chosen mailserver.
-- PHP/runtime admin: no API exists. The agent already generates
-  per-account PHP-FPM pools via `secure_php_pool.go`; surfacing this
-  as a customer-facing settings API is a small Worker addition.
+- PHP/runtime admin: organization-scoped GET/PUT settings API and
+  `/hosting-accounts/[id]/php` dashboard page exist. The Linux agent
+  applies pool changes through the rollback-safe UPDATE_PHP_POOL pipeline.
+  Live Ubuntu validation of php-fpm reload/socket behavior remains required.
 
 ### Phase 6 — Hosting plans, quotas, resource enforcement
 
@@ -1747,8 +1750,8 @@ Remaining:
 - Customers (read-only), servers, hosting accounts, hosting plans,
   payment orders, payment settings, incidents, notification settings,
   GitHub projects, application nodes — all present.
-- Missing: organization management, audit-log viewer, deployment
-  queue inspector.
+- Organization management and deployment queue inspector remain
+  incomplete. Audit-log viewer is implemented at `/audit-logs`.
 
 ### Phase 8 — SaaS subscriptions, billing, customer management
 
@@ -1774,14 +1777,16 @@ Remaining:
 - 24 pages, real API calls, responsive layout, loading/error states.
 - Empty states and confirmation dialogs present on destructive
   actions.
-- Known UI defects: `websites-domains/page.tsx:138` column mismatch;
-  `login/page.tsx:72` external link; `/user-management` missing from
-  sidebar; `/email` page is a readiness placeholder only.
+- Remaining UI gaps: `/user-management` is not in the sidebar and
+  `/email` is a mail-provider readiness placeholder. Domain removal and
+  live Cloudflare status refresh are now wired into the domain inventory.
 
 ### Phase 11 — Full regression, integration, end-to-end, security testing
 
-- Unit/integration coverage: 24 Go packages + 102 Worker tests + race
-  tests, all green.
+- Unit/integration coverage: current CI includes the API, Go-agent,
+  dashboard, MFA, database-secret, and backup regression suites; see the
+  exact workflow runs for the tested commit. Earlier static-deployment
+  inventory counts are historical and should not be treated as current totals.
 - Browser end-to-end (Playwright/Cypress): not present in the repo.
 - Infrastructure tests (Nginx config validation, tunnel connectivity,
   SSL lifecycle, backup/restore on a real node): Python preflight
@@ -1800,7 +1805,7 @@ Remaining:
 ## 8. Overall Completion Percentage
 
 Based on the verified feature inventory in section 2 and the work
-completed through section 5d:
+completed through section 5e, including the domain dashboard follow-up:
 
 - **Control-plane API**: ~95% — 109 complete routes; MFA login is now
   enforced end-to-end with challenge creation, atomic consume, attempt
@@ -1814,12 +1819,11 @@ completed through section 5d:
   backups, secure directory/Nginx/PHP generation; OCI runtime
   execution intentionally disabled (documented in
   `PRIVILEGED-IPC-DESIGN.md`).
-- **Dashboard**: ~88% — 24 real pages; MFA challenge UI on the login
-  page; audit log dashboard with filters; security page MFA enrollment
-  now reads the correct status; lint is zero-warning; gaps are
-  customer-side resource creation UI (customers cannot create their
-  own databases/domains from the dashboard yet — admin-only) and the
-  email-verify UX.
+- **Dashboard**: ~89% — 24+ real pages; MFA challenge UI, audit log
+  dashboard, PHP settings, live Cloudflare hostname status refresh, and
+  domain removal action are wired. Gaps include customer-side resource
+  creation UI, organization management UX, email verification UX, and
+  mail hosting.
 - **Static deployment lifecycle**: 100% of the originally scoped
   outstanding items plus the deeper `health_checking` restart-recovery
   defect are now implemented and verified by tests. The publisher
