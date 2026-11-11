@@ -3496,7 +3496,7 @@ app.delete("/v1/domains/:id", async (c) => {
   ).bind(domainId, identity.organizationId).first<{ id: string; name: string; isPrimary: number; status: string; accountId: string; accountStatus: string }>();
   if (!domain) return c.json({ message: "Domain not found in this workspace." }, 404);
   if (domain.status === "DELETED") return c.json({ message: "Domain is already deleted." }, 409);
-  if (domain.isPrimary === 1 && domain.accountStatus === "ACTIVE") return c.json({ message: "Cannot delete the primary domain of an active hosting account." }, 409);
+  if (domain.isPrimary === 1) return c.json({ message: "The primary domain cannot be removed. Set another domain as primary first." }, 409);
   const jobId = crypto.randomUUID();
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE domains SET status = 'DELETED', updated_at = datetime('now') WHERE id = ? AND status != 'DELETED'").bind(domainId),
