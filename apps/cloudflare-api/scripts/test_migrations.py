@@ -394,6 +394,65 @@ assert customer_databases == [("db-a","tenant_a_app")], f"Customer databases esc
 db.execute("UPDATE hosting_account_memberships SET status='REVOKED' WHERE id='account-member-a'")
 assert db.execute(customer_membership_query, ("account-a","org-a","user-a")).fetchone() is None, "Revoked membership retained customer resource access"
 
+# --- Subscription / invoice / email schema guards (0044, 0045) ---
+subscriptions_actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+for table in ("subscriptions", "subscription_events", "invoice_counters", "invoices",
+              "billing_webhook_events", "email_domains", "email_mailboxes", "email_forwards"):
+    assert table in subscriptions_actual, f"Missing billing/email table: {table}"
+
+# One live subscription per hosting account (partial UNIQUE index).
+db.execute("""INSERT INTO subscriptions(id,organization_id,hosting_account_id,plan_id,status,billing_period,
+              current_period_start,current_period_end)
+              VALUES ('sub-a','org-a','account-a','plan-a','ACTIVE','monthly',datetime('now'),datetime('now','+1 month'))""")
+try:
+    db.execute("""INSERT INTO subscriptions(id,organization_id,hosting_account_id,plan_id,status,billing_period,
+                  current_period_start,current_period_end)
+                  VALUES ('sub-a2','org-a','account-a','plan-a','ACTIVE','monthly',datetime('now'),datetime('now','+1 month'))""")
+    raise SystemExit("Partial UNIQUE index failed: two live subscriptions for one hosting account were allowed")
+except sqlite3.IntegrityError:
+    pass
+# A second subscription is allowed once the first is terminal.
+db.execute("UPDATE subscriptions SET status='CANCELLED', cancelled_at=datetime('now') WHERE id='sub-a'")
+db.execute("""INSERT INTO subscriptions(id,organization_id,hosting_account_id,plan_id,status,billing_period,
+              current_period_start,current_period_end)
+              VALUES ('sub-a3','org-a','account-a','plan-a','ACTIVE','monthly',datetime('now'),datetime('now','+1 month'))""")
+# Subscription status CHECK constraint.
+try:
+    db.execute("UPDATE subscriptions SET status='INVALID' WHERE id='sub-a3'")
+    raise SystemExit("subscriptions.status CHECK constraint was not enforced")
+except sqlite3.IntegrityError:
+    pass
+# Invoices: unique sequential numbers per organization.
+db.execute("INSERT INTO invoice_counters(organization_id,last_number) VALUES ('org-a',0)")
+db.execute("""INSERT INTO invoices(id,organization_id,subscription_id,invoice_number,amount_sar_minor,status,billing_period)
+              VALUES ('inv-a','org-a','sub-a3','INV-2026-000001',1500,'OPEN','monthly')""")
+try:
+    db.execute("""INSERT INTO invoices(id,organization_id,subscription_id,invoice_number,amount_sar_minor,status,billing_period)
+                  VALUES ('inv-a-dup','org-a','sub-a3','INV-2026-000001',1500,'OPEN','monthly')""")
+    raise SystemExit("invoices.invoice_number UNIQUE constraint was not enforced")
+except sqlite3.IntegrityError:
+    pass
+# Webhook dedup ledger.
+db.execute("INSERT INTO billing_webhook_events(id,provider,event_id) VALUES ('wh-a','stripe','evt-1')")
+try:
+    db.execute("INSERT INTO billing_webhook_events(id,provider,event_id) VALUES ('wh-a2','stripe','evt-1')")
+    raise SystemExit("billing_webhook_events UNIQUE(provider, event_id) was not enforced")
+except sqlite3.IntegrityError:
+    pass
+# Email hosting: unique mailbox addresses and per-org domain uniqueness.
+db.execute("INSERT INTO email_domains(id,organization_id,hosting_account_id,domain) VALUES ('ed-a','org-a','account-a','mail.example.test')")
+db.execute("INSERT INTO email_mailboxes(id,organization_id,email_domain_id,address,quota_mb) VALUES ('em-a','org-a','ed-a','hello@mail.example.test',1024)")
+try:
+    db.execute("INSERT INTO email_mailboxes(id,organization_id,email_domain_id,address,quota_mb) VALUES ('em-a2','org-a','ed-a','hello@mail.example.test',1024)")
+    raise SystemExit("email_mailboxes.address UNIQUE constraint was not enforced")
+except sqlite3.IntegrityError:
+    pass
+try:
+    db.execute("INSERT INTO email_mailboxes(id,organization_id,email_domain_id,address,quota_mb) VALUES ('em-a3','org-a','ed-a','tiny@mail.example.test',64)")
+    raise SystemExit("email_mailboxes.quota_mb CHECK constraint was not enforced")
+except sqlite3.IntegrityError:
+    pass
+
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
 print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, and foreign keys verified.")

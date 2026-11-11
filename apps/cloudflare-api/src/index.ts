@@ -30,6 +30,11 @@ type Bindings = {
   DASHBOARD_URL?: string;
   APPLICATION_NODE_OPERATOR_TOKEN?: string;
   MFA_ENCRYPTION_KEY?: string;
+  PAYMENT_WEBHOOK_SECRET?: string;
+  EMAIL_PROVIDER?: string;
+  EMAIL_PROVIDER_API_URL?: string;
+  EMAIL_PROVIDER_API_TOKEN?: string;
+  EMAIL_MAIL_HOST?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -382,6 +387,15 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/audit-logs" ||
     path === "/v1/sessions" || path.startsWith("/v1/sessions/") ||
     path.startsWith("/v1/organizations/") ||
+    // Subscriptions, invoices, and email hosting are managed by organization
+    // OWNER/ADMIN as well as platform staff; each route enforces roles
+    // internally (see the organization-administration and billing sections).
+    path === "/v1/subscriptions" || path.startsWith("/v1/subscriptions/") ||
+    path === "/v1/invoices" || path.startsWith("/v1/invoices/") ||
+    path.startsWith("/v1/email/") ||
+    // Payment-provider webhooks authenticate with an HMAC signature header,
+    // not a session; the handler rejects unsigned or stale requests.
+    path.startsWith("/v1/billing/webhooks/") ||
     path === "/v1/github/callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
@@ -2202,6 +2216,1124 @@ app.post("/v1/platform/payment-orders/:id/review", async (c) => {
   return c.json({reviewed:true,status:decision,message:decision==="APPROVED"?"Payment approved. Hosting provisioning must now be completed from the hosting-account workflow.":"Payment rejected. The customer can submit a corrected receipt."});
 });
 
+// ---------------------------------------------------------------------------
+// Subscriptions, invoices, and billing operations.
+//
+// Design rules:
+//   - No fabricated payment success. Invoices are marked PAID only by an
+//     explicit admin renewal record (bank transfer with reference) or a
+//     signature-verified provider webhook.
+//   - Idempotency: invoice creation is keyed by payment_order_ref /
+//     provider_ref / an explicit client idempotency key; webhook events are
+//     deduplicated through billing_webhook_events; live-subscription
+//     uniqueness is enforced by a partial UNIQUE index.
+//   - Plan changes validate current resource usage against the target
+//     plan's quotas; downgrades that would violate usage are rejected with
+//     409 and a violation list instead of silently breaking accounts.
+//   - Expiration is lazy (evaluated on read) plus a cron sweep so no
+//     background job is required to observe EXPIRED state.
+// ---------------------------------------------------------------------------
+
+const BILLING_PERIOD_MONTHS: Record<string, number> = { monthly: 1, yearly: 12 };
+const RETRYABLE_JOB_OPERATIONS = new Set([
+  "ADD_DOMAIN", "REMOVE_DOMAIN", "CREATE_DATABASE", "CREATE_DATABASE_USER",
+  "REVOKE_DATABASE_USER", "RESET_DATABASE_USER_PASSWORD", "UPDATE_PHP_POOL",
+  "SUSPEND_HOSTING_ACCOUNT", "REACTIVATE_HOSTING_ACCOUNT",
+  "CREATE_BACKUP", "DELETE_BACKUP",
+]);
+
+type SubscriptionRow = {
+  id: string; organizationId: string; hostingAccountId: string | null;
+  planId: string; status: string; billingPeriod: string; provider: string;
+  amountSarMinor: number | null; currentPeriodStart: string | null;
+  currentPeriodEnd: string | null; trialEnd: string | null;
+  cancelAtPeriodEnd: number; cancelledAt: string | null; suspendedAt: string | null;
+};
+
+// expireDueSubscriptions transitions ACTIVE/TRIALING subscriptions whose
+// current_period_end has passed to EXPIRED (or to CANCELLED when a
+// cancellation was scheduled at period end) and records the events. Used by
+// both the lazy read path and the cron sweep. Returns the number changed.
+async function expireDueSubscriptions(db: D1Database): Promise<number> {
+  const now = new Date().toISOString();
+  const due = await db.prepare(
+    `SELECT id, organization_id, status, cancel_at_period_end FROM subscriptions
+     WHERE status IN ('TRIALING','ACTIVE')
+       AND current_period_end IS NOT NULL AND current_period_end < ?`,
+  ).bind(now).all<{ id: string; organization_id: string; status: string; cancel_at_period_end: number }>();
+  const rows = due.results ?? [];
+  let changed = 0;
+  for (const row of rows) {
+    const nextStatus = row.cancel_at_period_end === 1 ? "CANCELLED" : "EXPIRED";
+    const result = await db.prepare(
+      `UPDATE subscriptions SET status = ?, cancelled_at = CASE WHEN ? = 'CANCELLED' THEN ? ELSE cancelled_at END,
+         updated_at = ? WHERE id = ? AND status IN ('TRIALING','ACTIVE')`,
+    ).bind(nextStatus, nextStatus, now, now, row.id).run();
+    if ((result.meta?.changes ?? 0) === 1) {
+      changed += 1;
+      await db.prepare(
+        "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, metadata) VALUES (?, ?, ?, ?, ?)",
+      ).bind(crypto.randomUUID(), row.id, row.organization_id, nextStatus === "CANCELLED" ? "cancelled" : "expired", JSON.stringify({ reason: "period_ended" })).run();
+    }
+  }
+  return changed;
+}
+
+// appendSubscriptionEvent records an auditable subscription transition.
+// (Retained as the single definition point for event metadata shapes.)
+async function appendSubscriptionEvent(
+  db: D1Database, subscriptionId: string, organizationId: string | null,
+  eventType: string, actorUserId: string | null, metadata: Record<string, unknown>,
+) {
+  await db.prepare(
+    "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, ?, ?, ?)",
+  ).bind(crypto.randomUUID(), subscriptionId, organizationId, eventType, actorUserId, JSON.stringify(metadata)).run();
+}
+void appendSubscriptionEvent;
+
+// nextInvoiceNumber allocates the next sequential invoice number for an
+// organization through the counter table. UPDATE ... RETURNING performs an
+// atomic increment; the first call seeds the counter at 0 via an idempotent
+// INSERT so the first invoice number is 1. The UNIQUE invoice_number
+// constraint is the final guard against a raced allocation.
+async function nextInvoiceNumber(db: D1Database, organizationId: string): Promise<string> {
+  let row = await db.prepare(
+    `UPDATE invoice_counters SET last_number = last_number + 1 WHERE organization_id = ?
+     RETURNING last_number`,
+  ).bind(organizationId).first<{ last_number: number }>();
+  if (!row) {
+    await db.prepare(
+      "INSERT INTO invoice_counters (organization_id, last_number) VALUES (?, 0) ON CONFLICT(organization_id) DO NOTHING",
+    ).bind(organizationId).run();
+    row = await db.prepare(
+      `UPDATE invoice_counters SET last_number = last_number + 1 WHERE organization_id = ?
+       RETURNING last_number`,
+    ).bind(organizationId).first<{ last_number: number }>();
+  }
+  const value = row?.last_number ?? 1;
+  return `INV-${new Date().getUTCFullYear()}-${String(value).padStart(6, "0")}`;
+}
+
+// Subscription inventory. Platform admins see every subscription; the org
+// OWNER/ADMIN/BILLING see their own workspace's subscriptions.
+app.get("/v1/subscriptions", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  await expireDueSubscriptions(c.env.DB).catch(() => 0);
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  const orgFilter = isPlatformAdmin ? c.req.query("organizationId") : identity.organizationId;
+  const status = c.req.query("status");
+  const conditions: string[] = [];
+  const binds: (string)[] = [];
+  if (!isPlatformAdmin) conditions.push("s.organization_id = ?");
+  else if (orgFilter) conditions.push("s.organization_id = ?");
+  if (orgFilter) binds.push(orgFilter);
+  if (status && /^[A-Z_]{3,20}$/.test(status)) { conditions.push("s.status = ?"); binds.push(status); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await c.env.DB.prepare(
+    `SELECT s.id, s.organization_id AS organizationId, o.name AS organizationName,
+            s.hosting_account_id AS hostingAccountId, a.username AS accountUsername,
+            a.primary_domain AS primaryDomain,
+            s.plan_id AS planId, p.name AS planName,
+            s.status, s.billing_period AS billingPeriod, s.provider,
+            s.amount_sar_minor AS amountSarMinor,
+            s.current_period_start AS currentPeriodStart, s.current_period_end AS currentPeriodEnd,
+            s.trial_end AS trialEnd, s.cancel_at_period_end AS cancelAtPeriodEnd,
+            s.cancelled_at AS cancelledAt, s.suspended_at AS suspendedAt,
+            s.created_at AS createdAt,
+            CASE WHEN s.status IN ('ACTIVE','TRIALING') AND s.current_period_end < datetime('now') THEN 1 ELSE 0 END AS periodOverdue
+     FROM subscriptions s
+     JOIN organizations o ON o.id = s.organization_id
+     JOIN hosting_plans p ON p.id = s.plan_id
+     LEFT JOIN hosting_accounts a ON a.id = s.hosting_account_id
+     ${where} ORDER BY s.created_at DESC LIMIT 200`,
+  ).bind(...binds).all();
+  return c.json({ subscriptions: result.results ?? [] });
+});
+
+// Create a subscription for a hosting account. Platform admin only. The
+// partial UNIQUE index rejects a second live subscription for the same
+// account; period bounds and trial windows are validated server-side.
+app.post("/v1/subscriptions", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const hostingAccountId = typeof input.hostingAccountId === "string" ? input.hostingAccountId : "";
+  const planId = typeof input.planId === "string" ? input.planId : "";
+  const billingPeriod = input.billingPeriod === "yearly" ? "yearly" : "monthly";
+  const trialDays = input.trialDays === undefined ? 0 : Number(input.trialDays);
+  const amountSarMinor = input.amountSarMinor == null || input.amountSarMinor === "" ? null : Number(input.amountSarMinor);
+  if (!/^[0-9a-f-]{36}$/i.test(hostingAccountId)) return c.json({ message: "A valid hosting account is required." }, 400);
+  if (!/^[0-9a-f-]{36}$/i.test(planId)) return c.json({ message: "A valid hosting plan is required." }, 400);
+  if (!Number.isInteger(trialDays) || trialDays < 0 || trialDays > 90) return c.json({ message: "Trial days must be between 0 and 90." }, 400);
+  if (amountSarMinor !== null && (!Number.isSafeInteger(amountSarMinor) || amountSarMinor < 0 || amountSarMinor > 100000000)) {
+    return c.json({ message: "Amount must be between SAR 0.00 and SAR 1,000,000.00." }, 400);
+  }
+  const account = await c.env.DB.prepare(
+    `SELECT a.id, a.organization_id AS organizationId, a.status, p.id AS planId
+     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.id = ? LIMIT 1`,
+  ).bind(hostingAccountId).first<{ id: string; organizationId: string; status: string; planId: string }>();
+  if (!account) return c.json({ message: "Hosting account not found." }, 404);
+  if (account.status !== "ACTIVE") return c.json({ message: "Subscriptions can only be created for active hosting accounts." }, 409);
+  const plan = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, active, price_sar_minor AS priceSarMinor, billing_period AS billingPeriod FROM hosting_plans WHERE id = ? LIMIT 1",
+  ).bind(planId).first<{ id: string; organizationId: string; active: number; priceSarMinor: number | null; billingPeriod: string }>();
+  if (!plan) return c.json({ message: "Hosting plan not found." }, 404);
+  if (plan.organizationId !== account.organizationId) return c.json({ message: "The plan must belong to the same workspace as the hosting account." }, 400);
+  if (!plan.active) return c.json({ message: "This plan is inactive. Activate it before subscribing." }, 409);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const periodMonths = BILLING_PERIOD_MONTHS[billingPeriod];
+  const periodEnd = addMonthsClamped(now, periodMonths);
+  const trialEnd = trialDays > 0 ? new Date(now.getTime() + trialDays * 86400_000).toISOString() : null;
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO subscriptions
+         (id, organization_id, hosting_account_id, plan_id, status, billing_period, provider, amount_sar_minor,
+          current_period_start, current_period_end, trial_end)
+         VALUES (?, ?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?)`,
+      ).bind(id, account.organizationId, account.id, planId, trialDays > 0 ? "TRIALING" : "ACTIVE", billingPeriod,
+        amountSarMinor ?? plan.priceSarMinor, nowIso, periodEnd.toISOString(), trialEnd),
+      c.env.DB.prepare(
+        "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'created', ?, ?)",
+      ).bind(crypto.randomUUID(), id, account.organizationId, identity.id,
+        JSON.stringify({ hostingAccountId: account.id, planId, billingPeriod, trialDays })),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.created', 'subscription', ?, ?)",
+      ).bind(crypto.randomUUID(), account.organizationId, identity.id, id, JSON.stringify({ hostingAccountId: account.id, planId })),
+    ]);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: "This hosting account already has a live subscription." }, 409);
+    }
+    return c.json({ message: "Unable to create the subscription." }, 500);
+  }
+  return c.json({ subscription: { id, status: trialDays > 0 ? "TRIALING" : "ACTIVE", currentPeriodEnd: periodEnd.toISOString(), trialEnd } }, 201);
+});
+
+// Record a renewal payment: extends the period, writes a PAID invoice, and
+// appends audited events. Idempotent per idempotencyKey — replaying the same
+// key returns the original invoice instead of double-charging the period.
+app.post("/v1/subscriptions/:id/renew", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const idempotencyKey = typeof input.idempotencyKey === "string" && input.idempotencyKey.length <= 128 ? input.idempotencyKey : "";
+  const transferReference = typeof input.transferReference === "string" ? input.transferReference.trim().slice(0, 120) : "";
+  const amountSarMinor = input.amountSarMinor == null || input.amountSarMinor === "" ? null : Number(input.amountSarMinor);
+  if (amountSarMinor !== null && (!Number.isSafeInteger(amountSarMinor) || amountSarMinor < 100 || amountSarMinor > 100000000)) {
+    return c.json({ message: "Amount must be between SAR 1.00 and SAR 1,000,000.00." }, 400);
+  }
+  if (!idempotencyKey && !transferReference) {
+    return c.json({ message: "Provide an idempotency key or a bank transfer reference so this payment is traceable and cannot be double-applied." }, 400);
+  }
+  const dedupeRef = idempotencyKey || `bank-transfer:${transferReference}`;
+  const subscription = await c.env.DB.prepare(
+    `SELECT id, organization_id AS organizationId, hosting_account_id AS hostingAccountId,
+            plan_id AS planId, status, billing_period AS billingPeriod, amount_sar_minor AS amountSarMinor,
+            current_period_end AS currentPeriodEnd
+     FROM subscriptions WHERE id = ? LIMIT 1`,
+  ).bind(c.req.param("id")).first<SubscriptionRow>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  if (!["ACTIVE", "TRIALING", "PAST_DUE", "SUSPENDED", "EXPIRED"].includes(subscription.status)) {
+    return c.json({ message: "A cancelled subscription cannot be renewed. Create a new subscription instead." }, 409);
+  }
+  // Idempotency: an invoice already exists for this payment reference.
+  const existingInvoice = await c.env.DB.prepare(
+    "SELECT id, invoice_number AS invoiceNumber, status, paid_at AS paidAt FROM invoices WHERE payment_order_ref = ? LIMIT 1",
+  ).bind(dedupeRef).first<{ id: string; invoiceNumber: string; status: string; paidAt: string | null }>();
+  if (existingInvoice) {
+    return c.json({ duplicate: true, invoice: existingInvoice, message: "This payment was already recorded." });
+  }
+  await expireDueSubscriptions(c.env.DB).catch(() => 0);
+  const fresh = await c.env.DB.prepare(
+    "SELECT status, current_period_end AS currentPeriodEnd, amount_sar_minor AS amountSarMinor, billing_period AS billingPeriod FROM subscriptions WHERE id = ? LIMIT 1",
+  ).bind(subscription.id).first<{ status: string; currentPeriodEnd: string | null; amountSarMinor: number | null; billingPeriod: string }>();
+  if (!fresh) return c.json({ message: "Subscription not found." }, 404);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  // Renewals stack on the existing period when it has not ended yet, and on
+  // "now" when it has, so no paid time is lost or double-counted.
+  const base = fresh.currentPeriodEnd && fresh.currentPeriodEnd > nowIso ? new Date(fresh.currentPeriodEnd) : now;
+  const periodMonths = BILLING_PERIOD_MONTHS[fresh.billingPeriod] ?? 1;
+  const newPeriodEnd = addMonthsClamped(base, periodMonths);
+  const invoiceAmount = amountSarMinor ?? fresh.amountSarMinor;
+  if (invoiceAmount === null) return c.json({ message: "Set an amount or configure a plan price before recording a renewal." }, 400);
+  const invoiceNumber = await nextInvoiceNumber(c.env.DB, subscription.organizationId);
+  const invoiceId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `UPDATE subscriptions SET status = 'ACTIVE', current_period_start = ?, current_period_end = ?,
+         suspended_at = NULL, updated_at = ? WHERE id = ? AND status IN ('ACTIVE','TRIALING','PAST_DUE','SUSPENDED','EXPIRED')`,
+    ).bind(nowIso, newPeriodEnd.toISOString(), nowIso, subscription.id),
+    c.env.DB.prepare(
+      `INSERT INTO invoices
+       (id, organization_id, subscription_id, hosting_account_id, invoice_number, amount_sar_minor,
+        status, billing_period, period_start, period_end, due_date, paid_at, payment_method, payment_order_ref)
+       VALUES (?, ?, ?, ?, ?, ?, 'PAID', ?, ?, ?, ?, ?, 'bank_transfer', ?)`,
+    ).bind(invoiceId, subscription.organizationId, subscription.id, subscription.hostingAccountId,
+      invoiceNumber, invoiceAmount, fresh.billingPeriod, nowIso, newPeriodEnd.toISOString(),
+      newPeriodEnd.toISOString(), nowIso, dedupeRef),
+    c.env.DB.prepare(
+      "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'renewed', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id,
+      JSON.stringify({ invoiceId, invoiceNumber, newPeriodEnd: newPeriodEnd.toISOString(), dedupeRef })),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.renewed', 'subscription', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id,
+      JSON.stringify({ invoiceId, invoiceNumber, transferReference })),
+  ]);
+  return c.json({ invoice: { id: invoiceId, invoiceNumber, status: "PAID", paidAt: nowIso, amountSarMinor: invoiceAmount }, currentPeriodEnd: newPeriodEnd.toISOString() }, 201);
+});
+
+// Change the plan of a live subscription. Usage is validated against the
+// target plan before the change; violations are returned, not applied.
+app.post("/v1/subscriptions/:id/plan", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const planId = typeof input.planId === "string" ? input.planId : "";
+  if (!/^[0-9a-f-]{36}$/i.test(planId)) return c.json({ message: "A valid hosting plan is required." }, 400);
+  const subscription = await c.env.DB.prepare(
+    `SELECT s.id, s.organization_id AS organizationId, s.hosting_account_id AS hostingAccountId, s.status, s.plan_id AS planId
+     FROM subscriptions s WHERE s.id = ? LIMIT 1`,
+  ).bind(c.req.param("id")).first<{ id: string; organizationId: string; hostingAccountId: string | null; status: string; planId: string }>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  if (!["ACTIVE", "TRIALING", "PAST_DUE"].includes(subscription.status)) {
+    return c.json({ message: "Only a live subscription can change plan." }, 409);
+  }
+  if (subscription.planId === planId) return c.json({ success: true, message: "Subscription is already on that plan." });
+  const targetPlan = await c.env.DB.prepare(
+    `SELECT id, name, active, disk_limit_bytes AS diskLimitBytes, website_limit AS websiteLimit,
+            database_limit AS databaseLimit, mailbox_limit AS mailboxLimit
+     FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1`,
+  ).bind(planId, subscription.organizationId).first<{ id: string; name: string; active: number; diskLimitBytes: number; websiteLimit: number; databaseLimit: number; mailboxLimit: number }>();
+  if (!targetPlan) return c.json({ message: "Hosting plan not found in this workspace." }, 404);
+  if (!targetPlan.active) return c.json({ message: "The target plan is inactive." }, 409);
+  if (subscription.hostingAccountId) {
+    const usage = await c.env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM domains d WHERE d.hosting_account_id = ? AND d.status != 'DELETED') AS domainCount,
+         (SELECT COUNT(*) FROM hosting_databases db WHERE db.hosting_account_id = ? AND db.status != 'DELETED') AS databaseCount`,
+    ).bind(subscription.hostingAccountId, subscription.hostingAccountId).first<{ domainCount: number; databaseCount: number }>();
+    const violations: string[] = [];
+    if (usage) {
+      if (usage.domainCount > targetPlan.websiteLimit) violations.push(`Websites in use (${usage.domainCount}) exceed the target plan limit (${targetPlan.websiteLimit}).`);
+      if (usage.databaseCount > targetPlan.databaseLimit) violations.push(`Databases in use (${usage.databaseCount}) exceed the target plan limit (${targetPlan.databaseLimit}).`);
+    }
+    if (violations.length > 0) {
+      return c.json({ message: "Plan change rejected: current usage does not fit the target plan.", violations }, 409);
+    }
+  }
+  const nowIso = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE subscriptions SET plan_id = ?, updated_at = ? WHERE id = ?").bind(planId, nowIso, subscription.id),
+    c.env.DB.prepare(
+      "UPDATE hosting_accounts SET plan_id = ?, updated_at = ? WHERE id = ? AND organization_id = ?",
+    ).bind(planId, nowIso, subscription.hostingAccountId, subscription.organizationId),
+    c.env.DB.prepare(
+      "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'plan_changed', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id,
+      JSON.stringify({ previousPlanId: subscription.planId, newPlanId: planId })),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.plan_changed', 'subscription', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id,
+      JSON.stringify({ previousPlanId: subscription.planId, newPlanId: planId })),
+  ]);
+  return c.json({ success: true, planId, message: "Subscription plan changed." });
+});
+
+// Cancel a subscription. cancelAtPeriodEnd keeps service live until the
+// period ends (the expiry sweep converts it to CANCELLED); immediate cancel
+// ends it now. Subscription owners (org OWNER) and platform admins only.
+app.post("/v1/subscriptions/:id/cancel", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { input = {}; }
+  const immediate = input.immediate === true;
+  const subscription = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, status FROM subscriptions WHERE id = ? LIMIT 1",
+  ).bind(c.req.param("id")).first<{ id: string; organizationId: string; status: string }>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  if (!isPlatformAdmin) {
+    const membership = await resolveOrgAccess(c.env.DB, identity.id, subscription.organizationId, null);
+    if (membership.role !== "OWNER") return c.json({ message: "Organization owner or platform administrator access required." }, 403);
+  }
+  if (!["ACTIVE", "TRIALING", "PAST_DUE"].includes(subscription.status)) {
+    return c.json({ message: "Only a live subscription can be cancelled." }, 409);
+  }
+  const nowIso = new Date().toISOString();
+  if (immediate) {
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE subscriptions SET status = 'CANCELLED', cancel_at_period_end = 0, cancelled_at = ?, updated_at = ? WHERE id = ?").bind(nowIso, nowIso, subscription.id),
+      c.env.DB.prepare(
+        "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'cancelled', ?, ?)",
+      ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id, JSON.stringify({ immediate: true })),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.cancelled', 'subscription', ?, ?)",
+      ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id, JSON.stringify({ immediate: true })),
+    ]);
+    return c.json({ success: true, status: "CANCELLED", message: "Subscription cancelled immediately." });
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE subscriptions SET cancel_at_period_end = 1, updated_at = ? WHERE id = ?").bind(nowIso, subscription.id),
+    c.env.DB.prepare(
+      "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'cancel_scheduled', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id, JSON.stringify({})),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.cancel_scheduled', 'subscription', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id, JSON.stringify({})),
+  ]);
+  return c.json({ success: true, cancelAtPeriodEnd: 1, message: "Cancellation scheduled for the end of the current period." });
+});
+
+// Suspend / reactivate. Platform admin only. Suspension is the manual
+// counterpart of non-payment handling; reactivation restores service.
+app.post("/v1/subscriptions/:id/suspend", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const subscription = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, status FROM subscriptions WHERE id = ? LIMIT 1",
+  ).bind(c.req.param("id")).first<{ id: string; organizationId: string; status: string }>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  if (!["ACTIVE", "TRIALING", "PAST_DUE"].includes(subscription.status)) {
+    return c.json({ message: "Only a live subscription can be suspended." }, 409);
+  }
+  const nowIso = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE subscriptions SET status = 'SUSPENDED', suspended_at = ?, updated_at = ? WHERE id = ? AND status IN ('ACTIVE','TRIALING','PAST_DUE')").bind(nowIso, nowIso, subscription.id),
+    c.env.DB.prepare(
+      "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'suspended', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id, JSON.stringify({})),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.suspended', 'subscription', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id, JSON.stringify({})),
+  ]);
+  return c.json({ success: true, status: "SUSPENDED" });
+});
+
+app.post("/v1/subscriptions/:id/reactivate", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const subscription = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, status, current_period_end AS currentPeriodEnd FROM subscriptions WHERE id = ? LIMIT 1",
+  ).bind(c.req.param("id")).first<{ id: string; organizationId: string; status: string; currentPeriodEnd: string | null }>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  if (subscription.status !== "SUSPENDED") return c.json({ message: "Only a suspended subscription can be reactivated." }, 409);
+  const nowIso = new Date().toISOString();
+  const nextStatus = subscription.currentPeriodEnd && subscription.currentPeriodEnd > nowIso ? "ACTIVE" : "PAST_DUE";
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE subscriptions SET status = ?, suspended_at = NULL, updated_at = ? WHERE id = ? AND status = 'SUSPENDED'").bind(nextStatus, nowIso, subscription.id),
+    c.env.DB.prepare(
+      "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, actor_user_id, metadata) VALUES (?, ?, ?, 'reactivated', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.id, subscription.organizationId, identity.id, JSON.stringify({ nextStatus })),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'subscription.reactivated', 'subscription', ?, ?)",
+    ).bind(crypto.randomUUID(), subscription.organizationId, identity.id, subscription.id, JSON.stringify({ nextStatus })),
+  ]);
+  return c.json({ success: true, status: nextStatus });
+});
+
+// Full subscription detail including the event history and invoices.
+app.get("/v1/subscriptions/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const subscription = await c.env.DB.prepare(
+    `SELECT s.id, s.organization_id AS organizationId, o.name AS organizationName,
+            s.hosting_account_id AS hostingAccountId, a.username AS accountUsername,
+            s.plan_id AS planId, p.name AS planName, s.status, s.billing_period AS billingPeriod,
+            s.provider, s.amount_sar_minor AS amountSarMinor,
+            s.current_period_start AS currentPeriodStart, s.current_period_end AS currentPeriodEnd,
+            s.trial_end AS trialEnd, s.cancel_at_period_end AS cancelAtPeriodEnd,
+            s.cancelled_at AS cancelledAt, s.suspended_at AS suspendedAt, s.created_at AS createdAt
+     FROM subscriptions s
+     JOIN organizations o ON o.id = s.organization_id
+     JOIN hosting_plans p ON p.id = s.plan_id
+     LEFT JOIN hosting_accounts a ON a.id = s.hosting_account_id
+     WHERE s.id = ? LIMIT 1`,
+  ).bind(c.req.param("id")).first<Record<string, unknown>>();
+  if (!subscription) return c.json({ message: "Subscription not found." }, 404);
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  if (!isPlatformAdmin) {
+    const membership = await resolveOrgAccess(c.env.DB, identity.id, String(subscription.organizationId), null);
+    if (!membership.role) return c.json({ message: "Subscription not found." }, 404);
+  }
+  await expireDueSubscriptions(c.env.DB).catch(() => 0);
+  const events = await c.env.DB.prepare(
+    `SELECT e.id, e.event_type AS eventType, e.metadata, e.created_at AS createdAt, u.email AS actorEmail
+     FROM subscription_events e LEFT JOIN users u ON u.id = e.actor_user_id
+     WHERE e.subscription_id = ? ORDER BY e.created_at DESC LIMIT 100`,
+  ).bind(subscription.id as string).all();
+  const invoiceRows = await c.env.DB.prepare(
+    `SELECT id, invoice_number AS invoiceNumber, amount_sar_minor AS amountSarMinor, status,
+            billing_period AS billingPeriod, period_start AS periodStart, period_end AS periodEnd,
+            paid_at AS paidAt, payment_method AS paymentMethod, created_at AS createdAt
+     FROM invoices WHERE subscription_id = ? ORDER BY created_at DESC LIMIT 100`,
+  ).bind(subscription.id as string).all();
+  return c.json({ subscription, events: events.results ?? [], invoices: invoiceRows.results ?? [] });
+});
+
+// Invoice inventory. Platform admins see all invoices (optional org filter);
+// org OWNER/ADMIN/BILLING see their own.
+app.get("/v1/invoices", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  const orgFilter = isPlatformAdmin ? c.req.query("organizationId") : identity.organizationId;
+  const conditions: string[] = [];
+  const binds: string[] = [];
+  if (orgFilter) { conditions.push("i.organization_id = ?"); binds.push(orgFilter); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await c.env.DB.prepare(
+    `SELECT i.id, i.organization_id AS organizationId, o.name AS organizationName,
+            i.subscription_id AS subscriptionId, i.invoice_number AS invoiceNumber,
+            i.amount_sar_minor AS amountSarMinor, i.status, i.billing_period AS billingPeriod,
+            i.period_start AS periodStart, i.period_end AS periodEnd, i.due_date AS dueDate,
+            i.paid_at AS paidAt, i.payment_method AS paymentMethod, i.notes, i.created_at AS createdAt
+     FROM invoices i JOIN organizations o ON o.id = i.organization_id
+     ${where} ORDER BY i.created_at DESC LIMIT 200`,
+  ).bind(...binds).all();
+  return c.json({ invoices: result.results ?? [] });
+});
+
+// Mark an invoice PAID or VOID manually (platform admin). Auditable and
+// idempotent: marking an already-PAID invoice PAID again is a no-op.
+app.post("/v1/invoices/:id/settle", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const decision = input.status === "PAID" ? "PAID" : input.status === "VOID" ? "VOID" : null;
+  const notes = typeof input.notes === "string" ? input.notes.trim().slice(0, 500) : "";
+  if (!decision) return c.json({ message: "Status must be PAID or VOID." }, 400);
+  const invoice = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, subscription_id AS subscriptionId, status FROM invoices WHERE id = ? LIMIT 1",
+  ).bind(c.req.param("id")).first<{ id: string; organizationId: string; subscriptionId: string | null; status: string }>();
+  if (!invoice) return c.json({ message: "Invoice not found." }, 404);
+  if (invoice.status === decision) return c.json({ success: true, message: "Invoice already has that status." });
+  const nowIso = new Date().toISOString();
+  const statements = [
+    c.env.DB.prepare(
+      `UPDATE invoices SET status = ?, paid_at = ${decision === "PAID" ? "?" : "paid_at"}, notes = ?, updated_at = ? WHERE id = ? AND status != ?`,
+    ).bind(...(decision === "PAID" ? [decision, nowIso, notes, nowIso, invoice.id, decision] as const : [decision, notes, nowIso, invoice.id, decision] as const)),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'invoice.settled', 'invoice', ?, ?)",
+    ).bind(crypto.randomUUID(), invoice.organizationId, identity.id, invoice.id, JSON.stringify({ status: decision, notes })),
+  ];
+  await c.env.DB.batch(statements as unknown as Parameters<typeof c.env.DB.batch>[0]);
+  return c.json({ success: true, status: decision });
+});
+
+// Payment-provider webhook receiver. Verifies an HMAC-SHA256 signature over
+// the raw body (X-Nexora-Signature: t=<unix-seconds>,v1=<hex>), rejects
+// stale timestamps (replay), deduplicates event IDs, and only then
+// reconciles the referenced invoice. Requires PAYMENT_WEBHOOK_SECRET; when
+// it is not configured the endpoint answers 503 instead of accepting
+// unsigned events.
+app.post("/v1/billing/webhooks/:provider", async (c) => {
+  const provider = c.req.param("provider");
+  if (!/^[a-z0-9_-]{2,32}$/.test(provider)) return c.json({ message: "Invalid provider." }, 400);
+  const secret = c.env.PAYMENT_WEBHOOK_SECRET ?? "";
+  if (secret.length < 32) {
+    return c.json({ message: "Automated payment webhooks are not configured. Set the PAYMENT_WEBHOOK_SECRET Worker secret (32+ characters) to enable provider reconciliation." }, 503);
+  }
+  const rawBody = await c.req.text();
+  const signatureHeader = c.req.header("x-nexora-signature") ?? "";
+  const match = /^t=(\d{10}),v1=([a-f0-9]{64})$/.exec(signatureHeader);
+  if (!match) return c.json({ message: "Missing or malformed signature header." }, 401);
+  const timestamp = Number(match[1]);
+  if (!Number.isSafeInteger(timestamp) || Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 300) {
+    return c.json({ message: "Signature timestamp is outside the acceptance window." }, 401);
+  }
+  const expected = await hmacSha256(secret, `${match[1]}.${rawBody}`);
+  if (!constantTimeEqual(expected, match[2])) {
+    return c.json({ message: "Signature verification failed." }, 401);
+  }
+  let payload: { eventId?: unknown; invoiceRef?: unknown; outcome?: unknown };
+  try { payload = JSON.parse(rawBody) as typeof payload; } catch { return c.json({ message: "Invalid JSON payload." }, 400); }
+  const eventId = typeof payload.eventId === "string" && payload.eventId.length <= 128 ? payload.eventId : "";
+  const invoiceRef = typeof payload.invoiceRef === "string" && payload.invoiceRef.length <= 128 ? payload.invoiceRef : "";
+  const outcome = payload.outcome === "paid" ? "paid" : payload.outcome === "failed" ? "failed" : null;
+  if (!eventId || !invoiceRef || !outcome) return c.json({ message: "Payload must include eventId, invoiceRef, and outcome." }, 400);
+  // Deduplicate: the UNIQUE(provider, event_id) insert is the gate. A
+  // duplicate insert (provider redelivery or replay) is acknowledged as a
+  // duplicate instead of reprocessing the payment.
+  const eventIdInsert = c.env.DB.prepare(
+    `INSERT INTO billing_webhook_events (id, provider, event_id, payload_digest, received_at, processed_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).bind(crypto.randomUUID(), provider, eventId, await sha256(rawBody), new Date().toISOString(),
+    outcome === "paid" ? null : new Date().toISOString());
+  try {
+    await eventIdInsert.run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ duplicate: true, message: "Event already processed." });
+    }
+    return c.json({ message: "Unable to record the webhook event." }, 500);
+  }
+  if (outcome !== "paid") {
+    return c.json({ received: true, processed: false, message: "Non-payment outcomes are recorded but require manual review." });
+  }
+  const invoice = await c.env.DB.prepare(
+    `SELECT id, organization_id AS organizationId, subscription_id AS subscriptionId, status, amount_sar_minor AS amountSarMinor
+     FROM invoices WHERE payment_order_ref = ? OR provider_ref = ? LIMIT 1`,
+  ).bind(invoiceRef, invoiceRef).first<{ id: string; organizationId: string; subscriptionId: string | null; status: string; amountSarMinor: number }>();
+  if (!invoice) {
+    return c.json({ received: true, processed: false, message: "No invoice matches the provided reference. Record it for manual reconciliation." }, 202);
+  }
+  if (invoice.status === "PAID") {
+    return c.json({ received: true, processed: true, duplicate: true, message: "Invoice was already paid." });
+  }
+  const nowIso = new Date().toISOString();
+  const statements = [
+    c.env.DB.prepare("UPDATE invoices SET status = 'PAID', paid_at = ?, payment_method = 'external', provider_ref = ?, updated_at = ? WHERE id = ? AND status = 'OPEN'")
+      .bind(nowIso, invoiceRef, nowIso, invoice.id),
+  ];
+  if (invoice.subscriptionId) {
+    const subscription = await c.env.DB.prepare(
+      "SELECT id, billing_period AS billingPeriod, current_period_end AS currentPeriodEnd FROM subscriptions WHERE id = ? LIMIT 1",
+    ).bind(invoice.subscriptionId).first<{ id: string; billingPeriod: string; currentPeriodEnd: string | null }>();
+    if (subscription) {
+      const base = subscription.currentPeriodEnd && subscription.currentPeriodEnd > nowIso ? new Date(subscription.currentPeriodEnd) : new Date();
+      const newPeriodEnd = addMonthsClamped(base, BILLING_PERIOD_MONTHS[subscription.billingPeriod] ?? 1);
+      statements.push(c.env.DB.prepare(
+        `UPDATE subscriptions SET status = 'ACTIVE', current_period_start = ?, current_period_end = ?, suspended_at = NULL, updated_at = ?
+         WHERE id = ? AND status IN ('ACTIVE','TRIALING','PAST_DUE','SUSPENDED','EXPIRED')`,
+      ).bind(nowIso, newPeriodEnd.toISOString(), nowIso, subscription.id));
+      statements.push(c.env.DB.prepare(
+        "INSERT INTO subscription_events (id, subscription_id, organization_id, event_type, metadata) VALUES (?, ?, ?, 'renewed', ?)",
+      ).bind(crypto.randomUUID(), subscription.id, invoice.organizationId, JSON.stringify({ via: "webhook", provider, eventId })));
+    }
+  }
+  statements.push(c.env.DB.prepare("UPDATE billing_webhook_events SET processed_at = ? WHERE provider = ? AND event_id = ?")
+    .bind(nowIso, provider, eventId));
+  statements.push(c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, NULL, 'billing.webhook_invoice_paid', 'invoice', ?, ?)",
+  ).bind(crypto.randomUUID(), invoice.organizationId, invoice.id, JSON.stringify({ provider, eventId })));
+  await c.env.DB.batch(statements as unknown as Parameters<typeof c.env.DB.batch>[0]);
+  return c.json({ received: true, processed: true });
+});
+
+// Provider configuration status. Surfaces exactly which secrets a live
+// automated payment integration requires — never fakes success.
+app.get("/v1/platform/billing/provider-status", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const webhookConfigured = (c.env.PAYMENT_WEBHOOK_SECRET ?? "").length >= 32;
+  return c.json({
+    provider: "external",
+    automatedBillingEnabled: webhookConfigured,
+    webhookEndpoint: "/v1/billing/webhooks/external",
+    requirements: webhookConfigured ? [] : [
+      "Set the PAYMENT_WEBHOOK_SECRET Worker secret (32+ characters).",
+      "Configure the provider to POST {eventId, invoiceRef, outcome} with an X-Nexora-Signature: t=<seconds>,v1=<hmac-sha256> header.",
+    ],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Email hosting module.
+//
+// IMPORTANT — what this module is and is not:
+//   - OUTBOUND transactional email (password resets, verification,
+//     incidents) is already sent through the Resend API elsewhere in the
+//     Worker. That is NOT mailbox hosting.
+//   - Mailbox hosting (IMAP/SMTP/POP3 with real mail storage) requires an
+//     external mail server. This module manages the local inventory
+//     (domains, mailboxes, quotas, forwards) and the DNS records the mail
+//     server will need, and refuses — with 503 and exact configuration
+//     requirements — to mark anything as provisioned until a mail
+//     provider is configured and confirms provisioning.
+//
+// Provider abstraction: a provider is available when EMAIL_PROVIDER is set
+// to a supported value AND its configuration is complete. 'none' (default)
+// means inventory-only mode. The MailServerApiProvider is the first
+// implementation: a generic authenticated REST bridge the operator can
+// point at their own mailserver admin API (e.g. a Dovecot/Postfix admin
+// service, mailcow, or a Stalwart instance) via EMAIL_PROVIDER_API_URL and
+// EMAIL_PROVIDER_API_TOKEN.
+// ---------------------------------------------------------------------------
+
+type EmailProviderConfig = {
+  kind: "none" | "mailserver-api";
+  apiBaseUrl?: string;
+  apiToken?: string;
+  requirements: string[];
+};
+
+function resolveEmailProvider(env: Bindings): EmailProviderConfig {
+  const kind = (env.EMAIL_PROVIDER ?? "none").trim().toLowerCase();
+  if (kind === "none" || kind === "") {
+    return {
+      kind: "none",
+      requirements: [
+        "Set EMAIL_PROVIDER=mailserver-api to enable mailbox provisioning.",
+        "Set EMAIL_PROVIDER_API_URL to the mail server admin API base URL.",
+        "Set EMAIL_PROVIDER_API_TOKEN to the admin API token.",
+        "Point the mail domain's MX, SPF, DKIM, and DMARC DNS records at the mail server.",
+      ],
+    };
+  }
+  if (kind === "mailserver-api") {
+    const missing: string[] = [];
+    const apiBaseUrl = env.EMAIL_PROVIDER_API_URL ?? "";
+    const apiToken = env.EMAIL_PROVIDER_API_TOKEN ?? "";
+    if (!/^https:\/\/[A-Za-z0-9._~:/-]+$/.test(apiBaseUrl)) missing.push("EMAIL_PROVIDER_API_URL must be an https:// base URL.");
+    if (apiToken.length < 16) missing.push("EMAIL_PROVIDER_API_TOKEN must be set (16+ characters).");
+    return { kind: "mailserver-api", apiBaseUrl, apiToken, requirements: missing };
+  }
+  return { kind: "none", requirements: [`Unsupported EMAIL_PROVIDER "${kind}". Supported: mailserver-api.`] };
+}
+
+async function emailProviderRequest(
+  provider: EmailProviderConfig,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<{ ok: boolean; status: number; detail: string }> {
+  if (provider.kind !== "mailserver-api" || !provider.apiBaseUrl || !provider.apiToken) {
+    return { ok: false, status: 503, detail: "Mail provider is not configured." };
+  }
+  if (!path.startsWith("/") || /[?#]/.test(path)) return { ok: false, status: 400, detail: "Invalid provider path." };
+  try {
+    const response = await fetch(provider.apiBaseUrl.replace(/\/+$/, "") + path, {
+      method,
+      headers: {
+        authorization: `Bearer ${provider.apiToken}`,
+        accept: "application/json",
+        ...(body ? { "content-type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(12000),
+    });
+    return { ok: response.ok, status: response.status, detail: response.ok ? "" : `Mail provider returned HTTP ${response.status}.` };
+  } catch (error) {
+    return { ok: false, status: 502, detail: error instanceof Error ? `Mail provider request failed: ${error.message}` : "Mail provider request failed." };
+  }
+}
+
+// Outbound notification email and hosted mailboxes are different services;
+// this endpoint reports both honestly.
+app.get("/v1/email/status", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const provider = resolveEmailProvider(c.env);
+  return c.json({
+    outboundNotification: {
+      configured: Boolean(c.env.RESEND_API_KEY && c.env.EMAIL_FROM),
+      purpose: "Transactional email only (password reset, verification, incident alerts).",
+    },
+    mailboxHosting: {
+      provider: provider.kind,
+      available: provider.kind === "mailserver-api" && provider.requirements.length === 0,
+      purpose: "Hosted IMAP/SMTP mailboxes, quotas, and forwarding rules.",
+      requirements: provider.requirements,
+      dnsRecordsRequired: [
+        { record: "MX", guidance: "Point the mail domain's MX record at the mail server host." },
+        { record: "TXT/SPF", guidance: 'v=spf1 include:<mail-server-spf-domain> ~all — authorize the mail server to send for the domain.' },
+        { record: "TXT/DKIM", guidance: "Publish the mail server's DKIM public key selector provided by the provider." },
+        { record: "TXT/DMARC", guidance: "v=DMARC1; p=quarantine; rua=mailto:<dmarc-reports@your-domain> — start in quarantine and tighten after reviewing reports." },
+      ],
+    },
+  });
+});
+
+// Email domain inventory for the caller's organization.
+app.get("/v1/email/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const result = await c.env.DB.prepare(
+    `SELECT ed.id, ed.domain, ed.status, ed.provider_status AS providerStatus,
+            ed.hosting_account_id AS hostingAccountId, ed.created_at AS createdAt,
+            (SELECT COUNT(*) FROM email_mailboxes m WHERE m.email_domain_id = ed.id AND m.status != 'DELETED') AS mailboxCount,
+            (SELECT COUNT(*) FROM email_forwards f WHERE f.email_domain_id = ed.id AND f.active = 1) AS forwardCount
+     FROM email_domains ed WHERE ed.organization_id = ? AND ed.status != 'DELETED'
+     ORDER BY ed.created_at DESC`,
+  ).bind(identity.organizationId).all();
+  return c.json({ domains: result.results ?? [] });
+});
+
+// Register an email domain for the organization. Optionally linked to a
+// hosting account whose plan mailbox_limit caps mailbox counts. In
+// inventory-only mode the domain is stored but stays provider_status
+// 'not_provisioned' — the response says so explicitly.
+app.post("/v1/email/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const domain = typeof input.domain === "string" ? input.domain.trim().toLowerCase() : "";
+  const hostingAccountId = typeof input.hostingAccountId === "string" && /^[0-9a-f-]{36}$/i.test(input.hostingAccountId) ? input.hostingAccountId : null;
+  if (!validDomain(domain)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
+  if (hostingAccountId) {
+    const account = await c.env.DB.prepare(
+      "SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? AND status = 'ACTIVE' LIMIT 1",
+    ).bind(hostingAccountId, identity.organizationId).first<{ id: string }>();
+    if (!account) return c.json({ message: "Hosting account not found or not active." }, 404);
+  }
+  const provider = resolveEmailProvider(c.env);
+  const providerAvailable = provider.kind === "mailserver-api" && provider.requirements.length === 0;
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO email_domains (id, organization_id, hosting_account_id, domain, status, provider_status)
+         VALUES (?, ?, ?, ?, 'PENDING', 'not_provisioned')`,
+      ).bind(id, identity.organizationId, hostingAccountId, domain),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_domain.registered', 'email_domain', ?, ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ domain, hostingAccountId })),
+    ]);
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return c.json({ message: "This email domain is already registered." }, 409);
+    return c.json({ message: "Unable to register the email domain." }, 500);
+  }
+  return c.json({
+    emailDomain: { id, domain, status: "PENDING", providerStatus: "not_provisioned" },
+    provisioning: providerAvailable
+      ? { available: true, message: "Mail provider configured. Provisioning will be attempted when the domain is activated." }
+      : { available: false, message: "Mail provider is not configured. The domain is recorded as a plan but is NOT provisioned on any mail server.", requirements: provider.requirements },
+  }, 201);
+});
+
+// Remove an email domain (soft delete) with its mailboxes and forwards.
+app.delete("/v1/email/domains/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const emailDomain = await c.env.DB.prepare(
+    "SELECT id, domain, status FROM email_domains WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; domain: string; status: string }>();
+  if (!emailDomain) return c.json({ message: "Email domain not found." }, 404);
+  if (emailDomain.status === "DELETED") return c.json({ message: "Email domain is already deleted." }, 409);
+  const provider = resolveEmailProvider(c.env);
+  if (provider.kind === "mailserver-api" && provider.requirements.length === 0) {
+    const result = await emailProviderRequest(provider, "DELETE", `/domains/${encodeURIComponent(emailDomain.id)}`);
+    if (!result.ok && result.status !== 404) {
+      return c.json({ message: `The mail provider refused domain removal. ${result.detail}` }, 502);
+    }
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE email_domains SET status = 'DELETED', updated_at = datetime('now') WHERE id = ? AND status != 'DELETED'").bind(emailDomain.id),
+    c.env.DB.prepare("UPDATE email_mailboxes SET status = 'DELETED', updated_at = datetime('now') WHERE email_domain_id = ? AND status != 'DELETED'").bind(emailDomain.id),
+    c.env.DB.prepare("UPDATE email_forwards SET active = 0, updated_at = datetime('now') WHERE email_domain_id = ?").bind(emailDomain.id),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_domain.deleted', 'email_domain', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, emailDomain.id, JSON.stringify({ domain: emailDomain.domain })),
+  ]);
+  return c.json({ success: true, message: "Email domain removed from the inventory." });
+});
+
+// Mailbox inventory for one email domain.
+app.get("/v1/email/domains/:id/mailboxes", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const emailDomain = await c.env.DB.prepare(
+    "SELECT id, domain, hosting_account_id AS hostingAccountId FROM email_domains WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; domain: string; hostingAccountId: string | null }>();
+  if (!emailDomain) return c.json({ message: "Email domain not found." }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT id, address, quota_mb AS quotaMb, status, provider_status AS providerStatus,
+            password_set_at AS passwordSetAt, created_at AS createdAt
+     FROM email_mailboxes WHERE email_domain_id = ? AND status != 'DELETED'
+     ORDER BY created_at ASC`,
+  ).bind(emailDomain.id).all();
+  // Plan mailbox limit: when the domain is linked to a hosting account the
+  // plan's mailbox_limit caps mailbox counts; otherwise a static safety cap.
+  let mailboxLimit = 100;
+  if (emailDomain.hostingAccountId) {
+    const plan = await c.env.DB.prepare(
+      `SELECT p.mailbox_limit FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id WHERE a.id = ? LIMIT 1`,
+    ).bind(emailDomain.hostingAccountId).first<{ mailbox_limit: number }>();
+    if (plan) mailboxLimit = plan.mailbox_limit;
+  }
+  return c.json({ mailboxes: result.results ?? [], mailboxLimit, domain: emailDomain.domain });
+});
+
+// Create a mailbox. Enforces the plan mailbox limit and honest
+// provisioning: without a configured mail provider the mailbox stays
+// 'not_provisioned' and the API response says exactly that.
+app.post("/v1/email/domains/:id/mailboxes", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const emailDomain = await c.env.DB.prepare(
+    "SELECT id, domain, hosting_account_id AS hostingAccountId, status FROM email_domains WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; domain: string; hostingAccountId: string | null; status: string }>();
+  if (!emailDomain) return c.json({ message: "Email domain not found." }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const localPart = typeof input.localPart === "string" ? input.localPart.trim().toLowerCase() : "";
+  const quotaMb = input.quotaMb === undefined ? 1024 : Number(input.quotaMb);
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(localPart) || localPart.startsWith(".") || localPart.includes("..")) {
+    return c.json({ message: "Mailbox name must be 1-64 characters: lowercase letters, numbers, dots, dashes, or underscores." }, 400);
+  }
+  if (!Number.isInteger(quotaMb) || quotaMb < 128 || quotaMb > 51200) {
+    return c.json({ message: "Mailbox quota must be between 128 and 51,200 MB." }, 400);
+  }
+  const address = `${localPart}@${emailDomain.domain}`;
+  if (emailDomain.hostingAccountId) {
+    const plan = await c.env.DB.prepare(
+      `SELECT p.mailbox_limit,
+              (SELECT COUNT(*) FROM email_mailboxes m
+               JOIN email_domains ed ON ed.id = m.email_domain_id
+               WHERE ed.hosting_account_id = ? AND m.status != 'DELETED') AS mailboxCount
+       FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+       WHERE a.id = ? LIMIT 1`,
+    ).bind(emailDomain.hostingAccountId, emailDomain.hostingAccountId).first<{ mailbox_limit: number; mailboxCount: number }>();
+    if (plan && plan.mailboxCount >= plan.mailbox_limit) {
+      return c.json({ message: `The hosting plan allows ${plan.mailbox_limit} mailbox(es) and the limit has been reached.` }, 409);
+    }
+  }
+  const provider = resolveEmailProvider(c.env);
+  const providerAvailable = provider.kind === "mailserver-api" && provider.requirements.length === 0;
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO email_mailboxes (id, organization_id, email_domain_id, address, quota_mb, status, provider_status)
+       VALUES (?, ?, ?, ?, ?, 'PENDING', 'not_provisioned')`,
+    ).bind(id, identity.organizationId, emailDomain.id, address, quotaMb).run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return c.json({ message: "This mailbox address already exists." }, 409);
+    return c.json({ message: "Unable to create the mailbox." }, 500);
+  }
+  if (providerAvailable) {
+    const result = await emailProviderRequest(provider, "POST", "/mailboxes", { externalId: id, address, quotaMb });
+    await c.env.DB.prepare(
+      "UPDATE email_mailboxes SET provider_status = ?, updated_at = datetime('now') WHERE id = ?",
+    ).bind(result.ok ? "provisioned" : "failed", id).run();
+    if (!result.ok) {
+      return c.json({ mailbox: { id, address, status: "PENDING", providerStatus: "failed" }, message: `Recorded locally but the mail provider rejected creation. ${result.detail}` }, 502);
+    }
+  }
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_mailbox.created', 'email_mailbox', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ address, quotaMb, providerProvisioned: providerAvailable })).run();
+  return c.json({
+    mailbox: { id, address, status: "PENDING", providerStatus: providerAvailable ? "provisioned" : "not_provisioned", quotaMb },
+    provisioning: providerAvailable
+      ? { available: true, message: "Mailbox created on the mail server." }
+      : { available: false, message: "Mail provider is not configured. The mailbox is a plan only — no IMAP/SMTP mailbox exists yet.", requirements: provider.requirements },
+  }, 201);
+});
+
+// Update mailbox quota, suspend/unsuspend, or set a new mailbox password.
+// Password changes require a configured provider — the control panel never
+// stores mailbox passwords itself.
+app.patch("/v1/email/mailboxes/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const mailbox = await c.env.DB.prepare(
+    `SELECT m.id, m.address, m.status, m.provider_status AS providerStatus, ed.domain
+     FROM email_mailboxes m JOIN email_domains ed ON ed.id = m.email_domain_id
+     WHERE m.id = ? AND m.organization_id = ? AND m.status != 'DELETED' LIMIT 1`,
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; address: string; status: string; providerStatus: string; domain: string }>();
+  if (!mailbox) return c.json({ message: "Mailbox not found." }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const provider = resolveEmailProvider(c.env);
+  const providerAvailable = provider.kind === "mailserver-api" && provider.requirements.length === 0;
+  const updates: string[] = [];
+  const binds: (string | number)[] = [];
+  if (input.quotaMb !== undefined) {
+    const quotaMb = Number(input.quotaMb);
+    if (!Number.isInteger(quotaMb) || quotaMb < 128 || quotaMb > 51200) {
+      return c.json({ message: "Mailbox quota must be between 128 and 51,200 MB." }, 400);
+    }
+    updates.push("quota_mb = ?"); binds.push(quotaMb);
+    if (providerAvailable) {
+      const result = await emailProviderRequest(provider, "PATCH", `/mailboxes/${encodeURIComponent(mailbox.id)}`, { quotaMb });
+      if (!result.ok) return c.json({ message: `The mail provider refused the quota change. ${result.detail}` }, 502);
+    }
+  }
+  if (input.status !== undefined) {
+    const status = typeof input.status === "string" ? input.status : "";
+    if (!["ACTIVE", "SUSPENDED"].includes(status)) return c.json({ message: "Mailbox status must be ACTIVE or SUSPENDED." }, 400);
+    updates.push("status = ?"); binds.push(status);
+    if (providerAvailable) {
+      const result = await emailProviderRequest(provider, "PATCH", `/mailboxes/${encodeURIComponent(mailbox.id)}`, { status: status === "ACTIVE" ? "active" : "suspended" });
+      if (!result.ok) return c.json({ message: `The mail provider refused the status change. ${result.detail}` }, 502);
+    }
+  }
+  if (input.newPassword !== undefined) {
+    if (!providerAvailable) {
+      return c.json({ message: "Mailbox passwords are stored on the mail server, which is not configured. The control panel never stores mailbox passwords.", requirements: provider.requirements }, 503);
+    }
+    const newPassword = typeof input.newPassword === "string" ? input.newPassword : "";
+    if (newPassword.length < 12 || newPassword.length > 128) {
+      return c.json({ message: "The new mailbox password must be 12-128 characters." }, 400);
+    }
+    const result = await emailProviderRequest(provider, "POST", `/mailboxes/${encodeURIComponent(mailbox.id)}/password`, { password: newPassword });
+    if (!result.ok) return c.json({ message: `The mail provider refused the password change. ${result.detail}` }, 502);
+    updates.push("password_set_at = ?"); binds.push(new Date().toISOString());
+  }
+  if (updates.length === 0) return c.json({ message: "Nothing to update. Provide quotaMb, status, or newPassword." }, 400);
+  updates.push("updated_at = datetime('now')");
+  await c.env.DB.batch([
+    c.env.DB.prepare(`UPDATE email_mailboxes SET ${updates.join(", ")} WHERE id = ? AND organization_id = ?`).bind(...binds, mailbox.id, identity.organizationId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_mailbox.updated', 'email_mailbox', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, mailbox.id,
+      JSON.stringify({ fields: Object.keys(input).filter((k) => k !== "newPassword"), passwordChanged: input.newPassword !== undefined })),
+  ]);
+  return c.json({ success: true, message: "Mailbox updated." });
+});
+
+// Delete a mailbox.
+app.delete("/v1/email/mailboxes/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const mailbox = await c.env.DB.prepare(
+    "SELECT id, address FROM email_mailboxes WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; address: string }>();
+  if (!mailbox) return c.json({ message: "Mailbox not found." }, 404);
+  const provider = resolveEmailProvider(c.env);
+  if (provider.kind === "mailserver-api" && provider.requirements.length === 0) {
+    const result = await emailProviderRequest(provider, "DELETE", `/mailboxes/${encodeURIComponent(mailbox.id)}`);
+    if (!result.ok && result.status !== 404) {
+      return c.json({ message: `The mail provider refused mailbox deletion. ${result.detail}` }, 502);
+    }
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE email_mailboxes SET status = 'DELETED', updated_at = datetime('now') WHERE id = ? AND status != 'DELETED'").bind(mailbox.id),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_mailbox.deleted', 'email_mailbox', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, mailbox.id, JSON.stringify({ address: mailbox.address })),
+  ]);
+  return c.json({ success: true, message: "Mailbox deleted." });
+});
+
+// Forwarding rules (also usable as simple aliases: source -> destination).
+app.get("/v1/email/domains/:id/forwards", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const emailDomain = await c.env.DB.prepare(
+    "SELECT id, domain FROM email_domains WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; domain: string }>();
+  if (!emailDomain) return c.json({ message: "Email domain not found." }, 404);
+  const result = await c.env.DB.prepare(
+    `SELECT id, source, destination, active, provider_status AS providerStatus, created_at AS createdAt
+     FROM email_forwards WHERE email_domain_id = ? ORDER BY created_at ASC`,
+  ).bind(emailDomain.id).all();
+  return c.json({ forwards: result.results ?? [], domain: emailDomain.domain });
+});
+
+app.post("/v1/email/domains/:id/forwards", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const emailDomain = await c.env.DB.prepare(
+    "SELECT id, domain FROM email_domains WHERE id = ? AND organization_id = ? AND status != 'DELETED' LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; domain: string }>();
+  if (!emailDomain) return c.json({ message: "Email domain not found." }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const localPart = typeof input.source === "string" ? input.source.trim().toLowerCase() : "";
+  const destination = typeof input.destination === "string" ? input.destination.trim().toLowerCase() : "";
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(localPart)) return c.json({ message: "The source must be a local mailbox name on this domain." }, 400);
+  if (!validEmail(destination)) return c.json({ message: "The destination must be a valid email address." }, 400);
+  const source = `${localPart}@${emailDomain.domain}`;
+  const provider = resolveEmailProvider(c.env);
+  const providerAvailable = provider.kind === "mailserver-api" && provider.requirements.length === 0;
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO email_forwards (id, organization_id, email_domain_id, source, destination, active, provider_status)
+       VALUES (?, ?, ?, ?, ?, 1, 'not_provisioned')`,
+    ).bind(id, identity.organizationId, emailDomain.id, source, destination).run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) return c.json({ message: "This forwarding rule already exists." }, 409);
+    return c.json({ message: "Unable to create the forwarding rule." }, 500);
+  }
+  if (providerAvailable) {
+    const result = await emailProviderRequest(provider, "POST", "/forwards", { externalId: id, source, destination });
+    await c.env.DB.prepare("UPDATE email_forwards SET provider_status = ?, updated_at = datetime('now') WHERE id = ?")
+      .bind(result.ok ? "provisioned" : "failed", id).run();
+  }
+  await c.env.DB.prepare(
+    "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_forward.created', 'email_forward', ?, ?)",
+  ).bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ source, destination })).run();
+  return c.json({
+    forward: { id, source, destination, active: 1, providerStatus: providerAvailable ? "provisioned" : "not_provisioned" },
+    provisioning: providerAvailable
+      ? { available: true, message: "Forwarding rule created on the mail server." }
+      : { available: false, message: "Mail provider is not configured. The rule is recorded but is NOT active on any mail server.", requirements: provider.requirements },
+  }, 201);
+});
+
+app.delete("/v1/email/forwards/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const forward = await c.env.DB.prepare(
+    "SELECT id, source, destination FROM email_forwards WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; source: string; destination: string }>();
+  if (!forward) return c.json({ message: "Forwarding rule not found." }, 404);
+  const provider = resolveEmailProvider(c.env);
+  if (provider.kind === "mailserver-api" && provider.requirements.length === 0) {
+    const result = await emailProviderRequest(provider, "DELETE", `/forwards/${encodeURIComponent(forward.id)}`);
+    if (!result.ok && result.status !== 404) {
+      return c.json({ message: `The mail provider refused forward removal. ${result.detail}` }, 502);
+    }
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM email_forwards WHERE id = ? AND organization_id = ?").bind(forward.id, identity.organizationId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'email_forward.deleted', 'email_forward', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, forward.id, JSON.stringify({ source: forward.source, destination: forward.destination })),
+  ]);
+  return c.json({ success: true, message: "Forwarding rule removed." });
+});
+
+// Mail delivery/service status. Reports what the control panel actually
+// knows: provider configuration state and local inventory health. Live
+// SMTP/IMAP probing requires the mail provider and is marked accordingly.
+app.get("/v1/email/service-status", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const provider = resolveEmailProvider(c.env);
+  const providerAvailable = provider.kind === "mailserver-api" && provider.requirements.length === 0;
+  const inventory = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM email_domains WHERE organization_id = ? AND status NOT IN ('DELETED')) AS domains,
+       (SELECT COUNT(*) FROM email_mailboxes m JOIN email_domains ed ON ed.id = m.email_domain_id
+          WHERE ed.organization_id = ? AND m.status != 'DELETED') AS mailboxes,
+       (SELECT COUNT(*) FROM email_forwards f JOIN email_domains ed ON ed.id = f.email_domain_id
+          WHERE ed.organization_id = ? AND f.active = 1) AS forwards`,
+  ).bind(identity.organizationId, identity.organizationId, identity.organizationId).first<{ domains: number; mailboxes: number; forwards: number }>();
+  return c.json({
+    mailboxHosting: {
+      provider: provider.kind,
+      available: providerAvailable,
+      deliveryStatus: providerAvailable ? "unknown — the control panel does not probe SMTP/IMAP; check the provider's own status page." : "unavailable — no mail server is configured.",
+      requirements: providerAvailable ? [] : provider.requirements,
+    },
+    outboundNotification: {
+      configured: Boolean(c.env.RESEND_API_KEY && c.env.EMAIL_FROM),
+    },
+    inventory: inventory ?? { domains: 0, mailboxes: 0, forwards: 0 },
+  });
+});
+
 type HostingPlanRow = {
   id: string; name: string; disk_limit_bytes: number; bandwidth_limit_bytes: number | null;
   website_limit: number; database_limit: number; mailbox_limit: number;
@@ -2365,6 +3497,146 @@ app.post("/v1/hosting-plans/:id/website-limit", async (c) => {
   return c.json({ plan: { id: plan.id, name: plan.name, website_limit: websiteLimit } });
 });
 
+// Delete a hosting plan. Only unused plans can be deleted: a plan that is
+// referenced by any hosting account or subscription is rejected with 409
+// and a count of the references. Deactivate the plan instead to stop new
+// signups while keeping existing accounts working.
+app.delete("/v1/hosting-plans/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const planId = c.req.param("id");
+  const plan = await c.env.DB.prepare(
+    "SELECT id, name FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(planId, identity.organizationId).first<{ id: string; name: string }>();
+  if (!plan) return c.json({ message: "Hosting plan not found in this workspace." }, 404);
+  const accountCount = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM hosting_accounts WHERE plan_id = ?",
+  ).bind(planId).first<{ count: number }>();
+  if ((accountCount?.count ?? 0) > 0) {
+    return c.json({ message: `This plan is used by ${accountCount?.count} hosting account(s) and cannot be deleted. Deactivate it instead.` }, 409);
+  }
+  const subscriptionCount = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM subscriptions WHERE plan_id = ?",
+  ).bind(planId).first<{ count: number }>();
+  if ((subscriptionCount?.count ?? 0) > 0) {
+    return c.json({ message: `This plan is referenced by ${subscriptionCount?.count} subscription(s) and cannot be deleted.` }, 409);
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM hosting_plans WHERE id = ? AND organization_id = ?").bind(planId, identity.organizationId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_plan.deleted', 'hosting_plan', ?, ?)",
+    ).bind(crypto.randomUUID(), identity.organizationId, identity.id, planId, JSON.stringify({ name: plan.name })),
+  ]);
+  return c.json({ success: true, message: "Hosting plan deleted." });
+});
+
+// ---------------------------------------------------------------------------
+// Provisioning job inspector (platform administration).
+//
+// Provides the operations inventory for queued/running/finished jobs with
+// failure reasons, and a guarded retry for failed jobs whose operation is
+// known-idempotent. Destructive or non-idempotent operations (restore,
+// delete-database, file-manager) can NOT be retried from here — the
+// operator must re-trigger them from the resource workflow, which
+// re-validates current state.
+// ---------------------------------------------------------------------------
+
+app.get("/v1/provisioning-jobs", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const status = c.req.query("status");
+  const operation = c.req.query("operation");
+  const organizationId = c.req.query("organizationId");
+  const conditions: string[] = [];
+  const binds: string[] = [];
+  if (status && /^[A-Z_]{3,20}$/.test(status)) { conditions.push("j.status = ?"); binds.push(status); }
+  if (operation && /^[A-Z_]{3,40}$/.test(operation)) { conditions.push("j.operation = ?"); binds.push(operation); }
+  if (organizationId && /^[0-9a-f-]{36}$/i.test(organizationId)) { conditions.push("a.organization_id = ?"); binds.push(organizationId); }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const result = await c.env.DB.prepare(
+    `SELECT j.id, j.operation, j.status, j.attempts, j.requested_at AS requestedAt,
+            j.started_at AS startedAt, j.finished_at AS finishedAt,
+            j.error_code AS errorCode, j.error_message AS errorMessage,
+            j.hosting_account_id AS hostingAccountId, a.username AS accountUsername,
+            a.status AS accountStatus, a.organization_id AS organizationId, o.name AS organizationName,
+            s.hostname AS serverHostname,
+            CASE WHEN j.finished_at IS NULL AND j.requested_at < datetime('now', '-1 hour') AND j.status IN ('QUEUED','RUNNING') THEN 1 ELSE 0 END AS stalled
+     FROM provisioning_jobs j
+     JOIN hosting_accounts a ON a.id = j.hosting_account_id
+     JOIN organizations o ON o.id = a.organization_id
+     LEFT JOIN servers s ON s.id = a.server_id
+     ${where} ORDER BY j.requested_at DESC LIMIT 200`,
+  ).bind(...binds).all();
+  return c.json({ jobs: result.results ?? [], retryableOperations: Array.from(RETRYABLE_JOB_OPERATIONS) });
+});
+
+app.get("/v1/provisioning-jobs/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const job = await c.env.DB.prepare(
+    `SELECT j.id, j.operation, j.status, j.attempts, j.idempotency_key AS idempotencyKey,
+            j.request_payload AS requestPayload, j.requested_at AS requestedAt,
+            j.started_at AS startedAt, j.finished_at AS finishedAt,
+            j.error_code AS errorCode, j.error_message AS errorMessage,
+            j.hosting_account_id AS hostingAccountId, a.username AS accountUsername,
+            a.organization_id AS organizationId, o.name AS organizationName,
+            s.hostname AS serverHostname, s.status AS serverStatus, s.last_heartbeat_at AS serverLastHeartbeatAt
+     FROM provisioning_jobs j
+     JOIN hosting_accounts a ON a.id = j.hosting_account_id
+     JOIN organizations o ON o.id = a.organization_id
+     LEFT JOIN servers s ON s.id = a.server_id
+     WHERE j.id = ? LIMIT 1`,
+  ).bind(c.req.param("id")).first<Record<string, unknown>>();
+  if (!job) return c.json({ message: "Provisioning job not found." }, 404);
+  return c.json({
+    job,
+    retryable: RETRYABLE_JOB_OPERATIONS.has(String(job.operation)) && job.status === "FAILED",
+  });
+});
+
+// Retry a failed job. Only known-idempotent operations are retryable; the
+// previous FAILED job is preserved for audit and a fresh job is queued with
+// a unique idempotency key suffix so the agent claim protocol cannot
+// confuse the attempts.
+app.post("/v1/provisioning-jobs/:id/retry", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+  const job = await c.env.DB.prepare(
+    `SELECT j.id, j.operation, j.status, j.attempts, j.request_payload AS requestPayload, j.idempotency_key AS idempotencyKey,
+            j.hosting_account_id AS hostingAccountId, a.organization_id AS organizationId
+     FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id
+     WHERE j.id = ? LIMIT 1`,
+  ).bind(c.req.param("id")).first<{ id: string; operation: string; status: string; attempts: number; requestPayload: string | null; idempotencyKey: string; hostingAccountId: string; organizationId: string }>();
+  if (!job) return c.json({ message: "Provisioning job not found." }, 404);
+  if (!RETRYABLE_JOB_OPERATIONS.has(job.operation)) {
+    return c.json({ message: `The ${job.operation} operation cannot be retried from the inspector. Re-trigger it from the resource workflow so current state is re-validated.` }, 409);
+  }
+  if (job.status !== "FAILED") {
+    return c.json({ message: "Only failed jobs can be retried." }, 409);
+  }
+  const activeJob = await c.env.DB.prepare(
+    `SELECT id FROM provisioning_jobs
+     WHERE hosting_account_id = ? AND idempotency_key = ? AND status IN ('QUEUED','RUNNING') LIMIT 1`,
+  ).bind(job.hostingAccountId, job.idempotencyKey).first<{ id: string }>();
+  if (activeJob) return c.json({ message: "A job with the same idempotency key is already queued or running." }, 409);
+  const jobId = crypto.randomUUID();
+  const retryKey = `${job.idempotencyKey}:retry-${job.attempts + 1}`;
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, attempts, request_payload)
+       VALUES (?, ?, ?, 'QUEUED', ?, 0, ?)`,
+    ).bind(jobId, job.hostingAccountId, job.operation, retryKey, job.requestPayload),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job.retried', 'provisioning_job', ?, ?)",
+    ).bind(crypto.randomUUID(), job.organizationId, identity.id, job.id, JSON.stringify({ newJobId: jobId, operation: job.operation, attempt: job.attempts + 1 })),
+  ]);
+  return c.json({ success: true, jobId, idempotencyKey: retryKey, message: "Retry queued. The agent will claim it with the next poll." }, 201);
+});
+
 
 type HostingAccountRow = {
   id: string; username: string; primary_domain: string | null; status: string;
@@ -2474,6 +3746,276 @@ app.get("/v1/customer/hosting-accounts/:id/databases", async (c) => {
      ORDER BY d.created_at DESC`,
   ).bind(membership.id).all();
   return c.json({ databases: result.results ?? [] });
+});
+
+// ---------------------------------------------------------------------------
+// Customer self-service mutations.
+//
+// Customers (hosting-account members) manage domains and databases on their
+// own accounts. Every route resolves the account from the caller's ACTIVE
+// hosting-account membership — never from an account ID the browser claims.
+// Mutating roles:
+//   - ACCOUNT_OWNER / ACCOUNT_ADMIN: domains and databases
+//   - ACCOUNT_DEVELOPER: databases only (no domain changes)
+//   - ACCOUNT_READONLY: read-only, no mutations
+// Plan quotas (website_limit, database_limit) are enforced here in the API,
+// not only in the dashboard.
+// ---------------------------------------------------------------------------
+
+function customerMutationAllowed(role: string, scope: "domain" | "database"): boolean {
+  if (role === "ACCOUNT_OWNER" || role === "ACCOUNT_ADMIN") return true;
+  if (scope === "database" && role === "ACCOUNT_DEVELOPER") return true;
+  return false;
+}
+
+// Customer adds a domain to their own hosting account. Mirrors the WHM
+// domain-add validation: plan website limit, domain syntax, document root
+// confinement, unique domain names.
+app.post("/v1/customer/hosting-accounts/:id/domains", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT m.role, a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND m.user_id = ? AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.id).first<{ role: string; id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  if (!customerMutationAllowed(membership.role, "domain")) {
+    return c.json({ message: "Your hosting account role cannot manage domains. Ask an account owner or admin." }, 403);
+  }
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
+  const plan = await c.env.DB.prepare(
+    `SELECT p.website_limit,
+            (SELECT COUNT(*) FROM domains d WHERE d.hosting_account_id = a.id) AS website_count,
+            a.username
+     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.id = ? LIMIT 1`,
+  ).bind(membership.id).first<{ website_limit: number; website_count: number; username: string }>();
+  if (!plan) return c.json({ message: "Hosting account not found" }, 404);
+  if (plan.website_count >= plan.website_limit) {
+    return c.json({ message: "This hosting plan has reached its website limit." }, 409);
+  }
+  if (!validDomain(name)) return c.json({ message: "Enter a valid domain name, such as example.com." }, 400);
+  const accountWebRoot = "/home/" + plan.username + "/public_html";
+  const suppliedRoot = typeof input.documentRoot === "string" ? input.documentRoot.trim() : "";
+  const root = suppliedRoot || accountWebRoot + "/" + name;
+  if (!(root === accountWebRoot || root.startsWith(accountWebRoot + "/")) || root.includes("..") || root.length > 240 ||
+      !/^\/home\/[a-z][a-z0-9_]{2,15}\/public_html(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/.test(root)) {
+    return c.json({ message: "Document root must be inside this account's public_html directory and cannot contain hidden or unsafe path components." }, 400);
+  }
+  const id = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const statements = [
+    c.env.DB.prepare("INSERT INTO domains (id, hosting_account_id, name, document_root, is_primary) VALUES (?, ?, ?, ?, 0)").bind(id, membership.id, name, root),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'ADD_DOMAIN', 'QUEUED', ?)").bind(jobId, membership.id, "add-domain:" + id),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.create_requested', 'domain', ?, ?)")
+      .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ hostingAccountId: membership.id, via: "customer-portal", name })),
+  ];
+  try { await c.env.DB.batch(statements); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/UNIQUE constraint failed: domains.name/i.test(message)) return c.json({ message: "This domain is already registered." }, 409);
+    return c.json({ message: "Unable to save this domain." }, 500);
+  }
+  return c.json({ domain: { id, name, document_root: root, is_primary: 0 }, provisioningJob: { id: jobId, status: "QUEUED" }, message: "Domain saved. Server configuration is queued and awaits a connected Linux agent." }, 201);
+});
+
+// Customer removes a non-primary domain from their own hosting account.
+// Primary domains are protected here exactly as in the WHM route.
+app.delete("/v1/customer/hosting-accounts/:id/domains/:domainId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT m.role, a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND m.user_id = ? AND m.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.id).first<{ role: string; id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  if (!customerMutationAllowed(membership.role, "domain")) {
+    return c.json({ message: "Your hosting account role cannot manage domains. Ask an account owner or admin." }, 403);
+  }
+  const domainId = c.req.param("domainId");
+  const domain = await c.env.DB.prepare(
+    "SELECT d.id, d.name, d.is_primary AS isPrimary, d.status FROM domains d WHERE d.id = ? AND d.hosting_account_id = ? LIMIT 1",
+  ).bind(domainId, membership.id).first<{ id: string; name: string; isPrimary: number; status: string }>();
+  if (!domain) return c.json({ message: "Domain not found on this hosting account." }, 404);
+  if (domain.status === "DELETED") return c.json({ message: "Domain is already deleted." }, 409);
+  if (domain.isPrimary === 1) {
+    return c.json({ message: "The primary domain cannot be removed. Set another domain as primary first." }, 409);
+  }
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE domains SET status = 'DELETED', updated_at = datetime('now') WHERE id = ? AND status != 'DELETED'").bind(domainId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'REMOVE_DOMAIN', 'QUEUED', ?)").bind(jobId, membership.id, `remove-domain:${domainId}`),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.deleted', 'domain', ?, ?)")
+      .bind(crypto.randomUUID(), identity.organizationId, identity.id, domainId, JSON.stringify({ name: domain.name, jobId, via: "customer-portal" })),
+  ]);
+  return c.json({ success: true, domainId, jobId, status: "DELETED", message: "Domain removal queued." });
+});
+
+// Customer creates a MariaDB database on their own hosting account. The
+// username-prefixed database name, plan database limit, and username
+// restrictions are enforced server-side.
+app.post("/v1/customer/hosting-accounts/:id/databases", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT m.role, a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND m.user_id = ? AND m.status = 'ACTIVE' AND a.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.id).first<{ role: string; id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  if (!customerMutationAllowed(membership.role, "database")) {
+    return c.json({ message: "Your hosting account role cannot create databases. Ask an account owner, admin, or developer." }, 403);
+  }
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const requestedName = typeof input.name === "string" ? input.name.toLowerCase() : "";
+  if (!/^[a-z][a-z0-9_]{1,30}$/.test(requestedName)) {
+    return c.json({ message: "Choose a database name using 2–31 lowercase letters, numbers, or underscores." }, 400);
+  }
+  const account = await c.env.DB.prepare(
+    `SELECT a.username, p.database_limit AS databaseLimit
+     FROM hosting_accounts a JOIN hosting_plans p ON p.id = a.plan_id
+     WHERE a.id = ? LIMIT 1`,
+  ).bind(membership.id).first<{ username: string; databaseLimit: number }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(account.username)) {
+    return c.json({ message: "The hosting account username is invalid." }, 409);
+  }
+  const databaseName = `${account.username}_${requestedName}`;
+  if (!/^[a-z][a-z0-9_]{1,63}$/.test(databaseName) || databaseName.length > 64) {
+    return c.json({ message: "The generated database name is invalid or too long." }, 400);
+  }
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM hosting_databases WHERE hosting_account_id = ? AND status != 'DELETED'",
+  ).bind(membership.id).first<{ count: number }>();
+  if ((count?.count ?? 0) >= account.databaseLimit) {
+    return c.json({ message: "This hosting account has reached its database limit." }, 409);
+  }
+  const databaseId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const payload = JSON.stringify({ databaseId, databaseName });
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO hosting_databases (id, organization_id, hosting_account_id, name, engine, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'MARIADB', 'PENDING', ?, ?)",
+      ).bind(databaseId, identity.organizationId, membership.id, databaseName, now, now),
+      c.env.DB.prepare(
+        "INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_DATABASE', 'QUEUED', ?, ?)",
+      ).bind(jobId, membership.id, "create-database:" + databaseId, payload),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.provisioning_queued', 'database', ?, ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, databaseId, JSON.stringify({ hostingAccountId: membership.id, jobId, via: "customer-portal" })),
+    ]);
+  } catch {
+    return c.json({ message: "Unable to queue database provisioning. Refresh and try again." }, 409);
+  }
+  return c.json({ databaseId, jobId, status: "PENDING", name: databaseName, engine: "MARIADB", message: "Database creation has been queued for the connected Linux agent." }, 202);
+});
+
+// Customer deletes one of their own databases. The same guards as the WHM
+// route apply: pending user operations block deletion, usernames are
+// validated against the account prefix, and concurrent jobs are rejected.
+app.delete("/v1/customer/hosting-accounts/:id/databases/:databaseId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const membership = await c.env.DB.prepare(
+    `SELECT m.role, a.id FROM hosting_account_memberships m
+     JOIN hosting_accounts a ON a.id = m.hosting_account_id AND a.organization_id = m.organization_id
+     WHERE a.id = ? AND m.user_id = ? AND m.status = 'ACTIVE' LIMIT 1`,
+  ).bind(accountId, identity.id).first<{ role: string; id: string }>();
+  if (!membership) return c.json({ message: "Hosting account not found" }, 404);
+  if (!customerMutationAllowed(membership.role, "database")) {
+    return c.json({ message: "Your hosting account role cannot delete databases. Ask an account owner, admin, or developer." }, 403);
+  }
+  const database = await c.env.DB.prepare(
+    `SELECT d.id, d.name, d.status, a.username AS accountUsername
+     FROM hosting_databases d
+     JOIN hosting_accounts a ON a.id = d.hosting_account_id AND a.organization_id = d.organization_id
+     WHERE d.id = ? AND d.hosting_account_id = ? AND d.organization_id = ? LIMIT 1`,
+  ).bind(c.req.param("databaseId"), membership.id, identity.organizationId)
+    .first<{ id: string; name: string; status: string; accountUsername: string }>();
+  if (!database) return c.json({ message: "Database not found on this hosting account." }, 404);
+  if (!/^[a-z][a-z0-9_]{2,15}$/.test(database.accountUsername) ||
+      !/^[a-z][a-z0-9_]{1,63}$/.test(database.name) || database.name.length > 64 ||
+      !database.name.startsWith(database.accountUsername + "_") ||
+      database.name.length <= database.accountUsername.length + 1) {
+    return c.json({ message: "The database name does not belong to its hosting account." }, 409);
+  }
+  if (database.status === "DELETED") return c.json({ message: "This database has already been deleted." }, 409);
+  const existingDelete = await c.env.DB.prepare(
+    "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'DELETE_DATABASE' AND json_extract(request_payload, '$.databaseName') = ? ORDER BY requested_at DESC LIMIT 1",
+  ).bind(membership.id, database.name).first<{ id: string; status: string }>();
+  if (database.status === "DELETING" && existingDelete && ["QUEUED", "RUNNING"].includes(existingDelete.status)) {
+    return c.json({ databaseId: database.id, jobId: existingDelete.id, status: "DELETING", message: "Database deletion is already in progress." }, 202);
+  }
+  if (!["ACTIVE", "FAILED", "DELETING"].includes(database.status)) {
+    return c.json({ message: "Only an active or failed database can be deleted." }, 409);
+  }
+  const usersResult = await c.env.DB.prepare(
+    "SELECT username, status FROM hosting_database_users WHERE database_id = ? AND organization_id = ?",
+  ).bind(database.id, identity.organizationId).all<{ username: string; status: string }>();
+  const dbUsers = usersResult.results ?? [];
+  if (dbUsers.some((u) => u.status === "PENDING" || u.status === "REVOKING")) {
+    return c.json({ message: "Wait for pending user creation or revocation to finish before deleting this database." }, 409);
+  }
+  const prefix = database.accountUsername + "_";
+  const databaseUserNames: string[] = [];
+  for (const user of dbUsers) {
+    if (user.status === "REVOKED") continue;
+    if (!user.username.startsWith(prefix)) {
+      return c.json({ message: "A stored database username does not belong to this hosting account. Deletion was blocked." }, 409);
+    }
+    const suffix = user.username.slice(prefix.length);
+    if (!/^[a-z][a-z0-9_]{1,63}$/.test(suffix) || user.username.length > 80) {
+      return c.json({ message: "A stored database username is invalid. Deletion was blocked." }, 409);
+    }
+    databaseUserNames.push(user.username);
+  }
+  if (databaseUserNames.length > 100) return c.json({ message: "This database has too many users for a safe deletion request." }, 409);
+  const activeJobs = await c.env.DB.prepare(
+    `SELECT id FROM provisioning_jobs
+     WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING')
+       AND operation IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER')
+       AND json_extract(request_payload, '$.databaseName') = ? LIMIT 1`,
+  ).bind(membership.id, database.name).first<{ id: string }>();
+  if (activeJobs) return c.json({ message: "A database provisioning or user-management job is still running. Refresh after it finishes." }, 409);
+  const jobId = crypto.randomUUID();
+  const idempotencyKey = "delete-database:" + database.id + ":" + jobId;
+  const now = new Date().toISOString();
+  const payload = JSON.stringify({ databaseName: database.name, databaseUserNames });
+  try {
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `UPDATE hosting_databases SET status = 'DELETING', updated_at = ?
+         WHERE id = ? AND organization_id = ? AND status IN ('ACTIVE', 'FAILED', 'DELETING')
+           AND NOT EXISTS (SELECT 1 FROM hosting_database_users u
+             WHERE u.database_id = hosting_databases.id AND u.status IN ('PENDING', 'REVOKING'))`,
+      ).bind(now, database.id, identity.organizationId),
+      c.env.DB.prepare(
+        `INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload)
+         SELECT ?, ?, 'DELETE_DATABASE', 'QUEUED', ?, ?
+         WHERE EXISTS (SELECT 1 FROM hosting_databases WHERE id = ? AND organization_id = ? AND status = 'DELETING')`,
+      ).bind(jobId, membership.id, idempotencyKey, payload, database.id, identity.organizationId),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.deletion_queued', 'database', ?, ?)",
+      ).bind(crypto.randomUUID(), identity.organizationId, identity.id, database.id, JSON.stringify({ jobId, databaseName: database.name, userCount: databaseUserNames.length, via: "customer-portal" })),
+    ]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+      return c.json({ message: "Database state changed or another operation is in progress. Refresh and try again." }, 409);
+    }
+  } catch {
+    return c.json({ message: "Unable to queue database deletion. Refresh and try again." }, 409);
+  }
+  return c.json({ databaseId: database.id, jobId, status: "DELETING", message: "Database deletion has been queued. The database will remain listed until the server confirms deletion." }, 202);
 });
 
 app.get("/v1/hosting-accounts/:id/memberships", async (c) => {
@@ -3071,6 +4613,309 @@ app.put("/v1/organizations/:id", async (c) => {
     c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.updated', 'organization', ?, ?)").bind(crypto.randomUUID(), orgId, identity.id, orgId, JSON.stringify({ name })),
   ]);
   return c.json({ success: true, message: "Organization updated." });
+});
+
+// ---------------------------------------------------------------------------
+// Organization administration.
+//
+// Every route re-derives authorization from the authenticated session —
+// an organization ID supplied by the browser is never trusted on its own.
+// Route helpers resolve the caller's relationship to the target org:
+//   - a membership row in the target organization (with its role), or
+//   - a platform membership (PLATFORM_OWNER / PLATFORM_ADMIN).
+// Destructive membership changes enforce last-OWNER/last-admin protection,
+// and revocation invalidates the affected user's sessions for that org.
+// ---------------------------------------------------------------------------
+
+// resolveOrgAccess returns the caller's role in the target org, or that the
+// caller is a platform admin, or null when the caller has no relationship.
+async function resolveOrgAccess(
+  db: D1Database,
+  userId: string,
+  organizationId: string,
+  platformRole: PlatformRole | null,
+): Promise<{ role: Role | null; isPlatformAdmin: boolean }> {
+  if (platformRole === "PLATFORM_OWNER" || platformRole === "PLATFORM_ADMIN") {
+    return { role: null, isPlatformAdmin: true };
+  }
+  const membership = await db.prepare(
+    "SELECT role FROM memberships WHERE user_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(userId, organizationId).first<{ role: Role }>();
+  return { role: membership?.role ?? null, isPlatformAdmin: false };
+}
+
+// countOrgAdmins counts active OWNER and OWNER+ADMIN memberships. Used to
+// enforce that an organization always keeps at least one OWNER and one
+// member who can administer it.
+async function countOrgAdmins(db: D1Database, organizationId: string) {
+  const row = await db.prepare(
+    `SELECT
+       SUM(CASE WHEN role = 'OWNER' THEN 1 ELSE 0 END) AS owners,
+       SUM(CASE WHEN role IN ('OWNER','ADMIN') THEN 1 ELSE 0 END) AS admins
+     FROM memberships WHERE organization_id = ?`,
+  ).bind(organizationId).first<{ owners: number | null; admins: number | null }>();
+  return { owners: row?.owners ?? 0, admins: row?.admins ?? 0 };
+}
+
+// List the authenticated user's organizations. Platform admins may request
+// the full platform inventory with scope=all. This backs the organization
+// switcher and the platform organization directory.
+app.get("/v1/organizations", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const scope = c.req.query("scope");
+  if (scope === "all") {
+    if (identity.platformRole !== "PLATFORM_OWNER" && identity.platformRole !== "PLATFORM_ADMIN") {
+      return c.json({ message: "Platform administrator access required" }, 403);
+    }
+    const result = await c.env.DB.prepare(
+      `SELECT o.id, o.name, o.slug, o.status, o.created_at AS createdAt,
+              (SELECT COUNT(*) FROM memberships m WHERE m.organization_id = o.id) AS memberCount,
+              (SELECT COUNT(*) FROM hosting_accounts a WHERE a.organization_id = o.id AND a.status != 'DELETED') AS hostingAccountCount
+       FROM organizations o ORDER BY o.created_at DESC`,
+    ).all();
+    return c.json({ organizations: result.results ?? [], scope: "all" });
+  }
+  const result = await c.env.DB.prepare(
+    `SELECT o.id, o.name, o.slug, o.status, o.created_at AS createdAt, m.role
+     FROM memberships m JOIN organizations o ON o.id = m.organization_id
+     WHERE m.user_id = ? ORDER BY o.created_at DESC`,
+  ).bind(identity.id).all();
+  return c.json({ organizations: result.results ?? [] });
+});
+
+// Organization details with the member inventory. Any member of the org can
+// see who belongs to their workspace; platform admins can inspect any org.
+app.get("/v1/organizations/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  if (!access.isPlatformAdmin && !access.role) return c.json({ message: "Organization not found" }, 404);
+  const organization = await c.env.DB.prepare(
+    `SELECT o.id, o.name, o.slug, o.status, o.created_at AS createdAt, o.updated_at AS updatedAt,
+            (SELECT COUNT(*) FROM hosting_accounts a WHERE a.organization_id = o.id AND a.status != 'DELETED') AS hostingAccountCount,
+            (SELECT COUNT(*) FROM hosting_accounts a WHERE a.organization_id = o.id AND a.status = 'ACTIVE') AS activeHostingAccountCount
+     FROM organizations o WHERE o.id = ? LIMIT 1`,
+  ).bind(orgId).first();
+  if (!organization) return c.json({ message: "Organization not found" }, 404);
+  const members = await c.env.DB.prepare(
+    `SELECT m.user_id AS userId, u.email, u.display_name AS displayName, u.status AS userStatus,
+            m.role, m.created_at AS memberSince
+     FROM memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.organization_id = ? ORDER BY m.created_at ASC`,
+  ).bind(orgId).all();
+  const admins = await countOrgAdmins(c.env.DB, orgId);
+  return c.json({ organization, members: members.results ?? [], owners: admins.owners, admins: admins.admins });
+});
+
+// Add an existing, active Nexora user to the organization. OWNER or ADMIN
+// (or a platform admin) may invite; only OWNER may grant the OWNER role.
+app.post("/v1/organizations/:id/members", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  const canManage = access.isPlatformAdmin || access.role === "OWNER" || access.role === "ADMIN";
+  if (!canManage) return c.json({ message: "Organization administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const email = normalizeEmail(input.email);
+  const role = typeof input.role === "string" ? input.role : "MEMBER";
+  const allowedRoles: Role[] = ["OWNER", "ADMIN", "BILLING", "SUPPORT", "MEMBER"];
+  if (!validEmail(email)) return c.json({ message: "Enter a valid user email address." }, 400);
+  if (!allowedRoles.includes(role as Role)) return c.json({ message: "Select a valid organization role." }, 400);
+  if (role === "OWNER" && !access.isPlatformAdmin && access.role !== "OWNER") {
+    return c.json({ message: "Only an organization owner can grant owner access." }, 403);
+  }
+  const organization = await c.env.DB.prepare(
+    "SELECT id, status FROM organizations WHERE id = ? LIMIT 1",
+  ).bind(orgId).first<{ id: string; status: string }>();
+  if (!organization) return c.json({ message: "Organization not found" }, 404);
+  if (organization.status !== "ACTIVE") return c.json({ message: "Members can only be added to an active organization." }, 409);
+  const user = await c.env.DB.prepare(
+    "SELECT id, email FROM users WHERE email = ? COLLATE NOCASE AND status = 'ACTIVE' LIMIT 1",
+  ).bind(email).first<{ id: string; email: string }>();
+  if (!user) return c.json({ message: "No active Nexora login exists for that email. Ask the user to register first." }, 404);
+  const existing = await c.env.DB.prepare(
+    "SELECT role FROM memberships WHERE user_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(user.id, orgId).first<{ role: Role }>();
+  if (existing) return c.json({ message: "This user is already a member of the organization." }, 409);
+  const now = new Date().toISOString();
+  try {
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO memberships (id, user_id, organization_id, role, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(crypto.randomUUID(), user.id, orgId, role, now),
+      c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.member_added', 'membership', ?, ?)",
+      ).bind(crypto.randomUUID(), orgId, identity.id, user.id, JSON.stringify({ email: user.email, role })),
+    ]);
+  } catch {
+    return c.json({ message: "Unable to add this member." }, 409);
+  }
+  return c.json({ success: true, userId: user.id, role, message: "Organization member added." }, 201);
+});
+
+// Change a member's organization role. OWNER (or platform admin) may set any
+// role; ADMIN may only manage non-owner roles. The last OWNER can never be
+// demoted, and the last administrator can never lose admin access.
+app.patch("/v1/organizations/:id/members/:userId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const targetUserId = c.req.param("userId");
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  const canManage = access.isPlatformAdmin || access.role === "OWNER" || access.role === "ADMIN";
+  if (!canManage) return c.json({ message: "Organization administrator access required" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const role = typeof input.role === "string" ? input.role : "";
+  const allowedRoles: Role[] = ["OWNER", "ADMIN", "BILLING", "SUPPORT", "MEMBER"];
+  if (!allowedRoles.includes(role as Role)) return c.json({ message: "Select a valid organization role." }, 400);
+  if (role === "OWNER" && !access.isPlatformAdmin && access.role !== "OWNER") {
+    return c.json({ message: "Only an organization owner can grant owner access." }, 403);
+  }
+  const target = await c.env.DB.prepare(
+    `SELECT m.role AS currentRole, u.email FROM memberships m
+     JOIN users u ON u.id = m.user_id
+     WHERE m.user_id = ? AND m.organization_id = ? LIMIT 1`,
+  ).bind(targetUserId, orgId).first<{ currentRole: Role; email: string }>();
+  if (!target) return c.json({ message: "Membership not found in this organization." }, 404);
+  if (target.currentRole === role) return c.json({ success: true, message: "Member already has that role." });
+  const admins = await countOrgAdmins(c.env.DB, orgId);
+  if (target.currentRole === "OWNER" && role !== "OWNER" && (admins.owners ?? 0) <= 1) {
+    return c.json({ message: "The last organization owner cannot be demoted. Grant owner access to another member first." }, 409);
+  }
+  const stillAdminAfter = (admins.admins ?? 0)
+    - (target.currentRole === "ADMIN" || target.currentRole === "OWNER" ? 1 : 0)
+    + (role === "ADMIN" || role === "OWNER" ? 1 : 0);
+  if ((target.currentRole === "OWNER" || target.currentRole === "ADMIN") && role !== "OWNER" && role !== "ADMIN" && stillAdminAfter < 1) {
+    return c.json({ message: "The organization must keep at least one owner or administrator." }, 409);
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE memberships SET role = ? WHERE user_id = ? AND organization_id = ?",
+    ).bind(role, targetUserId, orgId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.member_role_changed', 'membership', ?, ?)",
+    ).bind(crypto.randomUUID(), orgId, identity.id, targetUserId, JSON.stringify({ email: target.email, previousRole: target.currentRole, newRole: role })),
+  ]);
+  return c.json({ success: true, userId: targetUserId, role, message: "Organization role updated." });
+});
+
+// Revoke an organization membership. The last OWNER and the last active
+// administrator can never be removed. Revocation also invalidates the
+// member's sessions scoped to this organization so cached access ends
+// immediately. Members may leave on their own (self-removal) unless they
+// are the last owner/administrator.
+app.delete("/v1/organizations/:id/members/:userId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const targetUserId = c.req.param("userId");
+  const selfRemoval = targetUserId === identity.id;
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  if (!selfRemoval && !(access.isPlatformAdmin || access.role === "OWNER" || access.role === "ADMIN")) {
+    return c.json({ message: "Organization administrator access required" }, 403);
+  }
+  const target = await c.env.DB.prepare(
+    `SELECT m.role AS role, u.email FROM memberships m
+     JOIN users u ON u.id = m.user_id
+     WHERE m.user_id = ? AND m.organization_id = ? LIMIT 1`,
+  ).bind(targetUserId, orgId).first<{ role: Role; email: string }>();
+  if (!target) return c.json({ message: "Membership not found in this organization." }, 404);
+  const admins = await countOrgAdmins(c.env.DB, orgId);
+  if (target.role === "OWNER" && (admins.owners ?? 0) <= 1) {
+    return c.json({ message: "The last organization owner cannot be removed. Grant owner access to another member first." }, 409);
+  }
+  if ((target.role === "OWNER" || target.role === "ADMIN") && (admins.admins ?? 0) <= 1) {
+    return c.json({ message: "The organization must keep at least one owner or administrator." }, 409);
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "DELETE FROM memberships WHERE user_id = ? AND organization_id = ?",
+    ).bind(targetUserId, orgId),
+    c.env.DB.prepare(
+      "UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND organization_id = ? AND revoked_at IS NULL",
+    ).bind(new Date().toISOString(), targetUserId, orgId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.member_removed', 'membership', ?, ?)",
+    ).bind(crypto.randomUUID(), orgId, identity.id, targetUserId, JSON.stringify({ email: target.email, previousRole: target.role, selfRemoval, sessionsRevoked: true })),
+  ]);
+  return c.json({ success: true, message: "Membership revoked. The member's sessions for this organization were invalidated." });
+});
+
+// Close an organization. This is a soft deletion: hosting accounts, payment
+// orders, and subscriptions reference the organization with restrictive
+// foreign keys, so history is preserved and the workspace is closed instead.
+// Closing requires no active hosting resources, no open payment orders, and
+// no live subscriptions. All member sessions for the org are invalidated.
+app.delete("/v1/organizations/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  if (!access.isPlatformAdmin && access.role !== "OWNER") {
+    return c.json({ message: "Organization owner access required" }, 403);
+  }
+  const organization = await c.env.DB.prepare(
+    "SELECT id, name, status FROM organizations WHERE id = ? LIMIT 1",
+  ).bind(orgId).first<{ id: string; name: string; status: string }>();
+  if (!organization) return c.json({ message: "Organization not found" }, 404);
+  if (organization.status === "CLOSED") return c.json({ message: "This organization is already closed." }, 409);
+  const hostingAccounts = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM hosting_accounts WHERE organization_id = ? AND status NOT IN ('DELETED')",
+  ).bind(orgId).first<{ count: number }>();
+  if ((hostingAccounts?.count ?? 0) > 0) {
+    return c.json({ message: `This organization still has ${hostingAccounts?.count} hosting account(s). Cancel every hosting account before closing.` }, 409);
+  }
+  const openOrders = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM payment_orders WHERE organization_id = ? AND status IN ('AWAITING_PAYMENT','RECEIPT_SUBMITTED','UNDER_REVIEW','PROVISIONING')",
+  ).bind(orgId).first<{ count: number }>();
+  if ((openOrders?.count ?? 0) > 0) {
+    return c.json({ message: `This organization has ${openOrders?.count} open payment order(s). Resolve them before closing.` }, 409);
+  }
+  const liveSubscriptions = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS count FROM subscriptions WHERE organization_id = ? AND status IN ('TRIALING','ACTIVE','PAST_DUE')",
+  ).bind(orgId).first<{ count: number }>();
+  if ((liveSubscriptions?.count ?? 0) > 0) {
+    return c.json({ message: `This organization has ${liveSubscriptions?.count} live subscription(s). Cancel them before closing.` }, 409);
+  }
+  const now = new Date().toISOString();
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE organizations SET status = 'CLOSED', updated_at = ? WHERE id = ? AND status != 'CLOSED'",
+    ).bind(now, orgId),
+    c.env.DB.prepare(
+      "UPDATE auth_sessions SET revoked_at = ? WHERE organization_id = ? AND revoked_at IS NULL",
+    ).bind(now, orgId),
+    c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.closed', 'organization', ?, ?)",
+    ).bind(crypto.randomUUID(), orgId, identity.id, orgId, JSON.stringify({ name: organization.name })),
+  ]);
+  return c.json({ success: true, message: "Organization closed. All member sessions were invalidated." });
+});
+
+// Organization audit history. Owners/admins (or platform admins) can read
+// the audit trail scoped to their organization.
+app.get("/v1/organizations/:id/audit-logs", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const access = await resolveOrgAccess(c.env.DB, identity.id, orgId, identity.platformRole);
+  if (!(access.isPlatformAdmin || access.role === "OWNER" || access.role === "ADMIN")) {
+    return c.json({ message: "Organization administrator access required" }, 403);
+  }
+  const limitRaw = Number(c.req.query("limit"));
+  const limit = Number.isInteger(limitRaw) && limitRaw >= 1 && limitRaw <= 200 ? limitRaw : 50;
+  const result = await c.env.DB.prepare(
+    `SELECT a.id, a.action, a.resource_type AS resourceType, a.resource_id AS resourceId,
+            a.metadata, a.created_at AS createdAt, u.email AS actorEmail
+     FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
+     WHERE a.organization_id = ? ORDER BY a.created_at DESC LIMIT ?`,
+  ).bind(orgId, limit).all();
+  return c.json({ events: result.results ?? [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -7632,6 +9477,11 @@ export default {
       }),
       runBackupSchedules(env).catch((error) => {
         console.error("Backup scheduler failed:", error);
+      }),
+      expireDueSubscriptions(env.DB).then((changed) => {
+        if (changed > 0) console.info(`Subscription expiry sweep: ${changed} subscription(s) expired or cancelled.`);
+      }).catch((error) => {
+        console.error("Subscription expiry sweep failed:", error);
       }),
     ]));
   },

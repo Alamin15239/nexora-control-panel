@@ -66,6 +66,8 @@ jobs:
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/backup-concurrency.integration.test.ts
       - name: MFA login enforcement integration tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/mfa-login.integration.test.ts
+      - name: Organization, customer self-service, billing and email integration tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/platform-completion.integration.test.ts
       - name: MFA atomicity real-SQLite concurrency tests
         run: python3 apps/cloudflare-api/scripts/test_mfa_atomicity.py
       - name: Backup exclusion real-SQLite migration tests

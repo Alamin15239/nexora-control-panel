@@ -7,6 +7,14 @@ ALLOW_PUBLIC_REGISTRATION = "true"
 CLOUDFLARE_ZONE_NAME = "nexoraedge.digital"
 
 EMAIL_FROM = "Nexora Alerts <alerts@nexoraedge.digital>"
+
+# Email hosting provider (mailbox inventory + provisioning bridge).
+# "none" (default) keeps the email module in inventory-only mode: domains,
+# mailboxes and forwards are recorded but never reported as provisioned.
+# "mailserver-api" enables the generic REST bridge; it additionally requires
+# the EMAIL_PROVIDER_API_URL and EMAIL_PROVIDER_API_TOKEN secrets and MX/
+# SPF/DKIM/DMARC records pointed at the mail server.
+EMAIL_PROVIDER = "none"
 [observability]
 enabled = true
 
