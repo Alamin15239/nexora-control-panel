@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
-  Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, ChevronDown, Cloud,
-  Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole,
-  Mail, Menu, Monitor, Network, Search, Server, Settings2, Shield, ShieldCheck, Users, X, Github,
+  Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, Building2, ChevronDown, Cloud,
+  CreditCard, Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, ListChecks,
+  LockKeyhole, Mail, Menu, Monitor, Network, Search, Server, Settings2, Shield,
+  ShieldCheck, Users, X, Github,
 } from "lucide-react";
 
 const navigation = [
@@ -35,6 +36,9 @@ const navigation = [
       { label: "Payment settings", href: "/payment-settings", icon: Settings2 },
       { label: "Customer accounts", href: "/customer-accounts", icon: Users },
       { label: "Hosting accounts", href: "/hosting-accounts", icon: Server },
+      { label: "Organizations", href: "/organization", icon: Building2 },
+      { label: "Subscriptions & billing", href: "/subscriptions", icon: CreditCard },
+      { label: "Provisioning jobs", href: "/provisioning-jobs", icon: ListChecks },
       { label: "User management", href: "/user-management", icon: Users },
       { label: "Audit logs", href: "/audit-logs", icon: Shield },
       { label: "Monitoring", href: "/monitoring", icon: Activity },
