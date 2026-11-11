@@ -10,9 +10,9 @@ type AuditEntry = {
   action: string;
   resourceType: string;
   resourceId: string | null;
-  actorEmail: string | null;
-  ipAddress: string | null;
-  details: string | null;
+  actorUserId: string | null;
+  sourceIp: string | null;
+  metadata: unknown;
 };
 
 type AuditResponse = {
@@ -108,9 +108,9 @@ export default function AuditLogsPage() {
                   <td className="px-5 py-4 text-xs text-slate-600">{formatDate(entry.createdAt)}</td>
                   <td className="px-5 py-4"><span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">{entry.action}</span></td>
                   <td className="px-5 py-4"><p className="text-xs font-medium text-slate-700">{entry.resourceType}</p>{entry.resourceId && <p className="mt-1 break-all font-mono text-[11px] text-slate-400">{entry.resourceId}</p>}</td>
-                  <td className="px-5 py-4 text-xs text-slate-600">{entry.actorEmail || "—"}</td>
-                  <td className="px-5 py-4 font-mono text-[11px] text-slate-500">{entry.ipAddress || "—"}</td>
-                  <td className="px-5 py-4 max-w-[420px] text-xs text-slate-500">{entry.details || "—"}</td>
+                  <td className="px-5 py-4 text-xs text-slate-600">{entry.actorUserId || "System"}</td>
+                  <td className="px-5 py-4 font-mono text-[11px] text-slate-500">{entry.sourceIp || "—"}</td>
+                  <td className="px-5 py-4 max-w-[420px] text-xs text-slate-500">{entry.metadata == null ? "—" : typeof entry.metadata === "string" ? entry.metadata : JSON.stringify(entry.metadata)}</td>
                 </tr>)}
               </tbody>
             </table>
