@@ -49,6 +49,16 @@ function randomHex(length: number): string {
   return hex(crypto.getRandomValues(new Uint8Array(length)));
 }
 
+function generateDatabasePassword(): string {
+  const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  let password = "";
+  for (let i = 0; i < 24; i++) {
+    password += charset[bytes[i] % charset.length];
+  }
+  return password;
+}
+
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return hex(new Uint8Array(digest));
@@ -3586,6 +3596,48 @@ app.get("/v1/databases/:id/users/:userId/secret", async (c) => {
     const credential = JSON.parse(await decryptDatabaseSecret(c.env, secret.ciphertext, secret.iv)) as { username: string; password: string };
     return c.json({ credential, oneTime: true });
   } catch { return c.json({ message: "The encrypted database credential could not be opened." }, 500); }
+});
+
+// Database user password reset — generates a new password, encrypts it,
+// stores it as a new one-time secret, and queues a provisioning job to
+// update MySQL/MariaDB. The old secret is expired.
+app.post("/v1/databases/:id/users/:userId/reset-password", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const databaseId = c.req.param("id");
+  const userId = c.req.param("userId");
+
+  // Verify the database user exists and belongs to this org.
+  const user = await c.env.DB.prepare(
+    "SELECT u.id, u.username, u.database_id, d.hosting_account_id AS accountId, d.name AS databaseName " +
+    "FROM hosting_database_users u JOIN hosting_databases d ON d.id = u.database_id " +
+    "WHERE u.id = ? AND d.id = ? AND u.organization_id = ? AND u.status = 'ACTIVE' AND d.status = 'ACTIVE' LIMIT 1",
+  ).bind(userId, databaseId, identity.organizationId).first<{ id: string; username: string; database_id: string; accountId: string; databaseName: string }>();
+  if (!user) return c.json({ message: "Database user not found" }, 404);
+
+  // Generate a new random password.
+  const newPassword = generateDatabasePassword();
+  const encrypted = await encryptDatabaseSecret(c.env, JSON.stringify({ username: user.username, password: newPassword })).catch(() => null);
+  if (!encrypted) return c.json({ message: "Unable to encrypt the new database credential" }, 500);
+
+  const secretId = crypto.randomUUID();
+  const jobId = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+  await c.env.DB.batch([
+    // Expire any existing unrevealed secrets for this user.
+    c.env.DB.prepare("UPDATE database_user_secrets SET expires_at = ? WHERE database_user_id = ? AND revealed_at IS NULL AND expires_at > ?").bind(nowIso, user.id, nowIso),
+    // Insert the new secret.
+    c.env.DB.prepare("INSERT INTO database_user_secrets (id, database_user_id, organization_id, ciphertext, iv, expires_at) VALUES (?, ?, ?, ?, ?, ?)").bind(secretId, user.id, identity.organizationId, encrypted.ciphertext, encrypted.iv, expiresAt),
+    // Queue the password reset job.
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'RESET_DATABASE_USER_PASSWORD', 'QUEUED', ?, ?)").bind(jobId, user.accountId, `reset-db-user:${user.id}`, JSON.stringify({ databaseName: user.databaseName, databaseUserName: user.username })),
+    // Audit log.
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.user_password_reset', 'hosting_database_user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, user.id, JSON.stringify({ databaseId, userId: user.id })),
+  ]);
+
+  return c.json({ success: true, jobId, message: "Database user password reset queued. Use the secret reveal endpoint to retrieve the new password." }, 202);
 });
 
 type AgentCredential = { secretHash: string; serverId: string; organizationId: string };
