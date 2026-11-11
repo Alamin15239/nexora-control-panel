@@ -27,6 +27,12 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 4 && parts[0] === "platform" && parts[1] === "payment-orders" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "review") return method === "POST";
   if (parts.length === 4 && parts[0] === "platform" && parts[1] === "payment-orders" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "receipt") return method === "GET";
   if (parts.length === 3 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "store-settings") return method === "POST";
+  if (parts.length === 2 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PUT";
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && (parts[2] === "suspend" || parts[2] === "reactivate")) return method === "PATCH";
+  if (parts.length === 1 && parts[0] === "audit-logs") return method === "GET";
+  if (parts.length === 1 && parts[0] === "sessions") return method === "GET";
+  if (parts.length === 2 && parts[0] === "sessions" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
+  if (parts.length === 2 && parts[0] === "domains" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
   if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&

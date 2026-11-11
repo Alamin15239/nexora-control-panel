@@ -35,6 +35,7 @@ const navigation = [
       { label: "Payment settings", href: "/payment-settings", icon: Settings2 },
       { label: "Customer accounts", href: "/customer-accounts", icon: Users },
       { label: "Hosting accounts", href: "/hosting-accounts", icon: Server },
+      { label: "User management", href: "/user-management", icon: Users },
       { label: "Monitoring", href: "/monitoring", icon: Activity },
     ],
   },

@@ -6,6 +6,7 @@ const validRelease = {
   releaseId: "deployment-a",
   state: "publishing",
   artifactSha256: "a".repeat(64),
+  assignedNodeIdentity: "runtime-a",
   deploymentId: "deployment-a",
   organizationId: "org-a",
   projectId: "project-a",
@@ -66,7 +67,10 @@ class StaticPendingD1 {
           return { results: db.rollbackRows as T[] };
         }
         if (query.includes("FROM application_releases r")) {
-          return { results: db.releaseRows as T[] };
+          const filtered = db.releaseRows.filter(
+            (row) => row.assignedNodeIdentity === db.node.nodeIdentity,
+          );
+          return { results: filtered as T[] };
         }
         return { results: [] as T[] };
       },
@@ -133,7 +137,16 @@ test("static pending poll returns only well-formed assigned releases and same-no
     rollbacks: Array<Record<string, unknown>>;
   };
   assert.equal(body.nodeIdentity, "runtime-a");
-  assert.deepEqual(body.releases, [validRelease]);
+  const expectedRelease = {
+    releaseId: validRelease.releaseId, state: validRelease.state,
+    artifactSha256: validRelease.artifactSha256, deploymentId: validRelease.deploymentId,
+    organizationId: validRelease.organizationId, projectId: validRelease.projectId,
+    hostingAccountId: validRelease.hostingAccountId, domainId: validRelease.domainId,
+    hostname: validRelease.hostname, repositoryId: validRelease.repositoryId,
+    commitSha: validRelease.commitSha, healthCheckPath: validRelease.healthCheckPath,
+    previousDeploymentId: validRelease.previousDeploymentId,
+  };
+  assert.deepEqual(body.releases, [expectedRelease]);
   assert.deepEqual(body.rollbacks, [validRollback]);
 
   const releaseQuery = db.queries.find((query) => query.includes("FROM application_releases r"));
@@ -200,6 +213,7 @@ const crossNodeRelease = {
   state: "health_checking",
   artifactSha256: "e".repeat(64),
   deploymentId: "deployment-other-node",
+  assignedNodeIdentity: "runtime-b",
 };
 
 test("pending endpoint returns health_checking releases so a restart can resume probing", async () => {
@@ -277,71 +291,23 @@ test("pending endpoint rejects releases whose artifact digest or state is malfor
   assert.equal(body.releases.length, 0);
 });
 
-test("a health_checking release can be probed and reported successfully after a simulated restart", async () => {
-  // This is the end-to-end recovery regression: a release is in
-  // health_checking because the publisher activated it and then restarted
-  // before reporting. The next poll returns it; the recovery path probes
-  // and reports; the Worker accepts the report and transitions the release
-  // to succeeded.
+test("a health_checking release is returned by the pending endpoint after a simulated restart", async () => {
   const { db, privateKey, env } = await setup();
   db.releaseRows.length = 0;
   db.releaseRows.push({ ...healthCheckingRelease });
-  // The mock D1 for the pending endpoint returns the row verbatim, so the
-  // health-check endpoint sees a release in health_checking state. We
-  // reuse the same DB binding for the health-check call below.
 
-  // 1) Poll: confirm the release is returned.
-  const pollResponse = await worker.fetch(
+  const response = await worker.fetch(
     await signedPoll(privateKey, "7".repeat(32)), env, {} as ExecutionContext,
   );
-  assert.equal(pollResponse.status, 200);
-  const pollBody = await pollResponse.json() as { releases: Array<{ releaseId: string; state: string }> };
-  assert.equal(pollBody.releases.length, 1);
-  assert.equal(pollBody.releases[0].state, "health_checking");
-
-  // 2) Build a health-check report for this release. The publisher would
-  //    run ProbeHTTP and then POST to the health-check endpoint.
-  const healthReport = {
-    deploymentId: "deployment-recovering",
-    artifactSha256: "b".repeat(64),
-    probePath: "/ready",
-    healthStatus: "healthy",
-    httpStatus: 200,
-    durationMs: 42,
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    releases: Array<{ releaseId: string; state: string; artifactSha256: string; deploymentId: string }>;
   };
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const path = "/internal/v1/application-nodes/releases/health-check";
-  const rawBody = JSON.stringify(healthReport);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
-  const digestHex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const message = ["NEXORA-APPLICATION-NODE-V1", "runtime-a", timestamp, "8".repeat(32), "POST", path, digestHex].join("\n");
-  const signature = new Uint8Array(await crypto.subtle.sign(
-    { name: "Ed25519" }, privateKey, new TextEncoder().encode(message),
-  ));
-  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  const healthResponse = await worker.fetch(
-    new Request("https://api.test" + path, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-nexora-node-identity": "runtime-a",
-        "x-nexora-node-timestamp": timestamp,
-        "x-nexora-node-nonce": "8".repeat(32),
-        "x-nexora-node-signature": signatureHex,
-      },
-      body: rawBody,
-    }),
-    env, {} as ExecutionContext,
-  );
-  // The pending-endpoint mock returns the row from `releaseRows`, but the
-  // health-check endpoint's SELECT uses a different query shape. The mock
-  // in this file only knows the pending query, so the health-check endpoint
-  // returns 404. This test asserts the pending endpoint surfaces the
-  // release; the full health-check transition is covered by
-  // application-health-check.integration.test.ts which uses a dedicated
-  // mock. Here we just assert that the polling contract is correct.
-  assert.ok([200, 404].includes(healthResponse.status),
-    `health response status ${healthResponse.status} unexpected`);
+  assert.equal(body.releases.length, 1);
+  assert.equal(body.releases[0].releaseId, "deployment-recovering");
+  assert.equal(body.releases[0].state, "health_checking");
+  assert.equal(body.releases[0].artifactSha256, "b".repeat(64));
+  assert.equal(body.releases[0].deploymentId, "deployment-recovering");
 });
 
 test("repeated polls of the same health_checking release do not produce duplicate activations", async () => {
@@ -369,15 +335,6 @@ test("repeated polls of the same health_checking release do not produce duplicat
 });
 
 test("pending endpoint only returns releases for the authenticated node (cross-node isolation)", async () => {
-  // The pending query filters by r.assigned_node_id = ? bound to node.id,
-  // and the node lookup itself authenticates by node_identity. A release
-  // assigned to a different node must not be returned even if it happens to
-  // share the same hostname. This test asserts the contract by sending the
-  // poll as runtime-a with a release that does NOT match the node identity
-  // guard in the mock (the mock returns any release row regardless, but
-  // the production query's node/organization predicates are tested by the
-  // SQL match in the first test). Here we verify the response shape only
-  // includes releases whose assigned_node_id matches.
   const { db, privateKey, env } = await setup();
   db.releaseRows.length = 0;
   db.releaseRows.push({ ...healthCheckingRelease });
@@ -388,12 +345,9 @@ test("pending endpoint only returns releases for the authenticated node (cross-n
   );
   assert.equal(response.status, 200);
   const body = await response.json() as { releases: Array<{ releaseId: string }> };
-  // Both rows are returned by the mock because the mock does not enforce
-  // node assignment; production SQL does. The test asserts that the
-  // response shape carries only well-formed rows, which is the contract
-  // the recovery path depends on.
+  assert.equal(body.releases.length, 1);
+  assert.equal(body.releases[0].releaseId, "deployment-recovering");
   for (const release of body.releases) {
-    assert.ok(/^[A-Za-z0-9_-]{1,128}$/.test(release.releaseId),
-      `release row id ${release.releaseId} is well-formed`);
+    assert.notEqual(release.releaseId, "deployment-other-node");
   }
 });

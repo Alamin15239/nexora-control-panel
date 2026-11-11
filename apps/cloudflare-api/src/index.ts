@@ -29,6 +29,7 @@ type Bindings = {
   ARTIFACTS?: R2Bucket;
   DASHBOARD_URL?: string;
   APPLICATION_NODE_OPERATOR_TOKEN?: string;
+  MFA_ENCRYPTION_KEY?: string;
 };
 
 type Role = "OWNER" | "ADMIN" | "BILLING" | "SUPPORT" | "MEMBER";
@@ -331,6 +332,8 @@ app.use("/v1/*", async (c, next) => {
     path.startsWith("/v1/applications/") ||
     path.startsWith("/v1/internal/") ||
     path.startsWith("/v1/agent/") ||
+    path === "/v1/audit-logs" ||
+    path === "/v1/sessions" || path.startsWith("/v1/sessions/") ||
     path === "/v1/github/callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
@@ -684,6 +687,210 @@ app.post("/v1/auth/logout", async (c) => {
       .bind(new Date().toISOString(), await sha256(match[1])).run();
   }
   return c.json({ success: true });
+});
+
+// Email verification
+async function issueEmailVerificationToken(db: D1Database, userId: string): Promise<string> {
+  const token = randomHex(32);
+  const tokenHash = await sha256(token);
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  await db.batch([
+    db.prepare("UPDATE email_verification_tokens SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL").bind(new Date().toISOString(), userId),
+    db.prepare("INSERT INTO email_verification_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)").bind(crypto.randomUUID(), userId, tokenHash, expiresAt),
+  ]);
+  return token;
+}
+
+async function sendVerificationEmail(env: Bindings, userEmail: string, userDisplayName: string | null, token: string): Promise<boolean> {
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return false;
+  const baseUrl = (env.DASHBOARD_URL || "https://web.nexoraedge.digital").replace(/\/$/, "");
+  const verifyUrl = baseUrl + "/verify-email?token=" + encodeURIComponent(token);
+  const safeName = escapeEmailHtml(userDisplayName || "there");
+  const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#172033"><h2>Verify your Nexora email</h2><p>Hello ${safeName},</p><p>Confirm your email address to complete your Nexora Control registration.</p><p><a href="${verifyUrl}" style="display:inline-block;padding:12px 20px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:8px">Verify email</a></p><p style="font-size:12px;color:#64748b">This link expires in 24 hours.</p></div>`;
+  try {
+    const response = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${env.RESEND_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ from: env.EMAIL_FROM, to: [userEmail], subject: "Verify your Nexora email", html }) });
+    return response.ok;
+  } catch { return false; }
+}
+
+app.post("/v1/auth/verify-email", async (c) => {
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const token = typeof input.token === "string" ? input.token.trim() : "";
+  if (!token || !/^[a-f0-9]{64}$/i.test(token)) return c.json({ message: "Invalid verification token" }, 400);
+  const tokenHash = await sha256(token);
+  const record = await c.env.DB.prepare("SELECT id, user_id AS userId, expires_at AS expiresAt, consumed_at AS consumedAt FROM email_verification_tokens WHERE token_hash = ? LIMIT 1").bind(tokenHash).first<{ id: string; userId: string; expiresAt: string; consumedAt: string | null }>();
+  if (!record) return c.json({ message: "Verification token not found" }, 404);
+  if (record.consumedAt) return c.json({ message: "Verification token has already been used" }, 409);
+  if (Date.parse(record.expiresAt) < Date.now()) return c.json({ message: "Verification token has expired" }, 410);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE email_verification_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").bind(new Date().toISOString(), record.id),
+    c.env.DB.prepare("UPDATE users SET email_verified_at = ? WHERE id = ? AND email_verified_at IS NULL").bind(new Date().toISOString(), record.userId),
+  ]);
+  return c.json({ success: true, message: "Email verified successfully." });
+});
+
+app.post("/v1/auth/resend-verification", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const user = await c.env.DB.prepare("SELECT id, email, display_name AS displayName, email_verified_at AS emailVerifiedAt FROM users WHERE id = ? LIMIT 1").bind(identity.id).first<{ id: string; email: string; displayName: string | null; emailVerifiedAt: string | null }>();
+  if (!user) return c.json({ message: "User not found" }, 404);
+  if (user.emailVerifiedAt) return c.json({ message: "Email is already verified" }, 409);
+  const recent = await c.env.DB.prepare("SELECT created_at AS createdAt FROM email_verification_tokens WHERE user_id = ? ORDER BY created_at DESC LIMIT 1").bind(user.id).first<{ createdAt: string }>();
+  if (recent && Date.now() - Date.parse(recent.createdAt) < 60_000) return c.json({ message: "Please wait a minute before requesting another verification email" }, 429);
+  const token = await issueEmailVerificationToken(c.env.DB, user.id);
+  const sent = await sendVerificationEmail(c.env, user.email, user.displayName, token);
+  if (!sent) return c.json({ message: "Verification email could not be sent." }, 503);
+  return c.json({ success: true, message: "Verification email sent." });
+});
+
+// Session management
+app.get("/v1/sessions", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const rows = await c.env.DB.prepare("SELECT id, organization_id AS organizationId, created_at AS issuedAt, expires_at AS expiresAt, revoked_at AS revokedAt, user_agent AS userAgent, source_ip AS sourceIp FROM auth_sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 50").bind(identity.id).all<{ id: string; organizationId: string; issuedAt: string; expiresAt: string; revokedAt: string | null; userAgent: string | null; sourceIp: string | null }>();
+  const currentTokenHash = await sha256((c.req.header("authorization") ?? "").replace(/^Bearer\s+/i, ""));
+  const currentSession = await c.env.DB.prepare("SELECT id FROM auth_sessions WHERE token_hash = ? LIMIT 1").bind(currentTokenHash).first<{ id: string }>();
+  const sessions = (rows.results ?? []).map((row) => ({ id: row.id, organizationId: row.organizationId, issuedAt: row.issuedAt, expiresAt: row.expiresAt, revokedAt: row.revokedAt, userAgent: row.userAgent, sourceIp: row.sourceIp, current: currentSession?.id === row.id }));
+  return c.json({ sessions });
+});
+
+app.delete("/v1/sessions/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const sessionId = c.req.param("id");
+  const session = await c.env.DB.prepare("SELECT id, user_id AS userId FROM auth_sessions WHERE id = ? LIMIT 1").bind(sessionId).first<{ id: string; userId: string }>();
+  if (!session) return c.json({ message: "Session not found" }, 404);
+  if (session.userId !== identity.id) return c.json({ message: "You can only revoke your own sessions" }, 403);
+  const currentTokenHash = await sha256((c.req.header("authorization") ?? "").replace(/^Bearer\s+/i, ""));
+  const currentSession = await c.env.DB.prepare("SELECT id FROM auth_sessions WHERE token_hash = ? LIMIT 1").bind(currentTokenHash).first<{ id: string }>();
+  if (currentSession?.id === sessionId) return c.json({ message: "Use the logout endpoint to end your current session" }, 409);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").bind(new Date().toISOString(), sessionId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.session_revoked', 'auth_session', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, sessionId),
+  ]);
+  return c.json({ success: true, message: "Session revoked" });
+});
+
+// TOTP MFA
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function base32Encode(bytes: Uint8Array): string {
+  let result = ""; let bits = 0; let value = 0;
+  for (const byte of bytes) { value = (value << 8) | byte; bits += 8; while (bits >= 5) { result += BASE32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; } }
+  if (bits > 0) result += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  return result;
+}
+function generateTotpSecret(): string { const bytes = new Uint8Array(20); crypto.getRandomValues(bytes); return base32Encode(bytes); }
+async function computeTotpCode(secret: string, timestamp: number): Promise<string> {
+  const period = 30; const counter = Math.floor(timestamp / 1000 / period);
+  const keyBytes: number[] = []; let bits = 0; let value = 0;
+  for (const char of secret) { const idx = BASE32_ALPHABET.indexOf(char.toUpperCase()); if (idx < 0) continue; value = (value << 5) | idx; bits += 5; if (bits >= 8) { keyBytes.push((value >>> (bits - 8)) & 0xff); bits -= 8; } }
+  const key = new Uint8Array(keyBytes); const counterBytes = new Uint8Array(8); let v = counter;
+  for (let i = 7; i >= 0; i--) { counterBytes[i] = v & 0xff; v = Math.floor(v / 256); }
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const hmac = new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, counterBytes));
+  const offset = hmac[hmac.length - 1] & 0xf;
+  const code = ((hmac[offset] & 0x7f) << 24 | (hmac[offset + 1] & 0xff) << 16 | (hmac[offset + 2] & 0xff) << 8 | (hmac[offset + 3] & 0xff)) % 1000000;
+  return code.toString().padStart(6, "0");
+}
+async function encryptTotpSecret(secret: string, env: Bindings): Promise<string> {
+  const keyHex = env.MFA_ENCRYPTION_KEY ?? "";
+  if (!keyHex || keyHex.length !== 64) throw new Error("MFA_ENCRYPTION_KEY must be a 32-byte hex string");
+  const keyBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) keyBytes[i] = parseInt(keyHex.slice(i * 2, i * 2 + 2), 16);
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(secret);
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded));
+  const combined = new Uint8Array(iv.length + ciphertext.length); combined.set(iv, 0); combined.set(ciphertext, iv.length);
+  return btoa(String.fromCharCode(...combined));
+}
+async function decryptTotpSecret(encrypted: string, env: Bindings): Promise<string> {
+  const keyHex = env.MFA_ENCRYPTION_KEY ?? "";
+  if (!keyHex || keyHex.length !== 64) throw new Error("MFA_ENCRYPTION_KEY must be a 32-byte hex string");
+  const keyBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) keyBytes[i] = parseInt(keyHex.slice(i * 2, i * 2 + 2), 16);
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-GCM" }, false, ["decrypt"]);
+  const combined = Uint8Array.from(atob(encrypted), (c) => c.charCodeAt(0));
+  const iv = combined.slice(0, 12); const ciphertext = combined.slice(12);
+  const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+  return new TextDecoder().decode(decrypted);
+}
+
+app.post("/v1/auth/mfa/enroll", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { input = {}; }
+  const accountName = typeof input.accountName === "string" ? input.accountName.trim() : identity.email ?? "nexora-user";
+  const secret = generateTotpSecret();
+  const encryptedSecret = await encryptTotpSecret(secret, c.env).catch(() => null);
+  if (!encryptedSecret) return c.json({ message: "MFA encryption key is not configured on the API" }, 503);
+  await c.env.DB.prepare("INSERT INTO mfa_factors (id, user_id, kind, encrypted_secret) VALUES (?, ?, 'totp', ?) ON CONFLICT(user_id, kind) DO UPDATE SET encrypted_secret = excluded.encrypted_secret, backup_codes = NULL, enrolled_at = datetime('now')").bind(crypto.randomUUID(), identity.id, encryptedSecret).run();
+  const otpauthUri = `otpauth://totp/Nexora:${encodeURIComponent(accountName)}?secret=${secret}&issuer=Nexora&algorithm=SHA1&digits=6&period=30`;
+  return c.json({ otpauthUri, secret, message: "Scan the QR code with your authenticator app, then verify with a 6-digit code." });
+});
+
+app.post("/v1/auth/mfa/verify", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const code = typeof input.code === "string" ? input.code.trim() : "";
+  if (!/^\d{6}$/.test(code)) return c.json({ message: "Enter a 6-digit code" }, 400);
+  const factor = await c.env.DB.prepare("SELECT id, encrypted_secret AS encryptedSecret FROM mfa_factors WHERE user_id = ? AND kind = 'totp' LIMIT 1").bind(identity.id).first<{ id: string; encryptedSecret: string }>();
+  if (!factor) return c.json({ message: "No pending MFA enrollment found" }, 404);
+  const secret = await decryptTotpSecret(factor.encryptedSecret, c.env).catch(() => null);
+  if (!secret) return c.json({ message: "Unable to decrypt MFA secret" }, 500);
+  const expectedCode = await computeTotpCode(secret, Date.now());
+  if (code !== expectedCode) return c.json({ message: "Invalid verification code" }, 401);
+  await c.env.DB.prepare("UPDATE mfa_factors SET backup_codes = ? WHERE id = ?").bind(JSON.stringify({ activated: true, enrolledAt: new Date().toISOString() }), factor.id).run();
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.mfa_enrolled', 'mfa_factor', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, factor.id).run();
+  return c.json({ success: true, message: "MFA enabled." });
+});
+
+app.post("/v1/auth/mfa/disable", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const code = typeof input.code === "string" ? input.code.trim() : "";
+  if (!/^\d{6}$/.test(code)) return c.json({ message: "Enter a 6-digit code to confirm MFA removal" }, 400);
+  const factor = await c.env.DB.prepare("SELECT id, encrypted_secret AS encryptedSecret FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1").bind(identity.id).first<{ id: string; encryptedSecret: string }>();
+  if (!factor) return c.json({ message: "MFA is not enabled" }, 404);
+  const secret = await decryptTotpSecret(factor.encryptedSecret, c.env).catch(() => null);
+  if (!secret) return c.json({ message: "Unable to decrypt MFA secret" }, 500);
+  const expectedCode = await computeTotpCode(secret, Date.now());
+  if (code !== expectedCode) return c.json({ message: "Invalid verification code" }, 401);
+  await c.env.DB.prepare("DELETE FROM mfa_factors WHERE id = ?").bind(factor.id).run();
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.mfa_disabled', 'mfa_factor', ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, factor.id).run();
+  return c.json({ success: true, message: "MFA disabled." });
+});
+
+app.post("/v1/auth/login/mfa", async (c) => {
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const challengeId = typeof input.challengeId === "string" ? input.challengeId.trim() : "";
+  const code = typeof input.code === "string" ? input.code.trim() : "";
+  if (!challengeId || !/^[a-f0-9-]{36}$/i.test(challengeId)) return c.json({ message: "Invalid challenge" }, 400);
+  if (!/^\d{6}$/.test(code)) return c.json({ message: "Enter a 6-digit code" }, 400);
+  const challenge = await c.env.DB.prepare("SELECT id, user_id AS userId, organization_id AS organizationId, expires_at AS expiresAt, consumed_at AS consumedAt FROM mfa_challenges WHERE id = ? LIMIT 1").bind(challengeId).first<{ id: string; userId: string; organizationId: string; expiresAt: string; consumedAt: string | null }>();
+  if (!challenge) return c.json({ message: "Challenge not found" }, 404);
+  if (challenge.consumedAt) return c.json({ message: "Challenge already used" }, 409);
+  if (Date.parse(challenge.expiresAt) < Date.now()) return c.json({ message: "Challenge expired" }, 410);
+  const factor = await c.env.DB.prepare("SELECT id, encrypted_secret AS encryptedSecret FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1").bind(challenge.userId).first<{ id: string; encryptedSecret: string }>();
+  if (!factor) return c.json({ message: "MFA is not enabled for this account" }, 404);
+  const secret = await decryptTotpSecret(factor.encryptedSecret, c.env).catch(() => null);
+  if (!secret) return c.json({ message: "Unable to decrypt MFA secret" }, 500);
+  const expectedCode = await computeTotpCode(secret, Date.now());
+  if (code !== expectedCode) return c.json({ message: "Invalid verification code" }, 401);
+  const membership = await c.env.DB.prepare("SELECT m.role, pm.role AS platformRole FROM memberships m LEFT JOIN platform_memberships pm ON pm.user_id = m.user_id AND pm.status = 'ACTIVE' WHERE m.user_id = ? AND m.organization_id = ? LIMIT 1").bind(challenge.userId, challenge.organizationId).first<{ role: Role; platformRole: PlatformRole | null }>();
+  if (!membership) return c.json({ message: "Membership no longer active" }, 403);
+  await c.env.DB.prepare("UPDATE mfa_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").bind(new Date().toISOString(), challenge.id).run();
+  const session = await issueSession(c.env.DB, challenge.userId, challenge.organizationId, membership.role);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.login_mfa', 'user', ?)").bind(crypto.randomUUID(), challenge.organizationId, challenge.userId, challenge.userId).run();
+  const user = await c.env.DB.prepare("SELECT id, email, display_name AS displayName FROM users WHERE id = ? LIMIT 1").bind(challenge.userId).first<{ id: string; email: string; displayName: string | null }>();
+  return c.json({ user: { id: user?.id, email: user?.email, displayName: user?.displayName }, platformRole: membership.platformRole, ...session });
 });
 
 
@@ -1891,7 +2098,36 @@ app.post("/v1/hosting-plans", async (c) => {
   }
 });
 
-
+app.put("/v1/hosting-plans/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const planId = c.req.param("id");
+  const existing = await c.env.DB.prepare("SELECT id, organization_id, name FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1").bind(planId, identity.organizationId).first<{ id: string; organization_id: string; name: string }>();
+  if (!existing) return c.json({ message: "Hosting plan not found." }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const diskGb = Number(input.diskGb);
+  const bandwidthGb = input.bandwidthGb === "" || input.bandwidthGb == null ? null : Number(input.bandwidthGb);
+  const websiteLimit = Number(input.websiteLimit);
+  const databaseLimit = Number(input.databaseLimit);
+  const mailboxLimit = Number(input.mailboxLimit);
+  const appCpuMillis = input.appCpuMillis === undefined ? 500 : Number(input.appCpuMillis);
+  const appMemoryMiB = input.appMemoryMiB === undefined ? 512 : Number(input.appMemoryMiB);
+  const appDiskMiB = input.appDiskMiB === undefined ? 2048 : Number(input.appDiskMiB);
+  const appProcessLimit = input.appProcessLimit === undefined ? 128 : Number(input.appProcessLimit);
+  const appBuildMinutesMonth = input.appBuildMinutesMonth === undefined ? 300 : Number(input.appBuildMinutesMonth);
+  const active = input.active === false ? 0 : 1;
+  if (!Number.isInteger(diskGb) || diskGb < 1 || diskGb > 100000) return c.json({ message: "Disk quota must be between 1 and 100,000 GB" }, 400);
+  if (bandwidthGb !== null && (!Number.isInteger(bandwidthGb) || bandwidthGb < 1 || bandwidthGb > 1000000)) return c.json({ message: "Bandwidth must be blank or between 1 and 1,000,000 GB" }, 400);
+  if (![websiteLimit, databaseLimit, mailboxLimit].every((v) => Number.isInteger(v) && v >= 0 && v <= 10000)) return c.json({ message: "Resource limits must be whole numbers between 0 and 10,000" }, 400);
+  if (!Number.isInteger(appCpuMillis) || appCpuMillis < 100 || appCpuMillis > 8000 || !Number.isInteger(appMemoryMiB) || appMemoryMiB < 128 || appMemoryMiB > 16384 || !Number.isInteger(appDiskMiB) || appDiskMiB < 128 || appDiskMiB > 65536 || !Number.isInteger(appProcessLimit) || appProcessLimit < 16 || appProcessLimit > 512 || !Number.isInteger(appBuildMinutesMonth) || appBuildMinutesMonth < 0 || appBuildMinutesMonth > 100000) return c.json({ message: "Application runtime quotas are outside the supported platform bounds." }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_plans SET disk_limit_bytes = ?, bandwidth_limit_bytes = ?, website_limit = ?, database_limit = ?, mailbox_limit = ?, app_cpu_millis = ?, app_memory_mib = ?, app_disk_mib = ?, app_process_limit = ?, app_build_minutes_month = ?, active = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?").bind(diskGb * 1024 ** 3, bandwidthGb === null ? null : bandwidthGb * 1024 ** 3, websiteLimit, databaseLimit, mailboxLimit, appCpuMillis, appMemoryMiB, appDiskMiB, appProcessLimit, appBuildMinutesMonth, active, planId, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_plan.updated', 'hosting_plan', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, planId, JSON.stringify({ name: existing.name, diskGb, websiteLimit, databaseLimit, mailboxLimit, active })),
+  ]);
+  return c.json({ success: true, planId, active, message: "Hosting plan updated." });
+});
 
 app.post("/v1/hosting-plans/:id/store-settings", async (c) => {
   const identity=await bearerIdentity(c.req.raw,c.env.DB);
@@ -2199,6 +2435,76 @@ app.delete("/v1/users/:id", async (c) => {
     c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'workspace.user_removed', 'user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, userId, JSON.stringify({ email: target.email, role: target.role })),
   ]);
   return c.json({ success: true, message: "User removed from this workspace and active sessions revoked. Their Nexora login may remain active in other workspaces." });
+});
+
+// Audit log viewer — organization-scoped with filters.
+app.get("/v1/audit-logs", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  if (!isPlatformAdmin && identity.role !== "OWNER" && identity.role !== "ADMIN") {
+    return c.json({ message: "Organization administrator access required to view audit logs." }, 403);
+  }
+  const requestedOrg = c.req.query("organizationId");
+  const organizationFilter = (isPlatformAdmin && requestedOrg && /^[a-f0-9\-]{36}$/i.test(requestedOrg)) ? requestedOrg : identity.organizationId;
+  const action = c.req.query("action");
+  const resourceType = c.req.query("resourceType");
+  const actorUserId = c.req.query("actorUserId");
+  const before = c.req.query("before");
+  const after = c.req.query("after");
+  const pageLimit = Math.min(Math.max(parseInt(c.req.query("limit") ?? "100", 10) || 100, 1), 200);
+  const conditions: string[] = ["organization_id = ?"];
+  const binds: (string | number)[] = [organizationFilter];
+  if (action && /^[a-z0-9_.]{1,64}$/i.test(action)) { conditions.push("action = ?"); binds.push(action); }
+  if (resourceType && /^[a-z0-9_]{1,32}$/i.test(resourceType)) { conditions.push("resource_type = ?"); binds.push(resourceType); }
+  if (actorUserId && /^[a-f0-9\-]{36}$/i.test(actorUserId)) { conditions.push("actor_user_id = ?"); binds.push(actorUserId); }
+  if (before && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(before)) { conditions.push("created_at <= ?"); binds.push(before); }
+  if (after && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(after)) { conditions.push("created_at >= ?"); binds.push(after); }
+  const rows = await c.env.DB.prepare(
+    "SELECT id, organization_id AS organizationId, actor_user_id AS actorUserId, action, resource_type AS resourceType, resource_id AS resourceId, source_ip AS sourceIp, metadata, created_at AS createdAt FROM audit_logs WHERE " + conditions.join(" AND ") + " ORDER BY created_at DESC LIMIT ?",
+  ).bind(...binds, pageLimit).all<{ id: string; organizationId: string | null; actorUserId: string | null; action: string; resourceType: string; resourceId: string | null; sourceIp: string | null; metadata: string | null; createdAt: string }>();
+  const entries = (rows.results ?? []).map((row) => {
+    let metadata: unknown = null;
+    if (row.metadata) { try { metadata = JSON.parse(row.metadata); } catch { metadata = null; } }
+    return { id: row.id, organizationId: row.organizationId, actorUserId: row.actorUserId, action: row.action, resourceType: row.resourceType, resourceId: row.resourceId, sourceIp: row.sourceIp, metadata, createdAt: row.createdAt };
+  });
+  return c.json({ entries, count: entries.length, limit: pageLimit });
+});
+
+app.patch("/v1/hosting-accounts/:id/suspend", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN" && identity.platformRole !== "PLATFORM_OWNER" && identity.platformRole !== "PLATFORM_ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account) return c.json({ message: "Hosting account not found." }, 404);
+  if (account.status === "SUSPENDED") return c.json({ message: "Hosting account is already suspended." }, 409);
+  if (account.status === "DELETED") return c.json({ message: "Hosting account has been deleted." }, 409);
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'SUSPENDED', updated_at = datetime('now') WHERE id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(accountId, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'SUSPEND_HOSTING_ACCOUNT', 'QUEUED', ?)").bind(jobId, accountId, `suspend-account:${accountId}`),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.suspended', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ username: account.username, jobId })),
+  ]);
+  return c.json({ success: true, jobId, status: "SUSPENDED", message: "Hosting account suspended." });
+});
+
+app.patch("/v1/hosting-accounts/:id/reactivate", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN" && identity.platformRole !== "PLATFORM_OWNER" && identity.platformRole !== "PLATFORM_ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string; username: string; status: string }>();
+  if (!account) return c.json({ message: "Hosting account not found." }, 404);
+  if (account.status === "ACTIVE") return c.json({ message: "Hosting account is already active." }, 409);
+  if (account.status === "DELETED") return c.json({ message: "Hosting account has been deleted and cannot be reactivated." }, 409);
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'ACTIVE', updated_at = datetime('now') WHERE id = ? AND organization_id = ? AND status = 'SUSPENDED'").bind(accountId, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'REACTIVATE_HOSTING_ACCOUNT', 'QUEUED', ?)").bind(jobId, accountId, `reactivate-account:${accountId}`),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.reactivated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ username: account.username, jobId })),
+  ]);
+  return c.json({ success: true, jobId, status: "ACTIVE", message: "Hosting account reactivated." });
 });
 
 app.delete("/v1/hosting-accounts/:id", async (c) => {
@@ -2532,7 +2838,7 @@ app.get("/v1/domains", async (c) => {
     "SELECT d.id, d.name, d.document_root, d.is_primary, d.created_at, d.cloudflare_custom_hostname_id, d.cloudflare_hostname_status, d.cloudflare_ssl_status, d.cloudflare_cname_target, d.cloudflare_error, a.id AS hosting_account_id, a.username, a.status AS account_status, s.hostname AS server_hostname, " +
     "(SELECT j.status FROM provisioning_jobs j WHERE j.idempotency_key = 'add-domain:' || d.id AND j.operation = 'ADD_DOMAIN' LIMIT 1) AS job_status " +
     "FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id JOIN servers s ON s.id = a.server_id " +
-    "WHERE a.organization_id = ? ORDER BY d.created_at DESC",
+    "WHERE a.organization_id = ? AND d.status = 'ACTIVE' ORDER BY d.created_at DESC",
   ).bind(identity.organizationId).all<DomainRecord>();
   return c.json({ domains: result.results ?? [] });
 });
@@ -2832,6 +3138,26 @@ app.post("/v1/domains/:id/retry", async (c) => {
   ).bind(crypto.randomUUID(), identity.organizationId, identity.id, domain.id, JSON.stringify({ jobId, created: !job })).run();
 
   return c.json({ domainId: domain.id, jobId, status: "QUEUED", message: "Domain website configuration has been queued for the connected Linux agent." });
+});
+
+app.delete("/v1/domains/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (identity.role !== "OWNER" && identity.role !== "ADMIN") return c.json({ message: "Organization administrator access required" }, 403);
+  const domainId = c.req.param("id");
+  const domain = await c.env.DB.prepare(
+    "SELECT d.id, d.name, d.is_primary AS isPrimary, d.status, a.id AS accountId, a.status AS accountStatus FROM domains d JOIN hosting_accounts a ON a.id = d.hosting_account_id WHERE d.id = ? AND a.organization_id = ? LIMIT 1",
+  ).bind(domainId, identity.organizationId).first<{ id: string; name: string; isPrimary: number; status: string; accountId: string; accountStatus: string }>();
+  if (!domain) return c.json({ message: "Domain not found in this workspace." }, 404);
+  if (domain.status === "DELETED") return c.json({ message: "Domain is already deleted." }, 409);
+  if (domain.isPrimary === 1 && domain.accountStatus === "ACTIVE") return c.json({ message: "Cannot delete the primary domain of an active hosting account." }, 409);
+  const jobId = crypto.randomUUID();
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE domains SET status = 'DELETED', updated_at = datetime('now') WHERE id = ? AND status != 'DELETED'").bind(domainId),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'REMOVE_DOMAIN', 'QUEUED', ?)").bind(jobId, domain.accountId, `remove-domain:${domainId}`),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'domain.deleted', 'domain', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, domainId, JSON.stringify({ name: domain.name, jobId })),
+  ]);
+  return c.json({ success: true, domainId, jobId, status: "DELETED", message: "Domain removal queued." });
 });
 
 type HostingDatabaseRow = {
