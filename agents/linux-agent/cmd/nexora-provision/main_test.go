@@ -310,3 +310,31 @@ func TestValidateDatabaseDeletionUsers(t *testing.T) {
 		})
 	}
 }
+
+func TestPHPFPMPoolConfigWithSettingsAppliesCustomLimits(t *testing.T) {
+	config := phpFPMPoolConfigWithSettings("client01", phpPoolSettings{MemoryLimitMib: 512, MaxExecutionTime: 60, UploadMaxFilesize: 128, MaxInputVars: 2000, DisplayErrors: 1})
+	for _, d := range []string{"php_admin_value[memory_limit] = 512M", "php_admin_value[max_execution_time] = 60", "php_admin_value[upload_max_filesize] = 128M", "php_admin_value[max_input_vars] = 2000", "php_admin_flag[display_errors] = on"} {
+		if !strings.Contains(config, d) { t.Errorf("missing %q", d) }
+	}
+}
+
+func TestPHPFPMPoolConfigWithSettingsUsesDefaultsForZeroValues(t *testing.T) {
+	config := phpFPMPoolConfigWithSettings("client01", phpPoolSettings{})
+	if !strings.Contains(config, "php_admin_value[memory_limit] = 256M") { t.Error("expected default 256M") }
+	if !strings.Contains(config, "php_admin_flag[display_errors] = off") { t.Error("expected display_errors off") }
+}
+
+func TestPHPFPMPoolConfigWithSettingsRejectsInvalidUsername(t *testing.T) {
+	if phpFPMPoolConfigWithSettings("../etc", phpPoolSettings{}) != "" { t.Fatal("expected empty") }
+}
+
+func TestPHPFPMPoolConfigBackwardCompatibility(t *testing.T) {
+	if phpFPMPoolConfig("client01") != phpFPMPoolConfigWithSettings("client01", phpPoolSettings{MemoryLimitMib:256,MaxExecutionTime:30,UploadMaxFilesize:64,MaxInputVars:1000,DisplayErrors:0}) { t.Fatal("mismatch") }
+}
+
+func TestRequestDecodesPhpSettings(t *testing.T) {
+	req, err := decodeRequest(strings.NewReader(`{"operation":"UPDATE_PHP_POOL","username":"client01","phpVersion":"8.3","memoryLimitMib":512,"maxExecutionTimeSeconds":60,"uploadMaxFilesizeMib":128,"maxInputVars":2000,"displayErrors":1}`))
+	if err != nil { t.Fatalf("decode: %v", err) }
+	if req.PhpVersion != "8.3" { t.Errorf("version=%q", req.PhpVersion) }
+	if req.MemoryLimitMib != 512 { t.Errorf("mem=%d", req.MemoryLimitMib) }
+}

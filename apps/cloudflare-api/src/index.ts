@@ -334,6 +334,7 @@ app.use("/v1/*", async (c, next) => {
     path.startsWith("/v1/agent/") ||
     path === "/v1/audit-logs" ||
     path === "/v1/sessions" || path.startsWith("/v1/sessions/") ||
+    path.startsWith("/v1/organizations/") ||
     path === "/v1/github/callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
@@ -2801,7 +2802,11 @@ app.put("/v1/hosting-accounts/:id/php", async (c) => {
   if (!account) return c.json({ message: "Hosting account not found" }, 404);
   let input: Record<string, unknown>;
   try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
-  const phpVersion = typeof input.phpVersion === "string" && ["8.1","8.2","8.3","8.4"].includes(input.phpVersion) ? input.phpVersion : "8.3";
+  const SUPPORTED_PHP_VERSIONS = ["8.1", "8.2", "8.3", "8.4"];
+  const phpVersion = typeof input.phpVersion === "string" ? input.phpVersion.trim() : "";
+  if (!SUPPORTED_PHP_VERSIONS.includes(phpVersion)) {
+    return c.json({ message: `PHP version must be one of: ${SUPPORTED_PHP_VERSIONS.join(", ")}` }, 400);
+  }
   const memoryLimitMib = Number(input.memoryLimitMib);
   const maxExecutionTimeSeconds = Number(input.maxExecutionTimeSeconds);
   const uploadMaxFilesizeMib = Number(input.uploadMaxFilesizeMib);
@@ -2812,13 +2817,14 @@ app.put("/v1/hosting-accounts/:id/php", async (c) => {
   if (!Number.isInteger(uploadMaxFilesizeMib) || uploadMaxFilesizeMib < 1 || uploadMaxFilesizeMib > 2048) return c.json({ message: "Upload max filesize must be between 1 and 2048 MiB" }, 400);
   if (!Number.isInteger(maxInputVars) || maxInputVars < 100 || maxInputVars > 10000) return c.json({ message: "Max input vars must be between 100 and 10000" }, 400);
 
+  const phpRequestPayload = JSON.stringify({ phpVersion, memoryLimitMib, maxExecutionTimeSeconds, uploadMaxFilesizeMib, maxInputVars, displayErrors });
   await c.env.DB.batch([
     c.env.DB.prepare(
       "INSERT INTO hosting_account_php_settings (hosting_account_id, php_version, memory_limit_mib, max_execution_time_seconds, upload_max_filesize_mib, max_input_vars, display_errors, updated_at) " +
       "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) " +
       "ON CONFLICT(hosting_account_id) DO UPDATE SET php_version = excluded.php_version, memory_limit_mib = excluded.memory_limit_mib, max_execution_time_seconds = excluded.max_execution_time_seconds, upload_max_filesize_mib = excluded.upload_max_filesize_mib, max_input_vars = excluded.max_input_vars, display_errors = excluded.display_errors, updated_at = datetime('now')",
     ).bind(accountId, phpVersion, memoryLimitMib, maxExecutionTimeSeconds, uploadMaxFilesizeMib, maxInputVars, displayErrors),
-    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'UPDATE_PHP_POOL', 'QUEUED', ?)").bind(crypto.randomUUID(), accountId, `update-php:${accountId}`),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'UPDATE_PHP_POOL', 'QUEUED', ?, ?)").bind(crypto.randomUUID(), accountId, `update-php:${accountId}`, phpRequestPayload),
     c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.php_updated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ phpVersion, memoryLimitMib, maxExecutionTimeSeconds })),
   ]);
   return c.json({ success: true, message: "PHP settings updated. The agent will regenerate the PHP-FPM pool." });
@@ -7145,6 +7151,51 @@ export default {
       }).catch((error) => {
         console.error("R2 artifact retention task failed:", error);
       }),
+      runBackupSchedules(env).catch((error) => {
+        console.error("Backup scheduler failed:", error);
+      }),
     ]));
   },
 };
+
+async function runBackupSchedules(env: Bindings): Promise<void> {
+  if (!env.DB) return;
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const dueSchedules = await env.DB.prepare(
+    "SELECT bs.hosting_account_id AS accountId, bs.frequency, bs.retention_count AS retentionCount, " +
+    "bs.next_run_at AS nextRunAt, ha.organization_id AS organizationId, ha.username, ha.status " +
+    "FROM backup_schedules bs JOIN hosting_accounts ha ON ha.id = bs.hosting_account_id " +
+    "WHERE bs.frequency != 'disabled' AND ha.status = 'ACTIVE' AND (bs.next_run_at IS NULL OR bs.next_run_at <= ?) LIMIT 10",
+  ).bind(nowIso).all<{ accountId: string; frequency: string; retentionCount: number; nextRunAt: string | null; organizationId: string; username: string; status: string }>();
+  for (const schedule of dueSchedules.results ?? []) {
+    let nextRun: Date;
+    switch (schedule.frequency) {
+      case "daily": nextRun = new Date(now.getTime() + 24*60*60*1000); break;
+      case "weekly": nextRun = new Date(now.getTime() + 7*24*60*60*1000); break;
+      case "monthly": nextRun = new Date(now.getTime() + 30*24*60*60*1000); break;
+      default: continue;
+    }
+    const backupId = crypto.randomUUID();
+    const jobId = crypto.randomUUID();
+    const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
+    const databaseNames = (databases.results ?? []).map((db) => db.name);
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'PENDING', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
+      env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
+      env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId),
+      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId })),
+    ]);
+    const backups = await env.DB.prepare("SELECT id FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status = 'AVAILABLE' ORDER BY created_at DESC").bind(schedule.accountId, schedule.organizationId).all<{ id: string }>();
+    const allBackups = backups.results ?? [];
+    if (allBackups.length > schedule.retentionCount) {
+      for (const backup of allBackups.slice(schedule.retentionCount)) {
+        const deleteJobId = crypto.randomUUID();
+        await env.DB.batch([
+          env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND status = 'AVAILABLE'").bind(backup.id),
+          env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)").bind(deleteJobId, schedule.accountId, `backup-delete:${backup.id}`, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+        ]);
+      }
+    }
+  }
+}

@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   Activity, ArrowLeftFromLine, ArrowRightFromLine, Box, ChevronDown, Cloud,
   Database, FolderOpen, Globe2, HardDrive, LayoutDashboard, LockKeyhole,
-  Mail, Menu, Network, Search, Server, Settings2, ShieldCheck, Users, X, Github,
+  Mail, Menu, Monitor, Network, Search, Server, Settings2, Shield, ShieldCheck, Users, X, Github,
 } from "lucide-react";
 
 const navigation = [
@@ -36,6 +36,7 @@ const navigation = [
       { label: "Customer accounts", href: "/customer-accounts", icon: Users },
       { label: "Hosting accounts", href: "/hosting-accounts", icon: Server },
       { label: "User management", href: "/user-management", icon: Users },
+      { label: "Audit logs", href: "/audit-logs", icon: Shield },
       { label: "Monitoring", href: "/monitoring", icon: Activity },
     ],
   },
@@ -43,6 +44,7 @@ const navigation = [
     title: "Configuration",
     items: [
       { label: "Security & access", href: "/security", icon: LockKeyhole },
+      { label: "Active sessions", href: "/sessions", icon: Monitor },
       { label: "Settings", href: "/settings", icon: Settings2 },
     ],
   },

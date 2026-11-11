@@ -36,6 +36,10 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "php") return method === "GET" || method === "PUT";
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "backup-schedule") return method === "GET" || method === "PUT";
   if (parts.length === 2 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PUT";
+  if (parts.length === 3 && parts[0] === "auth" && parts[1] === "mfa" && ["enroll", "verify", "disable"].includes(parts[2])) return method === "POST";
+  if (parts.length === 2 && parts[0] === "auth" && parts[1] === "verify-email") return method === "POST";
+  if (parts.length === 2 && parts[0] === "auth" && parts[1] === "resend-verification") return method === "POST";
+  if (parts.length === 3 && parts[0] === "auth" && parts[1] === "login" && parts[2] === "mfa") return method === "POST";
   if (parts.length === 2 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
   if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
