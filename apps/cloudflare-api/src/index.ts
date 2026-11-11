@@ -49,7 +49,7 @@ function randomHex(length: number): string {
   return hex(crypto.getRandomValues(new Uint8Array(length)));
 }
 
-function generateDatabasePassword(): string {
+export function generateDatabasePassword(): string {
   const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   let password = "";
@@ -203,13 +203,13 @@ function databaseSecretKey(env: Bindings): Uint8Array {
 function base64(bytes: Uint8Array): string {
   let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary);
 }
-async function encryptDatabaseSecret(env: Bindings, plaintext: string) {
+export async function encryptDatabaseSecret(env: Bindings, plaintext: string) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const key = await crypto.subtle.importKey("raw", databaseSecretKey(env), "AES-GCM", false, ["encrypt"]);
   const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
   return { iv: base64(iv), ciphertext: base64(new Uint8Array(ciphertext)) };
 }
-async function decryptDatabaseSecret(env: Bindings, ciphertext: string, iv: string): Promise<string> {
+export async function decryptDatabaseSecret(env: Bindings, ciphertext: string, iv: string): Promise<string> {
   const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
   const key = await crypto.subtle.importKey("raw", databaseSecretKey(env), "AES-GCM", false, ["decrypt"]);
   const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(iv) }, key, decode(ciphertext));

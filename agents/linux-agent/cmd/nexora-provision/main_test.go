@@ -408,3 +408,127 @@ func TestServerBlockMatchesDomainCaseInsensitive(t *testing.T) {
         block := "server {\n    server_name Example.COM;\n}\n"
         if !serverBlockMatchesDomain(block, "example.com") { t.Fatal("expected case-insensitive match") }
 }
+
+// TestOverwriteConfigFileAtAtomicallyReplacesExistingFile verifies that
+// overwriteConfigFileAt can rewrite an existing file with new content —
+// the behavior that the writeConfigFileAt helper deliberately refuses.
+// This is the foundation of Fix 4: PHP pool updates must be able to
+// replace an existing pool config.
+func TestOverwriteConfigFileAtAtomicallyReplacesExistingFile(t *testing.T) {
+        dir := t.TempDir()
+        fd := openTestDirectory(t, dir)
+
+        original := "[client01]\nuser = client01\nmemory_limit = 256M\n"
+        if err := os.WriteFile(filepath.Join(dir, "pool.conf"), []byte(original), 0640); err != nil {
+                t.Fatal(err)
+        }
+
+        updated := "[client01]\nuser = client01\nmemory_limit = 512M\n"
+        if err := overwriteConfigFileAt(fd, "pool.conf", updated, 0640, os.Getuid(), os.Getgid()); err != nil {
+                t.Fatalf("overwrite failed: %v", err)
+        }
+
+        got, err := os.ReadFile(filepath.Join(dir, "pool.conf"))
+        if err != nil {
+                t.Fatal(err)
+        }
+        if string(got) != updated {
+                t.Fatalf("file content was not replaced: got %q, want %q", got, updated)
+        }
+
+        // Confirm the file metadata is preserved.
+        info, err := os.Stat(filepath.Join(dir, "pool.conf"))
+        if err != nil {
+                t.Fatal(err)
+        }
+        if info.Mode().Perm() != 0640 {
+                t.Fatalf("file mode changed: %v", info.Mode().Perm())
+        }
+}
+
+// TestOverwriteConfigFileAtCreatesWhenMissing verifies the same helper
+// can also create a new file when none exists. This lets the update path
+// handle both initial creation and modification uniformly.
+func TestOverwriteConfigFileAtCreatesWhenMissing(t *testing.T) {
+        dir := t.TempDir()
+        fd := openTestDirectory(t, dir)
+
+        content := "[client01]\nuser = client01\n"
+        if err := overwriteConfigFileAt(fd, "pool.conf", content, 0640, os.Getuid(), os.Getgid()); err != nil {
+                t.Fatalf("create-via-overwrite failed: %v", err)
+        }
+        got, err := os.ReadFile(filepath.Join(dir, "pool.conf"))
+        if err != nil || string(got) != content {
+                t.Fatalf("file content mismatch: %q, err: %v", got, err)
+        }
+}
+
+// TestOverwriteConfigFileAtRejectsSymlink verifies the update path refuses
+// to follow symlinks — a symlink planted at the pool path must not let an
+// attacker redirect the write to an unrelated root-owned file.
+func TestOverwriteConfigFileAtRejectsSymlink(t *testing.T) {
+        dir := t.TempDir()
+        fd := openTestDirectory(t, dir)
+
+        target := filepath.Join(dir, "outside.conf")
+        if err := os.WriteFile(target, []byte("sensitive data"), 0640); err != nil {
+                t.Fatal(err)
+        }
+        if err := os.Symlink(target, filepath.Join(dir, "pool.conf")); err != nil {
+                t.Fatal(err)
+        }
+
+        if err := overwriteConfigFileAt(fd, "pool.conf", "[test]\n", 0640, os.Getuid(), os.Getgid()); err == nil {
+                t.Fatal("expected symlink target to be rejected")
+        }
+
+        // The target file must be untouched.
+        got, err := os.ReadFile(target)
+        if err != nil || string(got) != "sensitive data" {
+                t.Fatalf("symlink target was modified: %q", got)
+        }
+}
+
+// TestRestoreConfigFileAtRewritesBackup verifies that a restore after a
+// failed reload puts the prior content back on disk — the rollback path
+// that makes the phased PHP update safe.
+func TestRestoreConfigFileAtRewritesBackup(t *testing.T) {
+        dir := t.TempDir()
+        fd := openTestDirectory(t, dir)
+
+        original := "[client01]\nuser = client01\nmemory_limit = 256M\n"
+        if err := os.WriteFile(filepath.Join(dir, "pool.conf"), []byte(original), 0640); err != nil {
+                t.Fatal(err)
+        }
+
+        // Simulate a failed update: overwrite with new content, then restore.
+        newContent := "[client01]\nuser = client01\nmemory_limit = 99999M\n"
+        if err := overwriteConfigFileAt(fd, "pool.conf", newContent, 0640, os.Getuid(), os.Getgid()); err != nil {
+                t.Fatal(err)
+        }
+        if err := restoreConfigFileAt(fd, "pool.conf", original, 0640, os.Getuid(), os.Getgid()); err != nil {
+                t.Fatalf("restore failed: %v", err)
+        }
+
+        got, err := os.ReadFile(filepath.Join(dir, "pool.conf"))
+        if err != nil {
+                t.Fatal(err)
+        }
+        if string(got) != original {
+                t.Fatalf("restore did not put original content back: got %q", got)
+        }
+}
+
+// TestRestoreConfigFileAtHandlesEmptyBackup verifies the restore helper
+// is a no-op when there was no prior file to restore from. This keeps
+// rollback calls safe even on the initial-creation path.
+func TestRestoreConfigFileAtHandlesEmptyBackup(t *testing.T) {
+        dir := t.TempDir()
+        fd := openTestDirectory(t, dir)
+        if err := restoreConfigFileAt(fd, "pool.conf", "", 0640, os.Getuid(), os.Getgid()); err != nil {
+                t.Fatalf("empty backup restore should be a no-op: %v", err)
+        }
+        if _, err := os.Stat(filepath.Join(dir, "pool.conf")); !os.IsNotExist(err) {
+                t.Fatalf("no file should exist after empty restore, got: %v", err)
+        }
+}

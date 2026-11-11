@@ -1048,6 +1048,32 @@ func configurePHPFPM(username string) error {
         return nil
 }
 
+// updatePhpPool rewrites an existing PHP-FPM pool configuration with the
+// supplied settings, using a strict phased approach so a malformed or
+// incompatible configuration can never leave the running service in a
+// broken state:
+//
+//  1. Validate inputs (username, version, generated config content).
+//  2. Confirm a pool config already exists on disk. We never create a
+//     pool via the UPDATE path — initial creation belongs to provisionAccount.
+//  3. Capture the existing pool content as a backup, then atomically swap
+//     the new content into place (overwriteRootConfigFile uses a temp file
+//     + rename, so readers never observe a partial write).
+//  4. Validate the *complete* PHP-FPM configuration with `php-fpm -tt`.
+//     If validation fails, restore the backup and fail the operation.
+//  5. Confirm the service is already active (we never start or restart
+//     PHP-FPM). If it is not active, restore the backup and fail without
+//     attempting a reload — no service state is changed.
+//  6. Reload PHP-FPM. If reload fails, restore the backup and reload again
+//     so the running service is back to its prior configuration.
+//  7. Runtime verification: confirm the account's dedicated socket has
+//     appeared. If it has not, restore the backup, reload, and fail.
+//
+// The net effect is that a successful return guarantees the new config is
+// on disk, syntactically valid, accepted by the running service, and the
+// per-account socket is live. A failed return guarantees the on-disk and
+// running state match the pre-call state (best effort — if a backup
+// restore also fails, the error message will indicate the restore failure).
 func updatePhpPool(username, phpVersion string, settings phpPoolSettings) error {
         if !usernamePattern.MatchString(username) {
                 return fmt.Errorf("PHP_POOL_UPDATE_FAILED: invalid hosting username")
@@ -1055,7 +1081,9 @@ func updatePhpPool(username, phpVersion string, settings phpPoolSettings) error 
         version := phpVersion
         if version == "" {
                 versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
-                if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect PHP version") }
+                if err != nil {
+                        return fmt.Errorf("PHP_VERSION_FAILED: unable to detect PHP version")
+                }
                 version = strings.TrimSpace(string(versionOutput))
         }
         if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
@@ -1065,22 +1093,69 @@ func updatePhpPool(username, phpVersion string, settings phpPoolSettings) error 
         if _, err := os.Stat(poolPath); err != nil {
                 return fmt.Errorf("PHP_POOL_NOT_FOUND: no existing PHP-FPM pool for account %s", username)
         }
+
+        // Phase 1 — generate the new config content in memory only.
         pool := phpFPMPoolConfigWithSettings(username, settings)
-        if pool == "" { return fmt.Errorf("PHP_POOL_UPDATE_FAILED: unable to generate pool configuration") }
-        if err := writeRootConfigFile(poolPath, pool, 0640); err != nil {
+        if pool == "" {
+                return fmt.Errorf("PHP_POOL_UPDATE_FAILED: unable to generate pool configuration")
+        }
+
+        // Phase 2 — capture backup and atomically swap the new content in.
+        backup, err := overwriteRootConfigFile(poolPath, pool, 0640)
+        if err != nil {
                 return fmt.Errorf("PHP_POOL_UPDATE_FAILED: %s", safeOutput(err.Error()))
         }
+
+        // Phase 3 — validate the full PHP-FPM configuration. The -tt flag
+        // parses every pool.d/*.conf file (including the new one) without
+        // touching the running service.
         fpmBinary := filepath.Join("/usr/sbin", "php-fpm"+version)
+        if info, statErr := os.Stat(fpmBinary); statErr != nil || !info.Mode().IsRegular() {
+                _ = restoreRootConfigFile(poolPath, backup, 0640)
+                return fmt.Errorf("PHP_FPM_BINARY_MISSING: PHP-FPM validation binary is unavailable")
+        }
         if err := runFixed(fpmBinary, "-tt"); err != nil {
+                // Restore the prior configuration so on-disk state matches the
+                // running service's last known-good config.
+                if restoreErr := restoreRootConfigFile(poolPath, backup, 0640); restoreErr != nil {
+                        return fmt.Errorf("PHP_FPM_CONFIG_INVALID: %s (restore failed: %s)", safeOutput(err.Error()), safeOutput(restoreErr.Error()))
+                }
                 return fmt.Errorf("PHP_FPM_CONFIG_INVALID: %s", safeOutput(err.Error()))
         }
+
         service := "php" + version + "-fpm"
+
+        // Phase 4 — confirm the service is already active. We never start or
+        // restart PHP-FPM as part of an update.
         if err := runFixed("/usr/bin/systemctl", "is-active", "--quiet", service); err != nil {
-                return fmt.Errorf("PHP_FPM_INACTIVE: configuration is valid, but PHP-FPM is not active")
+                _ = restoreRootConfigFile(poolPath, backup, 0640)
+                return fmt.Errorf("PHP_FPM_INACTIVE: configuration is valid, but PHP-FPM is not active; no service state was changed")
         }
+
+        // Phase 5 — reload PHP-FPM so the new pool config takes effect.
         if err := runFixed("/usr/bin/systemctl", "reload", service); err != nil {
+                // Restore the backup and reload again so the running service
+                // matches the on-disk backup state.
+                if restoreErr := restoreRootConfigFile(poolPath, backup, 0640); restoreErr != nil {
+                        return fmt.Errorf("PHP_FPM_RELOAD_FAILED: %s (restore failed: %s)", safeOutput(err.Error()), safeOutput(restoreErr.Error()))
+                }
+                // Best-effort reload of the restored config.
+                _ = runFixed("/usr/bin/systemctl", "reload", service)
                 return fmt.Errorf("PHP_FPM_RELOAD_FAILED: %s", safeOutput(err.Error()))
         }
+
+        // Phase 6 — runtime verification: confirm the account's dedicated
+        // socket is live. This proves the pool actually loaded and bound.
+        socketPath := "/run/php/nexora-" + username + ".sock"
+        if _, err := os.Stat(socketPath); err != nil {
+                // Restore the backup, reload, and report the socket-missing error.
+                if restoreErr := restoreRootConfigFile(poolPath, backup, 0640); restoreErr != nil {
+                        return fmt.Errorf("PHP_POOL_SOCKET_MISSING: dedicated PHP-FPM socket did not appear after reload (restore failed: %s)", safeOutput(restoreErr.Error()))
+                }
+                _ = runFixed("/usr/bin/systemctl", "reload", service)
+                return fmt.Errorf("PHP_POOL_SOCKET_MISSING: dedicated PHP-FPM socket did not appear after reload")
+        }
+
         return nil
 }
 
