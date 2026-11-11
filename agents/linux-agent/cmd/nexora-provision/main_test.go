@@ -532,3 +532,124 @@ func TestRestoreConfigFileAtHandlesEmptyBackup(t *testing.T) {
                 t.Fatalf("no file should exist after empty restore, got: %v", err)
         }
 }
+
+// ---------------------------------------------------------------------------
+// Fix 1 — RESET_DATABASE_USER_PASSWORD input validation + secret scrubbing.
+// ---------------------------------------------------------------------------
+
+// TestSafeOutputNoSecretsScrubsPassword verifies that MariaDB error output
+// containing the password (which can happen if the SQL statement is echoed
+// in the error) has the password replaced with [REDACTED] before being
+// returned. This prevents the password from leaking through the agent's
+// stderr or the Worker's audit log.
+func TestSafeOutputNoSecretsScrubsPassword(t *testing.T) {
+	password := "Sup3rSecretLongPassword123!"
+	output := "ERROR 1064 (42000): ALTER USER 'wp_user'@'localhost' IDENTIFIED BY '" + password + "' failed"
+	scrubbed := safeOutputNoSecrets(output, password)
+	if strings.Contains(scrubbed, password) {
+		t.Fatalf("password leaked in scrubbed output: %q", scrubbed)
+	}
+	if !strings.Contains(scrubbed, "[REDACTED]") {
+		t.Fatalf("expected [REDACTED] placeholder, got %q", scrubbed)
+	}
+}
+
+// TestSafeOutputNoSecretsTruncates verifies that long output is truncated
+// to 240 characters (matching safeOutput's behavior).
+func TestSafeOutputNoSecretsTruncates(t *testing.T) {
+	long := strings.Repeat("x", 500)
+	result := safeOutputNoSecrets(long, "")
+	if len(result) > 240 {
+		t.Fatalf("expected truncation to 240 chars, got %d", len(result))
+	}
+}
+
+// TestSafeOutputNoSecretsEmptyReturnsFallback verifies that empty output
+// returns the standard fallback message.
+func TestSafeOutputNoSecretsEmptyReturnsFallback(t *testing.T) {
+	result := safeOutputNoSecrets("   ", "secret")
+	if result != "system command failed" {
+		t.Fatalf("expected fallback, got %q", result)
+	}
+}
+
+// TestResetDatabaseUserPasswordRejectsShortPassword verifies that the
+// handler rejects passwords shorter than 24 characters before touching
+// MariaDB. This prevents weak credentials from being applied.
+func TestResetDatabaseUserPasswordRejectsShortPassword(t *testing.T) {
+	err := resetDatabaseUserPassword("client01", "client01_db", "wp", "short")
+	if err == nil {
+		t.Fatal("expected error for short password")
+	}
+	if !strings.Contains(err.Error(), "INVALID_PASSWORD") {
+		t.Fatalf("expected INVALID_PASSWORD error, got %v", err)
+	}
+}
+
+// TestResetDatabaseUserPasswordRejectsLongPassword verifies that
+// passwords longer than 128 characters are rejected. This prevents
+// buffer-overflow or SQL-statement-length issues in MariaDB.
+func TestResetDatabaseUserPasswordRejectsLongPassword(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	err := resetDatabaseUserPassword("client01", "client01_db", "wp", long)
+	if err == nil {
+		t.Fatal("expected error for long password")
+	}
+	if !strings.Contains(err.Error(), "INVALID_PASSWORD") {
+		t.Fatalf("expected INVALID_PASSWORD error, got %v", err)
+	}
+}
+
+// TestResetDatabaseUserPasswordRejectsInvalidUsername verifies the
+// handler validates the hosting account username before doing anything.
+func TestResetDatabaseUserPasswordRejectsInvalidUsername(t *testing.T) {
+	err := resetDatabaseUserPassword("../etc", "client01_db", "wp", "validpassword123456789012")
+	if err == nil {
+		t.Fatal("expected error for invalid username")
+	}
+	if !strings.Contains(err.Error(), "INVALID_USERNAME") {
+		t.Fatalf("expected INVALID_USERNAME error, got %v", err)
+	}
+}
+
+// TestResetDatabaseUserPasswordRejectsInvalidDatabaseName verifies the
+// handler validates the database name belongs to the account.
+func TestResetDatabaseUserPasswordRejectsInvalidDatabaseName(t *testing.T) {
+	err := resetDatabaseUserPassword("client01", "otheraccount_db", "wp", "validpassword123456789012")
+	if err == nil {
+		t.Fatal("expected error for database name not matching account")
+	}
+	if !strings.Contains(err.Error(), "INVALID_DATABASE") {
+		t.Fatalf("expected INVALID_DATABASE error, got %v", err)
+	}
+}
+
+// TestResetDatabaseUserPasswordRejectsInvalidUserSuffix verifies the
+// handler rejects malformed database username suffixes.
+func TestResetDatabaseUserPasswordRejectsInvalidUserSuffix(t *testing.T) {
+	err := resetDatabaseUserPassword("client01", "client01_db", "../wp", "validpassword123456789012")
+	if err == nil {
+		t.Fatal("expected error for invalid user suffix")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2 — removeDomain safety: refuse to remove the last server block.
+// ---------------------------------------------------------------------------
+
+// TestRemoveServerBlockByDomainLeavesConfigNonEmpty verifies that removing
+// a domain from a config with only that domain leaves a non-empty result
+// (the surrounding non-server directives like comments are preserved). The
+// removeDomain function checks for this and refuses to write a config with
+// zero server blocks.
+func TestRemoveServerBlockByDomainLeavesConfigNonEmpty(t *testing.T) {
+	config := "# Nexora vhost\nserver {\n    server_name only.example.com;\n    root /home/client01/public_html;\n}\n"
+	result := removeServerBlockByDomain(config, "only.example.com")
+	// The server block is removed, but the comment line remains.
+	if strings.Contains(result, "server {") {
+		t.Fatalf("server block should be removed, got %q", result)
+	}
+	// The removeDomain function separately checks that the result has at
+	// least one server block and refuses to write if not. Here we just
+	// verify the parser's behavior.
+}

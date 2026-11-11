@@ -3629,15 +3629,101 @@ app.post("/v1/databases/:id/users/:userId/reset-password", async (c) => {
   await c.env.DB.batch([
     // Expire any existing unrevealed secrets for this user.
     c.env.DB.prepare("UPDATE database_user_secrets SET expires_at = ? WHERE database_user_id = ? AND revealed_at IS NULL AND expires_at > ?").bind(nowIso, user.id, nowIso),
-    // Insert the new secret.
-    c.env.DB.prepare("INSERT INTO database_user_secrets (id, database_user_id, organization_id, ciphertext, iv, expires_at) VALUES (?, ?, ?, ?, ?, ?)").bind(secretId, user.id, identity.organizationId, encrypted.ciphertext, encrypted.iv, expiresAt),
-    // Queue the password reset job.
-    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'RESET_DATABASE_USER_PASSWORD', 'QUEUED', ?, ?)").bind(jobId, user.accountId, `reset-db-user:${user.id}`, JSON.stringify({ databaseName: user.databaseName, databaseUserName: user.username })),
-    // Audit log.
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.user_password_reset', 'hosting_database_user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, user.id, JSON.stringify({ databaseId, userId: user.id })),
+    // Insert the new secret, bound to the exact job that will consume it.
+    // The job_id binding lets the agent fetch the credential via
+    // /internal/v1/agent/jobs/:jobId/credential — but only for the job
+    // it is actually executing, never for any other job on the same user.
+    c.env.DB.prepare("INSERT INTO database_user_secrets (id, database_user_id, organization_id, job_id, ciphertext, iv, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(secretId, user.id, identity.organizationId, jobId, encrypted.ciphertext, encrypted.iv, expiresAt),
+    // Queue the password reset job. The payload contains only the
+    // database name and username — the password itself is never placed
+    // in the job payload, audit log, or any plaintext store. The agent
+    // retrieves it via the authenticated credential endpoint below.
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'RESET_DATABASE_USER_PASSWORD', 'QUEUED', ?, ?)").bind(jobId, user.accountId, `reset-db-user:${user.id}`, JSON.stringify({ databaseName: user.databaseName, databaseUserName: user.username, jobId })),
+    // Audit log — records who requested the reset and for which user,
+    // but never the password itself.
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'database.user_password_reset', 'hosting_database_user', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, user.id, JSON.stringify({ databaseId, userId: user.id, jobId })),
   ]);
 
   return c.json({ success: true, jobId, message: "Database user password reset queued. Use the secret reveal endpoint to retrieve the new password." }, 202);
+});
+
+// Agent credential retrieval — authenticated, short-lived, one-time.
+//
+// The Go agent calls this endpoint when it picks up a
+// RESET_DATABASE_USER_PASSWORD job. The endpoint:
+//   1. Authenticates the agent via the standard HMAC-SHA256 scheme.
+//   2. Verifies the job exists, belongs to a hosting account on the
+//      agent's server, is a RESET_DATABASE_USER_PASSWORD operation,
+//      and is currently in QUEUED or RUNNING status.
+//   3. Looks up the secret bound to that job_id.
+//   4. Verifies the secret belongs to a database user in the agent's
+//      organization (cross-tenant isolation).
+//   5. Verifies the secret has not expired.
+//   6. Atomically sets agent_revealed_at = now WHERE agent_revealed_at
+//      IS NULL — replay prevention. The atomic UPDATE guarantees that
+//      only one request can retrieve the credential; a second request
+//      (even concurrent) receives 410 GONE.
+//   7. Decrypts the credential and returns it to the agent over the
+//      Cloudflare Tunnel (TLS). The credential exists in the agent's
+//      memory only long enough to apply it to MariaDB.
+//
+// The admin's reveal endpoint (/v1/databases/:id/users/:userId/secret)
+// is independent: it sets revealed_at, not agent_revealed_at. Both can
+// fire in either order. The credential remains available to the admin
+// for the full 15-minute window even after the agent has retrieved it.
+app.post("/internal/v1/agent/jobs/:jobId/credential", async (c) => {
+  const rawBody = await c.req.text();
+  if (rawBody.length > 4096) return c.json({ message: "Request body is too large" }, 413);
+  const auth = await authenticateAgentRequest(c.req.raw, c.env.DB, rawBody);
+  if (auth.error) return c.json({ message: auth.error.message }, auth.error.status as 401 | 409);
+  const jobId = c.req.param("jobId");
+  if (!/^[a-f0-9-]{36}$/.test(jobId)) return c.json({ message: "Invalid job id" }, 400);
+
+  // Look up the job and verify it belongs to a hosting account on the
+  // authenticated agent's server. This prevents an agent on server A
+  // from fetching a credential for a job queued against server B.
+  const job = await c.env.DB.prepare(
+    "SELECT j.operation AS operation, j.status AS status, j.hosting_account_id AS accountId, " +
+    "ha.server_id AS serverId, ha.organization_id AS organizationId " +
+    "FROM provisioning_jobs j JOIN hosting_accounts ha ON ha.id = j.hosting_account_id " +
+    "WHERE j.id = ? LIMIT 1",
+  ).bind(jobId).first<{ operation: string; status: string; accountId: string; serverId: string; organizationId: string }>();
+  if (!job) return c.json({ message: "Job not found" }, 404);
+  if (job.serverId !== auth.credential.serverId) return c.json({ message: "Job is not assigned to this node" }, 403);
+  if (job.operation !== "RESET_DATABASE_USER_PASSWORD") return c.json({ message: "Job does not carry a database credential" }, 400);
+  if (job.status !== "QUEUED" && job.status !== "RUNNING") return c.json({ message: "Job is no longer active" }, 410);
+
+  // Atomically claim the secret: UPDATE ... WHERE agent_revealed_at IS
+  // NULL AND expires_at > now RETURNING the encrypted blob. The atomic
+  // UPDATE is the replay-prevention primitive — a second request hits
+  // the agent_revealed_at IS NULL filter and gets no rows back.
+  const nowIso = new Date().toISOString();
+  let secret: { ciphertext: string; iv: string } | null;
+  try {
+    secret = await c.env.DB.prepare(
+      "UPDATE database_user_secrets SET agent_revealed_at = ? " +
+      "WHERE job_id = ? AND organization_id = ? AND agent_revealed_at IS NULL AND expires_at > ? " +
+      "AND EXISTS (SELECT 1 FROM hosting_database_users u JOIN hosting_databases d ON d.id = u.database_id " +
+      "  WHERE u.id = database_user_secrets.database_user_id AND d.id = u.database_id " +
+      "  AND u.organization_id = database_user_secrets.organization_id " +
+      "  AND u.status = 'ACTIVE' AND d.status = 'ACTIVE') " +
+      "RETURNING ciphertext, iv",
+    ).bind(nowIso, jobId, auth.credential.organizationId, nowIso).first<{ ciphertext: string; iv: string }>();
+  } catch {
+    return c.json({ message: "Unable to retrieve the database credential." }, 503);
+  }
+  if (!secret) return c.json({ message: "The database credential is unavailable, expired, already retrieved, or does not belong to this tenant." }, 410);
+
+  try {
+    const credential = JSON.parse(await decryptDatabaseSecret(c.env, secret.ciphertext, secret.iv)) as { username: string; password: string };
+    // Audit the agent retrieval (no password in the audit row).
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'database.secret_agent_retrieval', 'provisioning_job', ?, ?)",
+    ).bind(crypto.randomUUID(), auth.credential.organizationId, jobId, JSON.stringify({ nodeId: auth.credential.nodeId })).run();
+    return c.json({ credential, oneTime: true });
+  } catch {
+    return c.json({ message: "The encrypted database credential could not be opened." }, 500);
+  }
 });
 
 type AgentCredential = { secretHash: string; serverId: string; organizationId: string };
@@ -3784,8 +3870,8 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
 
   const update = await updateStatement.run();
   if ((update.meta?.changes ?? 0) !== 1) return c.json({ message: "Job lease is missing, expired, or belongs to another server" }, 409);
-  const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
-    .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string }>();
+  const completedJob = await c.env.DB.prepare("SELECT operation, idempotency_key AS idempotencyKey, hosting_account_id AS hostingAccountId FROM provisioning_jobs WHERE id = ? AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?) LIMIT 1")
+    .bind(jobId, auth.credential.serverId, auth.credential.organizationId).first<{ operation: string; idempotencyKey: string; hostingAccountId: string }>();
   if (completedJob?.operation === "CREATE_BACKUP" || completedJob?.operation === "RESTORE_BACKUP" || completedJob?.operation === "DELETE_BACKUP") {
     const parts = completedJob.idempotencyKey.split(":");
     const backupId = parts[1] ?? "";
@@ -3801,8 +3887,46 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
           return c.json({ message: "The agent returned invalid backup metadata." }, 422);
         }
         await c.env.DB.prepare("UPDATE hosting_backups SET status = 'AVAILABLE', archive_name = ?, size_bytes = ?, sha256 = ?, completed_at = ?, error_message = NULL WHERE id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')").bind(archiveName, sizeBytes, digest, new Date().toISOString(), backupId, auth.credential.organizationId).run();
+        // Clear the scheduler lease now that the backup has landed. This
+        // unblocks the next scheduled run even if the lease window has
+        // not expired yet. Then enforce retention: keep the N most-
+        // recent AVAILABLE backups for this account, queue DELETE_BACKUP
+        // jobs for the rest. Retention runs AFTER successful completion,
+        // not before scheduling, so a failed backup never counts as a
+        // completed retention entry. We also refuse to delete the only
+        // AVAILABLE backup (the just-completed one) — if retention_count
+        // is 1 we keep it.
+        const schedule = await c.env.DB.prepare(
+          "SELECT retention_count AS retentionCount FROM backup_schedules WHERE hosting_account_id = ? LIMIT 1",
+        ).bind(completedJob.hostingAccountId).first<{ retentionCount: number }>();
+        if (schedule && schedule.retentionCount > 0) {
+          await c.env.DB.prepare(
+            "UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?",
+          ).bind(completedJob.hostingAccountId).run();
+          const allBackups = await c.env.DB.prepare(
+            "SELECT id FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status = 'AVAILABLE' ORDER BY completed_at DESC",
+          ).bind(completedJob.hostingAccountId, auth.credential.organizationId).all<{ id: string }>();
+          const keepIds = (allBackups.results ?? []).slice(0, schedule.retentionCount);
+          const deleteBackups = (allBackups.results ?? []).slice(schedule.retentionCount);
+          if (keepIds.length > 0 && deleteBackups.length > 0) {
+            for (const backup of deleteBackups) {
+              const deleteJobId = crypto.randomUUID();
+              await c.env.DB.batch([
+                c.env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND status = 'AVAILABLE'").bind(backup.id),
+                c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)")
+                  .bind(deleteJobId, completedJob.hostingAccountId, `backup-delete:${backup.id}`, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
+                c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.retention_delete', 'hosting_backup', ?, ?)")
+                  .bind(crypto.randomUUID(), auth.credential.organizationId, backup.id, JSON.stringify({ jobId: deleteJobId })),
+              ]);
+            }
+          }
+        }
       } else {
         await c.env.DB.prepare("UPDATE hosting_backups SET status = 'FAILED', error_message = ? WHERE id = ? AND organization_id = ?").bind(errorMessage || "The backup could not be created", backupId, auth.credential.organizationId).run();
+        // Clear the scheduler lease on failure so the next scheduled run
+        // is not blocked by this failed attempt. A failed backup never
+        // counts as a completed retention entry.
+        await c.env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(completedJob.hostingAccountId).run();
       }
     } else if (completedJob.operation === "RESTORE_BACKUP") {
       if (input.success) {
@@ -3931,12 +4055,14 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
       await c.env.DB.prepare("UPDATE domains SET status = 'ACTIVE', updated_at = ? WHERE id = ? AND status = 'DELETED'").bind(now, domainId).run();
     }
   }
-  // RESET_DATABASE_USER_PASSWORD: on failure expire the new secret so it cannot be revealed.
+  // RESET_DATABASE_USER_PASSWORD: on failure delete the new secret bound
+  // to this job so it can never be revealed. Deleting by job_id (not just
+  // user_id) is more precise — it cannot accidentally delete a different
+  // reset attempt's secret for the same user.
   if (completedJob?.operation === "RESET_DATABASE_USER_PASSWORD" && !input.success && completedJob.idempotencyKey?.startsWith("reset-db-user:")) {
-    const databaseUserId = completedJob.idempotencyKey.slice("reset-db-user:".length);
-    if (/^[a-f0-9-]{36}$/.test(databaseUserId)) {
-      await c.env.DB.prepare("DELETE FROM database_user_secrets WHERE database_user_id = ? AND organization_id = ? AND revealed_at IS NULL").bind(databaseUserId, auth.credential.organizationId).run();
-    }
+    await c.env.DB.prepare(
+      "DELETE FROM database_user_secrets WHERE job_id = ? AND organization_id = ? AND revealed_at IS NULL",
+    ).bind(jobId, auth.credential.organizationId).run();
   }
   const auditActionName = input.success ? ({
     "FILE_MANAGER": "file_manager.operation_completed", "ADD_DOMAIN": "domain.configured",
@@ -7258,62 +7384,95 @@ export default {
   },
 };
 
+// addMonthsClamped returns the date exactly `months` calendar months after
+// `from`, with end-of-month clamping. For example, Jan 31 + 1 month = Feb 28
+// (or Feb 29 in a leap year), not March 3. This is the correct behavior for
+// monthly recurrence — JavaScript's built-in setUTCMonth overflows past
+// short months, so we clamp manually.
+//
+// The clamp is computed in UTC to avoid daylight-saving drift: a monthly
+// schedule that fires at 02:00 UTC on Jan 31 should next fire at 02:00 UTC
+// on Feb 28, not at 03:00 UTC because DST kicked in. UTC has no DST, so
+// the hour stays stable.
+export function addMonthsClamped(from: Date, months: number): Date {
+  const result = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate(), from.getUTCHours(), from.getUTCMinutes(), from.getUTCSeconds(), from.getUTCMilliseconds()));
+  const targetMonth = result.getUTCMonth() + months;
+  // First, set the year/month. We deliberately use Date.UTC(year, month+delta, 0)
+  // to compute the last day of the target month, then clamp the day.
+  const targetYear = result.getUTCFullYear() + Math.floor(targetMonth / 12);
+  const targetMonthIndex = ((targetMonth % 12) + 12) % 12;
+  // Days in the target month (0 = last day of previous month = day count).
+  const lastDayOfTargetMonth = new Date(Date.UTC(targetYear, targetMonthIndex + 1, 0)).getUTCDate();
+  const clampedDay = Math.min(result.getUTCDate(), lastDayOfTargetMonth);
+  return new Date(Date.UTC(targetYear, targetMonthIndex, clampedDay, result.getUTCHours(), result.getUTCMinutes(), result.getUTCSeconds(), result.getUTCMilliseconds()));
+}
+
 async function runBackupSchedules(env: Bindings): Promise<void> {
   if (!env.DB) return;
   const now = new Date();
   const nowIso = now.toISOString();
-  const dueSchedules = await env.DB.prepare(
-    "SELECT bs.hosting_account_id AS accountId, bs.frequency, bs.retention_count AS retentionCount, " +
-    "bs.next_run_at AS nextRunAt, ha.organization_id AS organizationId, ha.username, ha.status " +
-    "FROM backup_schedules bs JOIN hosting_accounts ha ON ha.id = bs.hosting_account_id " +
-    "WHERE bs.frequency != 'disabled' AND ha.status = 'ACTIVE' AND (bs.next_run_at IS NULL OR bs.next_run_at <= ?) LIMIT 10",
-  ).bind(nowIso).all<{ accountId: string; frequency: string; retentionCount: number; nextRunAt: string | null; organizationId: string; username: string; status: string }>();
-  for (const schedule of dueSchedules.results ?? []) {
-    // Guard against concurrent scheduler invocations: skip if there is
-    // already a QUEUED or RUNNING backup for this account.
+  // Lease window: 10 minutes. If the scheduler crashes mid-run, the lease
+  // expires and a later invocation can reclaim the schedule. The lease is
+  // also cleared on backup completion (success or failure) in the result
+  // handler, so the next scheduled run is not blocked.
+  const leaseExpiresAt = new Date(now.getTime() + 10 * 60 * 1000).toISOString();
+
+  // Atomic claim: UPDATE backup_schedules SET lease_expires_at = ? WHERE
+  // the schedule is due AND no active lease exists, RETURNING the claimed
+  // row. D1's atomic UPDATE guarantees that exactly one concurrent
+  // invocation can claim a given schedule row — the others see zero rows
+  // returned and skip it. This replaces the previous non-atomic
+  // SELECT-COUNT-then-INSERT pattern that allowed duplicate backups under
+  // concurrent scheduler runs.
+  const claimed = await env.DB.prepare(
+    "UPDATE backup_schedules SET lease_expires_at = ? " +
+    "WHERE frequency != 'disabled' AND (next_run_at IS NULL OR next_run_at <= ?) " +
+    "AND (lease_expires_at IS NULL OR lease_expires_at < ?) " +
+    "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE status = 'ACTIVE') " +
+    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId",
+  ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string }>();
+
+  for (const schedule of claimed.results ?? []) {
+    // Compute the next run time using calendar-based arithmetic with
+    // end-of-month clamping. Jan 31 + 1 month = Feb 28 (or 29 in a leap
+    // year), not March 3. Daily and weekly use fixed-length intervals.
+    let nextRun: Date;
+    switch (schedule.frequency) {
+      case "daily": nextRun = new Date(now.getTime() + 24 * 60 * 60 * 1000); break;
+      case "weekly": nextRun = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); break;
+      case "monthly": nextRun = addMonthsClamped(now, 1); break;
+      default: continue;
+    }
+
+    // Idempotency: skip if a QUEUED or RUNNING backup already exists for
+    // this account (e.g., a manual backup was queued between the claim
+    // and the INSERT). This is a defense-in-depth check — the atomic
+    // schedule claim above already prevents concurrent scheduler runs
+    // from claiming the same schedule, but a manual user-initiated
+    // backup could still race with the scheduler.
     const existing = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')",
     ).bind(schedule.accountId, schedule.organizationId).first<{ count: number }>();
-    if ((existing?.count ?? 0) > 0) continue;
-
-    // Compute next run time using calendar-based arithmetic so monthly
-    // schedules handle variable month lengths correctly.
-    let nextRun: Date;
-    switch (schedule.frequency) {
-      case "daily": nextRun = new Date(now.getTime() + 24*60*60*1000); break;
-      case "weekly": nextRun = new Date(now.getTime() + 7*24*60*60*1000); break;
-      case "monthly": {
-        // Calendar-based: same day next month. Handles month length
-        // differences (e.g. Jan 31 → Feb 28) by clamping to end of month.
-        const next = new Date(now);
-        next.setUTCMonth(next.getUTCMonth() + 1);
-        nextRun = next;
-        break;
-      }
-      default: continue;
+    if ((existing?.count ?? 0) > 0) {
+      // Release the lease so the next scheduler tick can re-evaluate.
+      await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
+      continue;
     }
+
     const backupId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
     const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
     const databaseNames = (databases.results ?? []).map((db) => db.name);
-    // Use 'QUEUED' status to match the lifecycle the agent's job-claim
-    // handler expects: QUEUED → RUNNING → AVAILABLE/FAILED.
+    // Insert the backup row with QUEUED status (matching the agent's
+    // lifecycle: QUEUED → RUNNING → AVAILABLE/FAILED) and the matching
+    // provisioning job with an idempotency key scoped to the backup ID.
+    // The idempotency key prevents duplicate CREATE_BACKUP jobs for the
+    // same backup even if the scheduler somehow re-runs.
     await env.DB.batch([
       env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'QUEUED', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
       env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
       env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId),
-      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId })),
+      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString() })),
     ]);
-    const backups = await env.DB.prepare("SELECT id FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status = 'AVAILABLE' ORDER BY created_at DESC").bind(schedule.accountId, schedule.organizationId).all<{ id: string }>();
-    const allBackups = backups.results ?? [];
-    if (allBackups.length > schedule.retentionCount) {
-      for (const backup of allBackups.slice(schedule.retentionCount)) {
-        const deleteJobId = crypto.randomUUID();
-        await env.DB.batch([
-          env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND status = 'AVAILABLE'").bind(backup.id),
-          env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)").bind(deleteJobId, schedule.accountId, `backup-delete:${backup.id}`, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
-        ]);
-      }
-    }
   }
 }

@@ -1,0 +1,22 @@
+-- Add a lease column to backup_schedules so the scheduler can atomically
+-- claim a due schedule without races.
+--
+-- lease_expires_at: when set, the schedule is currently being processed
+--   by a scheduler invocation. The timestamp records when the lease
+--   expires — if a scheduler crashes mid-run, a later invocation can
+--   safely reclaim the schedule after the lease expires. The lease is
+--   cleared (set to NULL) when the backup completes successfully or
+--   fails.
+--
+-- The atomic claim uses a conditional UPDATE:
+--   UPDATE backup_schedules
+--   SET lease_expires_at = ?
+--   WHERE hosting_account_id = ?
+--     AND frequency != 'disabled'
+--     AND (next_run_at IS NULL OR next_run_at <= ?)
+--     AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+--   RETURNING ...
+--
+-- D1's atomic UPDATE guarantees that exactly one concurrent invocation
+-- can claim a given schedule row; the others see zero rows returned.
+ALTER TABLE backup_schedules ADD COLUMN lease_expires_at TEXT;
