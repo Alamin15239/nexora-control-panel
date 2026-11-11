@@ -118,8 +118,6 @@ Not implemented or intentionally disabled:
 - Mailbox / forwarding / filter CRUD (only outbound email via Resend
   for password reset, verification, incident notifications, and test
   emails).
-- Mailbox / forwarding / filter CRUD (only outbound email via Resend
-  for password reset, incident notifications, and test emails).
 - Automated subscription billing, invoicing, and renewal workflows
   (only manual bank-transfer review exists).
 - Customer-side resource creation UI (`/customer` page shows account
@@ -1605,6 +1603,38 @@ integration tests" running `tsx --test mfa-login.integration.test.ts`.
 - Go agent `go test ./...`: 24/24 packages pass
 - Go agent `go test -race` on 7 security-sensitive packages: all pass
 
+
+## 5e. MFA Atomicity and Authorization Follow-up (2026-11-11)
+
+A follow-up code review identified that the earlier challenge implementation
+still derived failed-attempt values from a stale read and updated the factor's
+TOTP counter unconditionally. Those patterns could lose increments or permit
+two different challenges to race on the same TOTP period.
+
+The follow-up changes on `test/deploy-node-acceptance`:
+
+- Failed-attempt counters are now incremented in one conditional SQL UPDATE;
+  the persisted count cannot exceed the five-attempt cap.
+- Challenge consumption is conditional on the exact challenge, user,
+  organization, unconsumed/unlocked state, and unexpired timestamp.
+- TOTP period claims are conditional on the factor's previously stored period
+  being NULL or lower than the submitted period. This database write, not the
+  earlier read, is the replay/concurrency authority.
+- The factor claim is tied to the exact consumed challenge.
+- User, organization, and membership status are checked before consuming
+  the challenge and rechecked immediately before session persistence.
+- Endpoint tests cover parallel invalid attempts, parallel challenges using
+  the same TOTP period, and suspended user/organization states.
+- A separate real-SQLite test uses concurrent independent connections to
+  exercise the same atomic SQL statements.
+
+**Verification:** API CI passed all 26 steps on code commit
+`029ec71df74c64c7136c25a9fec9fff0cd066bf0`, including the endpoint suite and
+real-SQLite concurrency tests. The subsequent branch-head commit
+`19eab28f39114911327615af062f98cb498ea878` changed only this status document.
+SQLite tests do not prove behavior of remote Cloudflare D1; a controlled D1
+environment check remains required before production release.
+
 ## 6. Development Commands
 
 ### Go agent tests
@@ -1836,33 +1866,3 @@ Use these statuses:
 - [ ] Remaining — implementation or verification is incomplete.
 
 Implementation does not automatically mean production-ready.
-
-
-## 5e. MFA Atomicity and Authorization Follow-up (2026-11-11)
-
-A follow-up code review identified that the earlier challenge implementation
-still derived failed-attempt values from a stale read and updated the factor's
-TOTP counter unconditionally. Those patterns could lose increments or permit
-two different challenges to race on the same TOTP period.
-
-The follow-up changes on `test/deploy-node-acceptance`:
-
-- Failed-attempt counters are now incremented in one conditional SQL UPDATE;
-  the persisted count cannot exceed the five-attempt cap.
-- Challenge consumption is conditional on the exact challenge, user,
-  organization, unconsumed/unlocked state, and unexpired timestamp.
-- TOTP period claims are conditional on the factor's previously stored period
-  being NULL or lower than the submitted period. This database write, not the
-  earlier read, is the replay/concurrency authority.
-- The factor claim is tied to the exact consumed challenge.
-- User, organization, and membership status are checked before consuming
-  the challenge and rechecked immediately before session persistence.
-- Endpoint tests cover parallel invalid attempts, parallel challenges using
-  the same TOTP period, and suspended user/organization states.
-- A separate real-SQLite test uses concurrent independent connections to
-  exercise the same atomic SQL statements.
-
-**Acceptance boundary:** SQLite regression tests do not prove behavior of the
-remote Cloudflare D1 service. A controlled D1 environment check remains
-required before production release. The latest CI workflow must pass on the
-exact branch HEAD before this follow-up is considered verified.
