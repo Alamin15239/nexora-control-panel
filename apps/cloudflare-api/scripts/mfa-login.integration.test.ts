@@ -34,10 +34,10 @@ import worker from "../src/index.ts";
 //  10. /v1/auth/me returns mfaEnrolled=true for a user with an active
 //      factor, false for a user without.
 //
-// The mock D1 simulates atomicity with a JS Map — only one UPDATE can
-// match a given row at a time. Real D1's atomicity is stronger (MVCC),
-// but the simulation is sufficient to verify the WHERE clauses are correct
-// and that the consume-once + failed-attempt accounting behave as intended.
+// // The mock D1 validates endpoint behavior and SQL predicates but does not prove
+// concurrent database semantics. A separate real-SQLite test exercises the
+// atomic UPDATE statements under concurrent connections; Cloudflare D1 remote
+// concurrency still requires deployment-environment acceptance testing.
 // ---------------------------------------------------------------------------
 
 const MFA_KEY_HEX = "a".repeat(64); // 32-byte AES-256 key for TOTP secret encryption
@@ -208,20 +208,37 @@ class MfaLoginD1 {
             failedAttempts: c.failed_attempts, lockedAt: c.locked_at,
           } as T;
         }
+        // login/mfa: reread the atomically incremented failed-attempt counter.
+        if (q.startsWith("SELECT failed_attempts AS failedAttempts, locked_at AS lockedAt FROM mfa_challenges")) {
+          const c = db.challenges.get(String(values[0]));
+          return c ? ({ failedAttempts: c.failed_attempts, lockedAt: c.locked_at } as T) : null;
+        }
         // login/mfa: factor lookup with last_used_totp_period.
         if (q.startsWith("SELECT id, encrypted_secret AS encryptedSecret, last_used_totp_period AS lastUsedTotpPeriod FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL")) {
           const f = [...db.factors.values()].find((f) => f.user_id === String(values[0]) && f.backup_codes !== null);
           if (!f) return null;
           return { id: f.id, encryptedSecret: f.encrypted_secret, lastUsedTotpPeriod: f.last_used_totp_period } as T;
         }
-        // login/mfa: membership lookup (role + platformRole).
-        if (q.startsWith("SELECT m.role, pm.role AS platformRole FROM memberships m LEFT JOIN platform_memberships")) {
+        // login/mfa: revalidate user + organization state and exact membership.
+        if (q.startsWith("SELECT m.role, pm.role AS platformRole") && q.includes("JOIN users u") && q.includes("JOIN organizations o")) {
           const userId = String(values[0]);
           const orgId = String(values[1]);
+          const user = db.users.get(userId);
+          const org = db.orgs.get(orgId);
           const m = db.memberships.find((mm) => mm.user_id === userId && mm.organization_id === orgId);
-          if (!m) return null;
+          if (!user || user.status !== "ACTIVE" || !org || org.status !== "ACTIVE" || !m) return null;
           const pm = db.platformMemberships.find((p) => p.user_id === userId && p.status === "ACTIVE");
           return { role: m.role, platformRole: pm?.role ?? null } as T;
+        }
+        // login/mfa: final authorization recheck immediately before issueSession.
+        if (q.startsWith("SELECT m.role FROM memberships m JOIN users u") && q.includes("JOIN organizations o")) {
+          const userId = String(values[0]);
+          const orgId = String(values[1]);
+          const user = db.users.get(userId);
+          const org = db.orgs.get(orgId);
+          const m = db.memberships.find((mm) => mm.user_id === userId && mm.organization_id === orgId);
+          if (!user || user.status !== "ACTIVE" || !org || org.status !== "ACTIVE" || !m) return null;
+          return { role: m.role } as T;
         }
         // login/mfa: user display info.
         if (q.startsWith("SELECT id, email, display_name AS displayName FROM users WHERE id = ?")) {
@@ -301,33 +318,39 @@ class MfaLoginD1 {
           });
           return { meta: { changes: 1 } };
         }
-        // login/mfa: lock challenge when failed_attempts reaches cap.
-        if (q.startsWith("UPDATE mfa_challenges SET failed_attempts = ?, locked_at = ? WHERE id = ? AND locked_at IS NULL")) {
+        // login/mfa: atomic failed-attempt increment and lockout.
+        if (q.startsWith("UPDATE mfa_challenges SET failed_attempts = failed_attempts + 1")) {
           const c = db.challenges.get(String(values[2]));
-          if (!c || c.locked_at) return { meta: { changes: 0 } };
-          c.failed_attempts = values[0] as number;
-          c.locked_at = values[1] as string;
+          const now = String(values[3]);
+          const cap = Number(values[0]);
+          if (!c || c.consumed_at || c.locked_at || Date.parse(c.expires_at) <= Date.parse(now) || c.failed_attempts >= cap) {
+            return { meta: { changes: 0 } };
+          }
+          c.failed_attempts += 1;
+          if (c.failed_attempts >= cap) c.locked_at = String(values[1]);
           return { meta: { changes: 1 } };
         }
-        // login/mfa: increment failed_attempts (below cap).
-        if (q.startsWith("UPDATE mfa_challenges SET failed_attempts = ? WHERE id = ? AND locked_at IS NULL")) {
+        // login/mfa: atomic challenge consumption bound to user/org and expiry.
+        if (q.startsWith("UPDATE mfa_challenges SET consumed_at = ? WHERE id = ? AND user_id = ?")) {
           const c = db.challenges.get(String(values[1]));
-          if (!c || c.locked_at) return { meta: { changes: 0 } };
-          c.failed_attempts = values[0] as number;
+          const now = String(values[4]);
+          if (!c || c.user_id !== String(values[2]) || c.organization_id !== String(values[3]) ||
+              c.consumed_at || c.locked_at || Date.parse(c.expires_at) <= Date.parse(now)) {
+            return { meta: { changes: 0 } };
+          }
+          c.consumed_at = String(values[0]);
           return { meta: { changes: 1 } };
         }
-        // login/mfa: atomic consume (set consumed_at).
-        if (q.startsWith("UPDATE mfa_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")) {
-          const c = db.challenges.get(String(values[1]));
-          if (!c || c.consumed_at) return { meta: { changes: 0 } };
-          c.consumed_at = values[0] as string;
-          return { meta: { changes: 1 } };
-        }
-        // login/mfa: update factor's last_used_totp_period.
-        if (q.startsWith("UPDATE mfa_factors SET last_used_totp_period = ? WHERE id = ?")) {
+        // login/mfa: atomically claim a TOTP period once per enrolled factor.
+        if (q.startsWith("UPDATE mfa_factors SET last_used_totp_period = ? WHERE id = ? AND (last_used_totp_period IS NULL OR last_used_totp_period < ?)")) {
           const f = db.factors.get(String(values[1]));
-          if (!f) return { meta: { changes: 0 } };
-          f.last_used_totp_period = values[0] as number;
+          const c = db.challenges.get(String(values[3]));
+          if (!f || !c || f.user_id !== String(values[4]) || c.user_id !== String(values[4]) ||
+              c.organization_id !== String(values[5]) || c.consumed_at !== String(values[6]) ||
+              (f.last_used_totp_period !== null && f.last_used_totp_period >= Number(values[2]))) {
+            return { meta: { changes: 0 } };
+          }
+          f.last_used_totp_period = Number(values[0]);
           return { meta: { changes: 1 } };
         }
         return { meta: { changes: 0 } };
@@ -585,4 +608,59 @@ test("login cannot bypass MFA by submitting a forged challengeId to /v1/auth/log
   assert.equal(db.sessions.size, 0);
   // No failed_attempts row was modified because no challenge matched.
   assert.equal([...db.challenges.values()].length, 0);
+});
+
+test("parallel invalid MFA submissions cannot lose increments or exceed the attempt cap", async () => {
+  const { db, env } = setupEnv({ withMfa: true });
+  const login = await callLogin(env, { email: "alice@acme.test", password: PASSWORD, organizationId: "org-a" });
+  const challengeId = (await login.json() as { challengeId: string }).challengeId;
+  const results = await Promise.all(Array.from({ length: 12 }, () =>
+    callMfa(env, { challengeId, code: "000000" }),
+  ));
+  const challenge = db.challenges.get(challengeId)!;
+  assert.equal(challenge.failed_attempts, 5);
+  assert.ok(challenge.locked_at);
+  assert.equal(db.sessions.size, 0);
+  assert.ok(results.some((r) => r.status === 423));
+  assert.ok(results.every((r) => [401, 409, 423].includes(r.status)));
+});
+
+test("parallel challenges cannot issue two sessions using the same TOTP period", async () => {
+  const { db, env } = setupEnv({ withMfa: true });
+  const login1 = await callLogin(env, { email: "alice@acme.test", password: PASSWORD, organizationId: "org-a" });
+  const login2 = await callLogin(env, { email: "alice@acme.test", password: PASSWORD, organizationId: "org-a" });
+  const id1 = (await login1.json() as { challengeId: string }).challengeId;
+  const id2 = (await login2.json() as { challengeId: string }).challengeId;
+  const code = await computeTotpCode("JBSWY3DPEHPK3PXP", Date.now());
+  const results = await Promise.all([
+    callMfa(env, { challengeId: id1, code }),
+    callMfa(env, { challengeId: id2, code }),
+  ]);
+  assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
+  assert.equal(db.sessions.size, 1);
+  assert.equal(db.factors.get("factor-a")!.last_used_totp_period, Math.floor(Date.now() / 1000 / 30));
+});
+
+test("MFA completion rejects a user suspended after password verification", async () => {
+  const { db, env } = setupEnv({ withMfa: true });
+  const login = await callLogin(env, { email: "alice@acme.test", password: PASSWORD, organizationId: "org-a" });
+  const challengeId = (await login.json() as { challengeId: string }).challengeId;
+  db.users.get("user-a")!.status = "SUSPENDED";
+  const code = await computeTotpCode("JBSWY3DPEHPK3PXP", Date.now());
+  const result = await callMfa(env, { challengeId, code });
+  assert.equal(result.status, 403);
+  assert.equal(db.sessions.size, 0);
+  assert.equal(db.challenges.get(challengeId)!.consumed_at, null);
+});
+
+test("MFA completion rejects a suspended organization", async () => {
+  const { db, env } = setupEnv({ withMfa: true });
+  const login = await callLogin(env, { email: "alice@acme.test", password: PASSWORD, organizationId: "org-a" });
+  const challengeId = (await login.json() as { challengeId: string }).challengeId;
+  db.orgs.get("org-a")!.status = "SUSPENDED";
+  const code = await computeTotpCode("JBSWY3DPEHPK3PXP", Date.now());
+  const result = await callMfa(env, { challengeId, code });
+  assert.equal(result.status, 403);
+  assert.equal(db.sessions.size, 0);
+  assert.equal(db.challenges.get(challengeId)!.consumed_at, null);
 });
