@@ -40,7 +40,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ se
 
   const { segments } = await context.params;
   const action = segments.join("/");
-  if (!["login", "register", "logout"].includes(action)) {
+  // "login/mfa" completes an MFA-gated login started by "login". It is the
+  // only two-segment auth action; the others are single-segment.
+  if (!["login", "login/mfa", "register", "logout"].includes(action)) {
     return NextResponse.json({ message: "Authentication route not found" }, { status: 404 });
   }
 
@@ -82,9 +84,17 @@ export async function POST(request: NextRequest, context: { params: Promise<{ se
     headers: { "content-type": result.headers.get("content-type") ?? "application/json" },
   });
 
-  if (action === "login" && result.ok) {
+  // Set the session cookie only when the upstream actually issued an
+  // accessToken. The /v1/auth/login response is 200 in two cases:
+  //   1. Password valid AND no MFA factor → { accessToken, ... }
+  //   2. Password valid AND MFA factor present → { mfaRequired, challengeId, ... }
+  // In case 2 there is no accessToken, so no cookie is set; the dashboard
+  // collects the 6-digit code and POSTs to /api/auth/login/mfa, whose
+  // response (when the code is valid) DOES contain accessToken and is
+  // captured by the second condition below.
+  if ((action === "login" || action === "login/mfa") && result.ok) {
     try {
-      const data = JSON.parse(body) as { accessToken?: string };
+      const data = JSON.parse(body) as { accessToken?: string; mfaRequired?: boolean };
       if (data.accessToken) {
         response.cookies.set(SESSION_COOKIE, data.accessToken, {
           httpOnly: true,
@@ -94,6 +104,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ se
           maxAge: SESSION_MAX_AGE,
         });
       }
+      // If mfaRequired is true, deliberately do NOT set any cookie — the
+      // caller must not be considered authenticated until the challenge is
+      // answered.
     } catch {
       return NextResponse.json({ message: "Invalid authentication response" }, { status: 502 });
     }

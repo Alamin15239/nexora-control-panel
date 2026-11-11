@@ -40,6 +40,18 @@ const SESSION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_ATTEMPTS = 8;
 const PASSWORD_ITERATIONS = 100_000;
+// MFA challenge hardening constants.
+// MFA_CHALLENGE_TTL_MS: how long a login challenge remains valid once issued.
+//   10 minutes is long enough for a user to switch to their authenticator app
+//   and type the 6-digit code, but short enough that a leaked challengeId
+//   cannot be brute-forced (combined with the 5-attempt cap below).
+// MAX_MFA_FAILED_ATTEMPTS: per-challenge attempt cap. After this many invalid
+//   code submissions the challenge is locked and the user must restart login.
+//   A 6-digit TOTP has 1,000,000 possible values; capping attempts at 5 makes
+//   the per-challenge success probability of brute force 5e-6, which is
+//   negligible.
+const MFA_CHALLENGE_TTL_MS = 10 * 60 * 1000;
+const MAX_MFA_FAILED_ATTEMPTS = 5;
 
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -640,6 +652,42 @@ app.post("/v1/auth/login", async (c) => {
 
   await c.env.DB.prepare("DELETE FROM login_attempts WHERE bucket_key = ?").bind(bucketKey).run();
   const role = membership.role as Role;
+
+  // MFA enforcement: if the user has an active TOTP factor (backup_codes IS
+  // NOT NULL means enrollment has been completed and verified), do NOT issue
+  // a session. Instead, create an mfa_challenges row and return its id so the
+  // dashboard can collect the 6-digit code and submit it to /v1/auth/login/mfa.
+  // The challenge row is the only authorization to complete MFA — the password
+  // has already been verified at this point, so the challenge is bound to the
+  // authenticated user_id + organization_id pair.
+  //
+  // A new challengeId is generated for every successful password login. This
+  // means each MFA-protected sign-in gets exactly one challenge with its own
+  // 5-attempt cap and 10-minute expiry. Replaying an old challengeId after a
+  // fresh login is rejected because the old row is either consumed or expired.
+  const mfaFactor = await c.env.DB.prepare(
+    "SELECT id FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1",
+  ).bind(user.id).first<{ id: string }>();
+  if (mfaFactor) {
+    const challengeId = crypto.randomUUID();
+    const expiresAt = new Date(now + MFA_CHALLENGE_TTL_MS).toISOString();
+    await c.env.DB.prepare(
+      "INSERT INTO mfa_challenges (id, user_id, organization_id, expires_at) VALUES (?, ?, ?, ?)",
+    ).bind(challengeId, user.id, membership.organizationId, expiresAt).run();
+    // Audit the challenge creation so failed-MFA incidents can be traced back
+    // to the password-valid login attempt that started them. The actor is the
+    // user whose password was just verified; no session has been issued yet.
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, source_ip) VALUES (?, ?, ?, 'auth.login_mfa_challenge', 'mfa_challenge', ?, ?)",
+    ).bind(crypto.randomUUID(), membership.organizationId, user.id, challengeId, ip).run();
+    return c.json({
+      mfaRequired: true,
+      challengeId,
+      expiresAt,
+      message: "Enter the 6-digit code from your authenticator app.",
+    });
+  }
+
   const customerAccess = await c.env.DB.prepare(
     "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
   ).bind(user.id).first<{ active: number }>();
@@ -704,6 +752,15 @@ app.get("/v1/auth/me", async (c) => {
   const customerAccess = await c.env.DB.prepare(
     "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
   ).bind(identity.id).first<{ active: number }>();
+  // Return mfaEnrolled so the dashboard security page can render the
+  // correct status (Enabled / Not configured) without making a second
+  // request. A factor is "enrolled" only when backup_codes IS NOT NULL,
+  // i.e. the user has completed the verify step after enrollment. A pending
+  // enrollment (factor exists but backup_codes IS NULL) does not count as
+  // enrolled because it cannot gate login.
+  const mfaFactor = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1",
+  ).bind(identity.id).first<{ active: number }>();
   return c.json({
     id: identity.id,
     email: identity.email,
@@ -712,6 +769,7 @@ app.get("/v1/auth/me", async (c) => {
     role: identity.role,
     platformRole: identity.platformRole,
     customerAccess: Boolean(customerAccess),
+    mfaEnrolled: Boolean(mfaFactor),
   });
 });
 
@@ -910,23 +968,94 @@ app.post("/v1/auth/login/mfa", async (c) => {
   const code = typeof input.code === "string" ? input.code.trim() : "";
   if (!challengeId || !/^[a-f0-9-]{36}$/i.test(challengeId)) return c.json({ message: "Invalid challenge" }, 400);
   if (!/^\d{6}$/.test(code)) return c.json({ message: "Enter a 6-digit code" }, 400);
-  const challenge = await c.env.DB.prepare("SELECT id, user_id AS userId, organization_id AS organizationId, expires_at AS expiresAt, consumed_at AS consumedAt FROM mfa_challenges WHERE id = ? LIMIT 1").bind(challengeId).first<{ id: string; userId: string; organizationId: string; expiresAt: string; consumedAt: string | null }>();
+  const challenge = await c.env.DB.prepare(
+    "SELECT id, user_id AS userId, organization_id AS organizationId, expires_at AS expiresAt, consumed_at AS consumedAt, failed_attempts AS failedAttempts, locked_at AS lockedAt FROM mfa_challenges WHERE id = ? LIMIT 1",
+  ).bind(challengeId).first<{ id: string; userId: string; organizationId: string; expiresAt: string; consumedAt: string | null; failedAttempts: number; lockedAt: string | null }>();
   if (!challenge) return c.json({ message: "Challenge not found" }, 404);
   if (challenge.consumedAt) return c.json({ message: "Challenge already used" }, 409);
+  if (challenge.lockedAt) return c.json({ message: "Too many invalid attempts. Please sign in again to receive a new challenge." }, 423);
   if (Date.parse(challenge.expiresAt) < Date.now()) return c.json({ message: "Challenge expired" }, 410);
-  const factor = await c.env.DB.prepare("SELECT id, encrypted_secret AS encryptedSecret FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1").bind(challenge.userId).first<{ id: string; encryptedSecret: string }>();
+  const factor = await c.env.DB.prepare(
+    "SELECT id, encrypted_secret AS encryptedSecret, last_used_totp_period AS lastUsedTotpPeriod FROM mfa_factors WHERE user_id = ? AND kind = 'totp' AND backup_codes IS NOT NULL LIMIT 1",
+  ).bind(challenge.userId).first<{ id: string; encryptedSecret: string; lastUsedTotpPeriod: number | null }>();
   if (!factor) return c.json({ message: "MFA is not enabled for this account" }, 404);
   const secret = await decryptTotpSecret(factor.encryptedSecret, c.env).catch(() => null);
   if (!secret) return c.json({ message: "Unable to decrypt MFA secret" }, 500);
+
+  // Replay protection: compute the TOTP counter for the current 30-second
+  // window and reject any code whose counter is <= the last successful one.
+  // This prevents two parallel submissions of the same valid code from both
+  // succeeding (the second would be rejected here even before the atomic
+  // consume race below fires). NULL lastUsedTotpPeriod means the factor has
+  // not been used since this migration shipped; accept the current code.
+  const currentTotpPeriod = Math.floor(Date.now() / 1000 / 30);
+  if (factor.lastUsedTotpPeriod !== null && currentTotpPeriod <= factor.lastUsedTotpPeriod) {
+    return c.json({ message: "This code has already been used. Wait for your authenticator to refresh and try again." }, 409);
+  }
+
   const expectedCode = await computeTotpCode(secret, Date.now());
-  if (code !== expectedCode) return c.json({ message: "Invalid verification code" }, 401);
+  if (code !== expectedCode) {
+    // Failed-attempt accounting + lockout. The UPDATE is conditional on the
+    // challenge still being unlocked (locked_at IS NULL) so a concurrent
+    // submission that just locked it cannot push failed_attempts past the cap.
+    // When the cap is reached, set locked_at so subsequent submissions see
+    // the 423 Locked response above and audit-log the lock event.
+    const newAttempts = challenge.failedAttempts + 1;
+    const now = new Date().toISOString();
+    if (newAttempts >= MAX_MFA_FAILED_ATTEMPTS) {
+      await c.env.DB.prepare(
+        "UPDATE mfa_challenges SET failed_attempts = ?, locked_at = ? WHERE id = ? AND locked_at IS NULL",
+      ).bind(newAttempts, now, challenge.id).run();
+      await c.env.DB.prepare(
+        "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.login_mfa_locked', 'mfa_challenge', ?)",
+      ).bind(crypto.randomUUID(), challenge.organizationId, challenge.userId, challenge.id).run();
+      return c.json({ message: "Too many invalid attempts. Please sign in again to receive a new challenge." }, 423);
+    }
+    await c.env.DB.prepare(
+      "UPDATE mfa_challenges SET failed_attempts = ? WHERE id = ? AND locked_at IS NULL",
+    ).bind(newAttempts, challenge.id).run();
+    await c.env.DB.prepare(
+      "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.login_mfa_failed', 'mfa_challenge', ?)",
+    ).bind(crypto.randomUUID(), challenge.organizationId, challenge.userId, challenge.id).run();
+    return c.json({ message: "Invalid verification code" }, 401);
+  }
+
   const membership = await c.env.DB.prepare("SELECT m.role, pm.role AS platformRole FROM memberships m LEFT JOIN platform_memberships pm ON pm.user_id = m.user_id AND pm.status = 'ACTIVE' WHERE m.user_id = ? AND m.organization_id = ? LIMIT 1").bind(challenge.userId, challenge.organizationId).first<{ role: Role; platformRole: PlatformRole | null }>();
   if (!membership) return c.json({ message: "Membership no longer active" }, 403);
-  await c.env.DB.prepare("UPDATE mfa_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").bind(new Date().toISOString(), challenge.id).run();
+
+  // Atomic consume: the UPDATE's WHERE clause includes consumed_at IS NULL,
+  // so if two valid submissions race (only possible if both pass the replay
+  // check above with the same TOTP period — which the replay check already
+  // prevents — or two different valid codes from adjacent windows arrive
+  // simultaneously), only one will report changes() == 1. The other gets 0
+  // changes and we return 409 without issuing a second session.
+  const consumeResult = await c.env.DB.prepare(
+    "UPDATE mfa_challenges SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+  ).bind(new Date().toISOString(), challenge.id).run();
+  if ((consumeResult.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Challenge already used" }, 409);
+  }
+
+  // Mark the factor's last successful TOTP period so a re-submission of the
+  // same code (e.g. by an attacker who intercepted the challenge response)
+  // is rejected by the replay check above on the next attempt. We update
+  // AFTER the consume so a failed consume does not poison the factor.
+  await c.env.DB.prepare(
+    "UPDATE mfa_factors SET last_used_totp_period = ? WHERE id = ?",
+  ).bind(currentTotpPeriod, factor.id).run();
+
   const session = await issueSession(c.env.DB, challenge.userId, challenge.organizationId, membership.role);
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id) VALUES (?, ?, ?, 'auth.login_mfa', 'user', ?)").bind(crypto.randomUUID(), challenge.organizationId, challenge.userId, challenge.userId).run();
   const user = await c.env.DB.prepare("SELECT id, email, display_name AS displayName FROM users WHERE id = ? LIMIT 1").bind(challenge.userId).first<{ id: string; email: string; displayName: string | null }>();
-  return c.json({ user: { id: user?.id, email: user?.email, displayName: user?.displayName }, platformRole: membership.platformRole, ...session });
+  const customerAccess = await c.env.DB.prepare(
+    "SELECT 1 AS active FROM hosting_account_memberships WHERE user_id = ? AND status = 'ACTIVE' LIMIT 1",
+  ).bind(challenge.userId).first<{ active: number }>();
+  return c.json({
+    user: { id: user?.id, email: user?.email, displayName: user?.displayName },
+    customerAccess: Boolean(customerAccess),
+    platformRole: membership.platformRole,
+    ...session,
+  });
 });
 
 

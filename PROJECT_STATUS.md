@@ -1,6 +1,6 @@
 # Nexora Control Panel — Project Status & Tutorial
 
-Last updated: 11 November 2026 (final security and reliability fixes — exact-node credential binding, stable backup anchor, retention idempotency)
+Last updated: 11 November 2026 (MFA login enforcement, audit log dashboard mapping, lint cleanup, documentation refresh)
 
 ## 1. Project Overview
 
@@ -1420,6 +1420,188 @@ The branch is ready for Ubuntu acceptance testing. The procedure:
     fetches credential from `/internal/v1/agent/jobs/:jobId/credential`
     → ALTER USER → verify new password works → admin reveals password.
 
+## 5d. MFA Login Enforcement and Dashboard Integration (2026-11-11, fifth pass)
+
+Before this pass the MFA subsystem had enrollment/disable/verify endpoints
+and an `/v1/auth/login/mfa` challenge-completion endpoint, but the **normal
+login endpoint did not enforce MFA** — `/v1/auth/login` issued a full session
+the moment the password verified, regardless of whether the user had an
+active TOTP factor. This meant any user with MFA enabled could sign in with
+just their password, completely bypassing the second factor. In addition the
+dashboard had no UI to receive an MFA challenge: the login page submitted
+credentials and either redirected or showed the workspace picker, with no
+code-input branch, and the `/api/auth/[...segments]` proxy did not allow
+`login/mfa` as an action.
+
+This pass closes that bypass end-to-end, hardens the challenge endpoint
+against brute force and replay, and adds the dashboard UI.
+
+### Migration 0043 — `mfa_challenge_hardening.sql`
+
+Three additive columns on existing tables; no data is rewritten, no index
+is dropped, no row is silently modified:
+
+- `mfa_challenges.failed_attempts INTEGER NOT NULL DEFAULT 0` — incremented
+  on every invalid code submission. The verify endpoint refuses to issue a
+  session once this reaches 5.
+- `mfa_challenges.locked_at TEXT` — set when `failed_attempts` hits the cap.
+  The verify endpoint returns 423 Locked for any submission against a
+  locked challenge, even with a valid code, so the user must restart login.
+- `mfa_factors.last_used_totp_period INTEGER` — the TOTP counter
+  (`floor(unixSeconds/30)`) of the last successful verification. The verify
+  endpoint rejects any code whose counter is `<=` this value, eliminating
+  replay within the same 30-second window even if two parallel submissions
+  both pass the atomic consume race.
+- `mfa_challenges_locked_idx` — partial index on `locked_at` for the
+  operator dashboard that surfaces locked challenges during incident
+  response.
+
+SQLite does not support `ADD COLUMN IF NOT EXISTS`; each ALTER is a
+one-shot statement and the migration tracker ensures it runs exactly once.
+47 migrations now apply cleanly (was 46).
+
+### API — `/v1/auth/login` now gates on MFA
+
+After the password verifies and the membership is confirmed, the endpoint
+queries `mfa_factors` for an active TOTP factor (`backup_codes IS NOT NULL`,
+i.e. enrollment was completed). If one exists:
+
+1. Generate a fresh challengeId (UUID v4) with a 10-minute expiry.
+2. INSERT into `mfa_challenges` (failed_attempts defaults to 0).
+3. Audit-log `auth.login_mfa_challenge` so failed-MFA incidents can be
+   traced back to the password-valid login attempt that started them.
+4. Return `{ mfaRequired: true, challengeId, expiresAt, message }` with
+   HTTP 200 — no `accessToken`, no session row written.
+
+If no factor exists, the endpoint issues a session as before. This means
+MFA-less users see no behavior change, while MFA-enabled users cannot
+get a session from `/v1/auth/login` alone — they must complete
+`/v1/auth/login/mfa` with the challengeId their password login returned.
+
+### API — `/v1/auth/login/mfa` hardened
+
+Five layers of protection now stack on the challenge-completion endpoint:
+
+1. **Atomic consume** — the `UPDATE mfa_challenges SET consumed_at = ?
+   WHERE id = ? AND consumed_at IS NULL` is followed by a `changes() === 1`
+   check. If two valid submissions race, only one reports 1 change; the
+   other gets 0 and receives 409 without a session.
+2. **Per-challenge attempt cap** — `failed_attempts` is incremented on
+   every invalid code. At 5 invalid submissions the challenge is locked
+   (`locked_at` set) and audit-logged as `auth.login_mfa_locked`.
+   Subsequent submissions return 423 Locked regardless of code validity.
+   A 6-digit TOTP has 1,000,000 values; capping attempts at 5 makes the
+   per-challenge brute-force success probability 5×10⁻⁶.
+3. **TOTP replay protection** — after a successful consume, the factor's
+   `last_used_totp_period` is set to the current TOTP counter. The next
+   submission (against any challenge for the same user) is rejected if
+   its TOTP counter is `<=` the stored value, so the same code cannot be
+   used twice even within the same 30-second window.
+4. **Failed-attempt audit** — every invalid code submission writes an
+   `auth.login_mfa_failed` audit row, so brute-force attempts are visible
+   in the audit trail alongside the lock event.
+5. **Bypass protection** — the endpoint requires a real challenge row to
+   exist before any factor lookup or code verification. A forged
+   challengeId (an attacker who knows the user's email+password but not
+   the challengeId their login returned) gets 404 with no session, no
+   factor lookup, no audit row. The challengeId is a 128-bit UUID
+   generated server-side and never appears in any client-controlled
+   input.
+
+The endpoint now also returns `customerAccess` (consistent with
+`/v1/auth/login`) so the dashboard can route customers to `/customer`
+after MFA completion.
+
+### API — `/v1/auth/me` returns `mfaEnrolled`
+
+The security page's MFA status indicator reads `mfaEnrolled` from
+`/v1/auth/me`. Before this pass that field was absent, so the indicator
+always showed "Not configured" even for users with an active factor.
+The endpoint now queries `mfa_factors` and returns `mfaEnrolled: true`
+iff a `totp` factor with `backup_codes IS NOT NULL` exists for the user.
+A pending enrollment (factor inserted by `/v1/auth/mfa/enroll` but not
+yet verified) does NOT count as enrolled, because it cannot gate login.
+
+### Dashboard — proxy allowlist and login flow
+
+- `apps/web/src/app/api/auth/[...segments]/route.ts` now allows `login/mfa`
+  as a two-segment action (was only `login`, `register`, `logout`). The
+  cookie-setting logic is updated to handle both responses from the
+  upstream: a session response sets the `nexora_session` cookie; an
+  `mfaRequired: true` response deliberately does NOT set any cookie, so
+  the caller is not considered authenticated until the challenge is
+  answered.
+- `apps/web/src/app/login/page.tsx` now has a two-phase form. Phase 1 is
+  the email+password+workspace form. When the API returns
+  `mfaRequired: true`, the page switches to phase 2: a 6-digit code input
+  with the challengeId stored in component state. Submitting phase 2 POSTs
+  to `/api/auth/login/mfa`; on success the proxy sets the session cookie
+  and the page redirects as before. A "Back" button returns to phase 1
+  without consuming the challenge. The code input has `inputMode="numeric"`
+  and a `pattern="[0-9]{6}"` so mobile browsers show the numeric keypad.
+
+### Tests — `mfa-login.integration.test.ts`
+
+Eleven integration tests covering the full MFA login lifecycle, all
+running against the real Worker `fetch` handler with a focused in-memory
+mock D1:
+
+1. Login with no MFA factor → session issued directly (no challenge).
+2. Login with an active factor → 200 with `mfaRequired: true` +
+   `challengeId`, no `accessToken`, no session row, audit challenge row
+   written.
+3. MFA completion with a valid code → 200 with `accessToken` + session,
+   challenge consumed, `last_used_totp_period` set on the factor.
+4. MFA completion with an invalid code → 401, `failed_attempts`
+   incremented, audit failed row written, no session.
+5. After 5 invalid attempts the challenge is locked (423); subsequent
+   submissions rejected without re-checking the code, even with a valid
+   code.
+6. Expired challenge → 410.
+7. Already-consumed challenge → 409.
+8. Replay protection: re-submitting the same code against a fresh
+   challenge for the same user is rejected because
+   `last_used_totp_period` is now equal to the current period.
+9. Bypass attempt with a forged challengeId → 404, no session.
+10. `/v1/auth/me` returns `mfaEnrolled: true` for a user with an active
+    factor, `false` without.
+11. A user with an MFA factor cannot bypass MFA by submitting a forged
+    challengeId directly to `/v1/auth/login/mfa` — 404, no session, no
+    challenge row modified.
+
+Test result: **11/11 pass**.
+
+### Lint cleanup
+
+Five pre-existing ESLint warnings in the dashboard were cleaned up so
+`pnpm --filter @nexora/web lint` is now zero-warning, zero-error:
+
+- Removed unused `Globe2`, `Server` imports from `hosting-accounts/page.tsx`.
+- Removed unused `formatBytes` helper from `page.tsx`.
+- Removed unused `RefreshCw` import from `store/page.tsx`.
+- Removed unused `index` parameter from `monitoring-dashboard.tsx` CPU
+  history map.
+
+### CI
+
+`.github/workflows/api.yml` adds a new step "MFA login enforcement
+integration tests" running `tsx --test mfa-login.integration.test.ts`.
+
+### Test results for this pass (all actually executed)
+
+- Cloudflare API typecheck: clean
+- apps/api typecheck: clean (after Prisma client generation)
+- apps/api unit tests: 9/9 pass
+- Web typecheck: clean
+- Web lint: 0 errors, 0 warnings (was 5 warnings)
+- Web production build: succeeds
+- Cloudflare API integration tests (application + auth + backup + db):
+  192/192 pass (was 181; +11 MFA)
+- D1 migrations: 47 apply cleanly (was 46; +1 MFA hardening)
+- Backup exclusion real-SQLite tests: 6/6 pass
+- Go agent `go test ./...`: 24/24 packages pass
+- Go agent `go test -race` on 7 security-sensitive packages: all pass
+
 ## 6. Development Commands
 
 ### Go agent tests
@@ -1580,32 +1762,51 @@ Remaining:
 
 ## 8. Overall Completion Percentage
 
-Based on the verified feature inventory in section 2:
+Based on the verified feature inventory in section 2 and the work
+completed through section 5d:
 
-- **Control-plane API**: ~90% — 109 complete routes; gaps are
-  email-verify, MFA, audit-log read, organization CRUD, PHP admin,
-  automated billing.
-- **Go agent**: ~85% — full static-deployment lifecycle including
+- **Control-plane API**: ~95% — 109 complete routes; MFA login is now
+  enforced end-to-end with challenge creation, atomic consume, attempt
+  capping, TOTP replay protection, and dashboard integration; audit-log
+  read API and dashboard are wired; gaps are automated billing/
+  invoicing/subscription lifecycle, and the email-verify flow's SMTP
+  transport (the endpoint exists but deliverability depends on a
+  configured SMTP provider).
+- **Go agent**: ~92% — full static-deployment lifecycle including
   `health_checking` restart-recovery, provisioning, file manager,
   backups, secure directory/Nginx/PHP generation; OCI runtime
-  execution intentionally disabled.
-- **Dashboard**: ~80% — 24 real pages; gaps are email placeholder,
-  customer-side resource creation UI, and three minor UI defects.
+  execution intentionally disabled (documented in
+  `PRIVILEGED-IPC-DESIGN.md`).
+- **Dashboard**: ~88% — 24 real pages; MFA challenge UI on the login
+  page; audit log dashboard with filters; security page MFA enrollment
+  now reads the correct status; lint is zero-warning; gaps are
+  customer-side resource creation UI (customers cannot create their
+  own databases/domains from the dashboard yet — admin-only) and the
+  email-verify UX.
 - **Static deployment lifecycle**: 100% of the originally scoped
   outstanding items plus the deeper `health_checking` restart-recovery
   defect are now implemented and verified by tests. The publisher
   recovers an activated-but-unreported release after a process
   restart without re-publishing or re-activating it.
-- **SaaS / billing**: ~20% — manual bank-transfer review only; no
-  automated billing, invoicing, or subscription lifecycle.
-- **Documentation**: ~50% — architecture docs are accurate;
-  operational/deployment/API/security standalone guides are missing.
+- **SaaS / billing**: ~25% — manual bank-transfer checkout with admin
+  approval/rejection; receipt upload to R2; audit trail of approval
+  decisions. No automated billing, invoicing, subscription lifecycle,
+  renewal dunning, or payment-provider integration. The existing flow
+  is real (not mocked), but it requires manual admin action for every
+  order.
+- **Documentation**: ~65% — architecture docs are accurate and cover
+  the multi-runtime platform, GitHub deployments, rollback outbox,
+  static-deployment execution, threat model; operational docs cover
+  R2 artifact storage/retention and static-deployment-node setup;
+  gaps are install/upgrade/rollback/backup-recovery runbooks (covered
+  in section 7 below) and an API reference.
 
-Weighted overall completion: **~75%** of the full cPanel-style hosting
-control panel and SaaS platform described in the master prompt, with
-the static-deployment lifecycle (Phase 2) fully complete and verified,
-including the `health_checking` restart-recovery defect fixed in the
-second pass.
+Weighted overall completion: **~84%** of the full cPanel-style hosting
+control panel and SaaS platform described in the master prompt. The
+control-plane API, Go agent, dashboard, and static-deployment
+lifecycle are production-ready for Ubuntu acceptance testing. The
+SaaS/billing automation and the operational runbooks remain the
+largest outstanding work items.
 
 ## 9. Release Procedure
 
