@@ -1049,87 +1049,200 @@ func configurePHPFPM(username string) error {
 }
 
 func updatePhpPool(username, phpVersion string, settings phpPoolSettings) error {
-	if !usernamePattern.MatchString(username) {
-		return fmt.Errorf("PHP_POOL_UPDATE_FAILED: invalid hosting username")
-	}
-	version := phpVersion
-	if version == "" {
-		versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
-		if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect PHP version") }
-		version = strings.TrimSpace(string(versionOutput))
-	}
-	if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
-		return fmt.Errorf("PHP_POOL_UPDATE_FAILED: invalid PHP version %q", version)
-	}
-	poolPath := filepath.Join("/etc/php", version, "fpm", "pool.d", "nexora-"+username+".conf")
-	if _, err := os.Stat(poolPath); err != nil {
-		return fmt.Errorf("PHP_POOL_NOT_FOUND: no existing PHP-FPM pool for account %s", username)
-	}
-	pool := phpFPMPoolConfigWithSettings(username, settings)
-	if pool == "" { return fmt.Errorf("PHP_POOL_UPDATE_FAILED: unable to generate pool configuration") }
-	if err := writeRootConfigFile(poolPath, pool, 0640); err != nil {
-		return fmt.Errorf("PHP_POOL_UPDATE_FAILED: %s", safeOutput(err.Error()))
-	}
-	fpmBinary := filepath.Join("/usr/sbin", "php-fpm"+version)
-	if err := runFixed(fpmBinary, "-tt"); err != nil {
-		return fmt.Errorf("PHP_FPM_CONFIG_INVALID: %s", safeOutput(err.Error()))
-	}
-	service := "php" + version + "-fpm"
-	if err := runFixed("/usr/bin/systemctl", "is-active", "--quiet", service); err != nil {
-		return fmt.Errorf("PHP_FPM_INACTIVE: configuration is valid, but PHP-FPM is not active")
-	}
-	if err := runFixed("/usr/bin/systemctl", "reload", service); err != nil {
-		return fmt.Errorf("PHP_FPM_RELOAD_FAILED: %s", safeOutput(err.Error()))
-	}
-	return nil
+        if !usernamePattern.MatchString(username) {
+                return fmt.Errorf("PHP_POOL_UPDATE_FAILED: invalid hosting username")
+        }
+        version := phpVersion
+        if version == "" {
+                versionOutput, err := exec.Command("/usr/bin/php", "-r", "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;").Output()
+                if err != nil { return fmt.Errorf("PHP_VERSION_FAILED: unable to detect PHP version") }
+                version = strings.TrimSpace(string(versionOutput))
+        }
+        if !regexp.MustCompile(`^[0-9]+\.[0-9]+$`).MatchString(version) {
+                return fmt.Errorf("PHP_POOL_UPDATE_FAILED: invalid PHP version %q", version)
+        }
+        poolPath := filepath.Join("/etc/php", version, "fpm", "pool.d", "nexora-"+username+".conf")
+        if _, err := os.Stat(poolPath); err != nil {
+                return fmt.Errorf("PHP_POOL_NOT_FOUND: no existing PHP-FPM pool for account %s", username)
+        }
+        pool := phpFPMPoolConfigWithSettings(username, settings)
+        if pool == "" { return fmt.Errorf("PHP_POOL_UPDATE_FAILED: unable to generate pool configuration") }
+        if err := writeRootConfigFile(poolPath, pool, 0640); err != nil {
+                return fmt.Errorf("PHP_POOL_UPDATE_FAILED: %s", safeOutput(err.Error()))
+        }
+        fpmBinary := filepath.Join("/usr/sbin", "php-fpm"+version)
+        if err := runFixed(fpmBinary, "-tt"); err != nil {
+                return fmt.Errorf("PHP_FPM_CONFIG_INVALID: %s", safeOutput(err.Error()))
+        }
+        service := "php" + version + "-fpm"
+        if err := runFixed("/usr/bin/systemctl", "is-active", "--quiet", service); err != nil {
+                return fmt.Errorf("PHP_FPM_INACTIVE: configuration is valid, but PHP-FPM is not active")
+        }
+        if err := runFixed("/usr/bin/systemctl", "reload", service); err != nil {
+                return fmt.Errorf("PHP_FPM_RELOAD_FAILED: %s", safeOutput(err.Error()))
+        }
+        return nil
 }
 
 func suspendHostingAccount(username string) error {
-	if !usernamePattern.MatchString(username) { return fmt.Errorf("SUSPEND_FAILED: invalid hosting username") }
-	vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
-	suspendedPath := vhostPath + ".suspended"
-	if _, err := os.Stat(suspendedPath); err == nil { return fmt.Errorf("SUSPEND_FAILED: already suspended") }
-	if err := os.Rename(vhostPath, suspendedPath); err != nil {
-		return fmt.Errorf("SUSPEND_FAILED: %s", safeOutput(err.Error()))
-	}
-	suspendedConfig := "server {\n    listen 80;\n    listen [::]:80;\n    server_name _;\n    return 503;\n}\n"
-	if err := writeRootConfigFile(vhostPath, suspendedConfig, 0640); err != nil {
-		_ = os.Rename(suspendedPath, vhostPath)
-		return fmt.Errorf("SUSPEND_FAILED: %s", safeOutput(err.Error()))
-	}
-	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
-		_ = os.Rename(suspendedPath, vhostPath)
-		return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error()))
-	}
-	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
-		_ = os.Rename(suspendedPath, vhostPath)
-		return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error()))
-	}
-	return nil
+        if !usernamePattern.MatchString(username) { return fmt.Errorf("SUSPEND_FAILED: invalid hosting username") }
+        vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
+        suspendedPath := vhostPath + ".suspended"
+        if _, err := os.Stat(suspendedPath); err == nil { return fmt.Errorf("SUSPEND_FAILED: already suspended") }
+        if err := os.Rename(vhostPath, suspendedPath); err != nil {
+                return fmt.Errorf("SUSPEND_FAILED: %s", safeOutput(err.Error()))
+        }
+        suspendedConfig := "server {\n    listen 80;\n    listen [::]:80;\n    server_name _;\n    return 503;\n}\n"
+        if err := writeRootConfigFile(vhostPath, suspendedConfig, 0640); err != nil {
+                _ = os.Rename(suspendedPath, vhostPath)
+                return fmt.Errorf("SUSPEND_FAILED: %s", safeOutput(err.Error()))
+        }
+        if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
+                _ = os.Rename(suspendedPath, vhostPath)
+                return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error()))
+        }
+        if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
+                _ = os.Rename(suspendedPath, vhostPath)
+                return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error()))
+        }
+        return nil
 }
 
 func reactivateHostingAccount(username string) error {
-	if !usernamePattern.MatchString(username) { return fmt.Errorf("REACTIVATE_FAILED: invalid hosting username") }
-	vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
-	suspendedPath := vhostPath + ".suspended"
-	if _, err := os.Stat(suspendedPath); err != nil { return fmt.Errorf("REACTIVATE_FAILED: not suspended") }
-	_ = os.Remove(vhostPath)
-	if err := os.Rename(suspendedPath, vhostPath); err != nil {
-		return fmt.Errorf("REACTIVATE_FAILED: %s", safeOutput(err.Error()))
-	}
-	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil { return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error())) }
-	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil { return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error())) }
-	return nil
+        if !usernamePattern.MatchString(username) { return fmt.Errorf("REACTIVATE_FAILED: invalid hosting username") }
+        vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
+        suspendedPath := vhostPath + ".suspended"
+        if _, err := os.Stat(suspendedPath); err != nil { return fmt.Errorf("REACTIVATE_FAILED: not suspended") }
+        _ = os.Remove(vhostPath)
+        if err := os.Rename(suspendedPath, vhostPath); err != nil {
+                return fmt.Errorf("REACTIVATE_FAILED: %s", safeOutput(err.Error()))
+        }
+        if err := runFixed("/usr/sbin/nginx", "-t"); err != nil { return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error())) }
+        if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil { return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error())) }
+        return nil
 }
 
+// removeDomain removes only the server block for the requested domain from
+// the account's Nginx configuration. Other domains served by the same
+// account are preserved. The approach:
+//   1. Read the full vhost config file.
+//   2. Split it into server blocks (each starts with "server {" at the
+//      beginning of a line and ends with the matching "}" at the same
+//      nesting depth).
+//   3. For each block, check whether it contains "server_name <domain>"
+//      (exact match on the domain token). If it does, skip it.
+//   4. Write the remaining blocks back atomically.
+//   5. Validate and reload only if the resulting config is valid.
+//   6. Restore the original config if any step fails.
+//
+// Website files, database records, and other domains' DNS records are
+// untouched.
 func removeDomain(username, domain string) error {
-	if !usernamePattern.MatchString(username) { return fmt.Errorf("REMOVE_DOMAIN_FAILED: invalid hosting username") }
-	if !domainPattern.MatchString(domain) { return fmt.Errorf("REMOVE_DOMAIN_FAILED: invalid domain") }
-	vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
-	enabledPath := filepath.Join("/etc/nginx/sites-enabled", "nexora-"+username+".conf")
-	_ = os.Remove(enabledPath)
-	_ = os.Remove(vhostPath)
-	if err := runFixed("/usr/sbin/nginx", "-t"); err != nil { return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error())) }
-	if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil { return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error())) }
-	return nil
+        if !usernamePattern.MatchString(username) {
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: invalid hosting username")
+        }
+        if !domainPattern.MatchString(domain) {
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: invalid domain")
+        }
+        vhostPath := filepath.Join("/etc/nginx/sites-available", "nexora-"+username+".conf")
+
+        original, err := os.ReadFile(vhostPath)
+        if err != nil {
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: unable to read vhost config: %s", safeOutput(err.Error()))
+        }
+
+        filtered := removeServerBlockByDomain(string(original), domain)
+        if filtered == string(original) {
+                // No matching server block was removed — the domain may not
+                // be configured in this account's vhost.
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: domain %s not found in the vhost configuration", domain)
+        }
+
+        // Write the filtered config atomically: write to a temp file in the
+        // same directory, then rename over the original. If validation
+        // fails, restore the original.
+        backup := vhostPath + ".remove-domain-backup"
+        if err := writeRootConfigFile(backup, string(original), 0640); err != nil {
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: unable to create backup: %s", safeOutput(err.Error()))
+        }
+        if err := writeRootConfigFile(vhostPath, filtered, 0640); err != nil {
+                _ = os.Remove(backup)
+                return fmt.Errorf("REMOVE_DOMAIN_FAILED: %s", safeOutput(err.Error()))
+        }
+        if err := runFixed("/usr/sbin/nginx", "-t"); err != nil {
+                _ = os.Rename(backup, vhostPath)
+                return fmt.Errorf("NGINX_CONFIG_INVALID: %s", safeOutput(err.Error()))
+        }
+        if err := runFixed("/usr/bin/systemctl", "reload", "nginx"); err != nil {
+                _ = os.Rename(backup, vhostPath)
+                return fmt.Errorf("NGINX_RELOAD_FAILED: %s", safeOutput(err.Error()))
+        }
+        _ = os.Remove(backup)
+        return nil
+}
+
+// removeServerBlockByDomain returns the config with the server block that
+// matches the given domain removed. Returns the input unchanged if no
+// match is found.
+func removeServerBlockByDomain(config, domain string) string {
+        lines := strings.Split(config, "\n")
+        var result []string
+        i := 0
+        removed := false
+        for i < len(lines) {
+                line := strings.TrimSpace(lines[i])
+                if strings.HasPrefix(line, "server {") || strings.HasPrefix(line, "server{") {
+                        // Find the end of this server block by tracking brace depth.
+                        blockStart := i
+                        depth := 0
+                        blockEnd := -1
+                        for j := i; j < len(lines); j++ {
+                                for _, ch := range lines[j] {
+                                        if ch == '{' { depth++ }
+                                        if ch == '}' { depth-- }
+                                }
+                                if depth == 0 && j > i {
+                                        blockEnd = j
+                                        break
+                                }
+                        }
+                        if blockEnd == -1 {
+                                // Unbalanced braces — keep everything from here.
+                                result = append(result, lines[i:]...)
+                                break
+                        }
+                        // Check if this block matches the domain.
+                        block := strings.Join(lines[blockStart:blockEnd+1], "\n")
+                        if serverBlockMatchesDomain(block, domain) && !removed {
+                                // Skip this block (remove it).
+                                removed = true
+                                i = blockEnd + 1
+                                continue
+                        }
+                        result = append(result, lines[blockStart:blockEnd+1]...)
+                        i = blockEnd + 1
+                        continue
+                }
+                result = append(result, lines[i])
+                i++
+        }
+        return strings.Join(result, "\n")
+}
+
+// serverBlockMatchesDomain reports whether the server block's server_name
+// directive includes the given domain as an exact token match.
+func serverBlockMatchesDomain(block, domain string) bool {
+        for _, line := range strings.Split(block, "\n") {
+                trimmed := strings.TrimSpace(line)
+                if !strings.HasPrefix(trimmed, "server_name ") { continue }
+                // server_name can list multiple domains: "server_name a.com b.com;"
+                names := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(trimmed, "server_name "), ";"))
+                for _, name := range names {
+                        if strings.EqualFold(name, domain) { return true }
+                        // Wildcard matches: *.domain.com or .domain.com
+                        if strings.HasPrefix(name, "*.") && strings.EqualFold(name[2:], domain) { return true }
+                        if strings.HasPrefix(name, ".") && strings.EqualFold(name[1:], domain) { return true }
+                }
+        }
+        return false
 }

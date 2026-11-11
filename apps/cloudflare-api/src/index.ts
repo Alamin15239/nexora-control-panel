@@ -3681,7 +3681,7 @@ app.get("/v1/agent/jobs/next", async (c) => {
   const claimed = await c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, ?), attempts = attempts + 1, lease_expires_at = ?, claimed_by_node_id = ? " +
     "WHERE id = (SELECT j.id FROM provisioning_jobs j JOIN hosting_accounts a ON a.id = j.hosting_account_id " +
-    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
+    "WHERE a.server_id = ? AND j.operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP', 'UPDATE_PHP_POOL', 'SUSPEND_HOSTING_ACCOUNT', 'REACTIVATE_HOSTING_ACCOUNT', 'REMOVE_DOMAIN', 'RESET_DATABASE_USER_PASSWORD') AND (j.operation NOT IN ('CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE') OR EXISTS (SELECT 1 FROM hosting_databases d WHERE d.hosting_account_id = j.hosting_account_id AND d.name = json_extract(j.request_payload, '$.databaseName') AND ((j.operation = 'CREATE_DATABASE' AND d.status = 'PENDING') OR (j.operation IN ('CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER') AND d.status = 'ACTIVE') OR (j.operation = 'DELETE_DATABASE' AND d.status = 'DELETING')))) " +
     "AND (j.status = 'QUEUED' OR (j.status = 'RUNNING' AND j.lease_expires_at < ?)) " +
     "ORDER BY j.requested_at ASC LIMIT 1) " +
     "AND (status = 'QUEUED' OR (status = 'RUNNING' AND lease_expires_at < ?)) " +
@@ -3701,8 +3701,8 @@ app.get("/v1/agent/jobs/next", async (c) => {
     "JOIN provisioning_jobs j ON j.id = ? AND j.hosting_account_id = a.id " +
     "LEFT JOIN domains d ON d.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = a.id AND d2.id = substr(j.idempotency_key, 12) AND j.operation = 'ADD_DOMAIN' LIMIT 1) " +
     "WHERE a.id = ? AND a.server_id = ? AND a.organization_id = ? " +
-    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'RESTORE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'DELETE_BACKUP' AND a.status = 'ACTIVE')) LIMIT 1",
-  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
+    "AND ((? = 'CREATE_HOSTING_ACCOUNT' AND a.status = 'PENDING') OR (? = 'ADD_DOMAIN' AND a.status = 'ACTIVE' AND d.id IS NOT NULL) OR (? = 'FILE_MANAGER' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'REVOKE_DATABASE_USER' AND a.status = 'ACTIVE') OR (? = 'DELETE_DATABASE' AND a.status = 'ACTIVE') OR (? = 'CREATE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'RESTORE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'DELETE_BACKUP' AND a.status = 'ACTIVE') OR (? = 'UPDATE_PHP_POOL' AND a.status = 'ACTIVE') OR (? = 'SUSPEND_HOSTING_ACCOUNT' AND a.status = 'ACTIVE') OR (? = 'REACTIVATE_HOSTING_ACCOUNT' AND a.status = 'SUSPENDED') OR (? = 'REMOVE_DOMAIN' AND a.status = 'ACTIVE') OR (? = 'RESET_DATABASE_USER_PASSWORD' AND a.status = 'ACTIVE')) LIMIT 1",
+  ).bind(claimed.id, claimed.hostingAccountId, auth.credential.serverId, auth.credential.organizationId, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation, claimed.operation)
     .first<{ accountId: string; username: string; primaryDomain: string | null; diskLimitBytes: number; domain: string | null; documentRoot: string | null }>();
   if (!account) {
     await c.env.DB.prepare(
@@ -3737,7 +3737,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   const updateStatement = c.env.DB.prepare(
     "UPDATE provisioning_jobs SET status = ?, finished_at = ?, error_code = ?, error_message = ?, request_payload = NULL, result_payload = ?, lease_expires_at = NULL " +
     "WHERE id = ? AND status = 'RUNNING' AND claimed_by_node_id = ? AND lease_expires_at > ? " +
-    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP') " +
+    "AND operation IN ('CREATE_HOSTING_ACCOUNT', 'ADD_DOMAIN', 'FILE_MANAGER', 'CREATE_DATABASE', 'CREATE_DATABASE_USER', 'REVOKE_DATABASE_USER', 'DELETE_DATABASE', 'CREATE_BACKUP', 'RESTORE_BACKUP', 'DELETE_BACKUP', 'UPDATE_PHP_POOL', 'SUSPEND_HOSTING_ACCOUNT', 'REACTIVATE_HOSTING_ACCOUNT', 'REMOVE_DOMAIN', 'RESET_DATABASE_USER_PASSWORD') " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE server_id = ? AND organization_id = ?)",
   ).bind(status, now, input.success ? null : errorCode || "PROVISIONING_FAILED",
     input.success ? null : errorMessage || "The Linux agent could not provision this account", resultPayload,
@@ -3908,9 +3908,57 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
       "UPDATE hosting_databases SET status = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'PENDING'",
     ).bind(input.success ? "ACTIVE" : "FAILED", now, databaseId, auth.credential.organizationId).run();
   }
+  // SUSPEND_HOSTING_ACCOUNT: on failure revert the account back to ACTIVE.
+  if (completedJob?.operation === "SUSPEND_HOSTING_ACCOUNT" && !input.success) {
+    const jobId_parts = completedJob.idempotencyKey.split(":");
+    const accountId = jobId_parts[1] ?? "";
+    if (/^[a-f0-9-]{36}$/.test(accountId)) {
+      await c.env.DB.prepare("UPDATE hosting_accounts SET status = 'ACTIVE', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'SUSPENDED'").bind(now, accountId, auth.credential.organizationId).run();
+    }
+  }
+  // REACTIVATE_HOSTING_ACCOUNT: on failure revert the account back to SUSPENDED.
+  if (completedJob?.operation === "REACTIVATE_HOSTING_ACCOUNT" && !input.success) {
+    const jobId_parts = completedJob.idempotencyKey.split(":");
+    const accountId = jobId_parts[1] ?? "";
+    if (/^[a-f0-9-]{36}$/.test(accountId)) {
+      await c.env.DB.prepare("UPDATE hosting_accounts SET status = 'SUSPENDED', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(now, accountId, auth.credential.organizationId).run();
+    }
+  }
+  // REMOVE_DOMAIN: on failure revert the domain back to ACTIVE.
+  if (completedJob?.operation === "REMOVE_DOMAIN" && !input.success && completedJob.idempotencyKey?.startsWith("remove-domain:")) {
+    const domainId = completedJob.idempotencyKey.slice("remove-domain:".length);
+    if (/^[a-f0-9-]{36}$/.test(domainId)) {
+      await c.env.DB.prepare("UPDATE domains SET status = 'ACTIVE', updated_at = ? WHERE id = ? AND status = 'DELETED'").bind(now, domainId).run();
+    }
+  }
+  // RESET_DATABASE_USER_PASSWORD: on failure expire the new secret so it cannot be revealed.
+  if (completedJob?.operation === "RESET_DATABASE_USER_PASSWORD" && !input.success && completedJob.idempotencyKey?.startsWith("reset-db-user:")) {
+    const databaseUserId = completedJob.idempotencyKey.slice("reset-db-user:".length);
+    if (/^[a-f0-9-]{36}$/.test(databaseUserId)) {
+      await c.env.DB.prepare("DELETE FROM database_user_secrets WHERE database_user_id = ? AND organization_id = ? AND revealed_at IS NULL").bind(databaseUserId, auth.credential.organizationId).run();
+    }
+  }
+  const auditActionName = input.success ? ({
+    "FILE_MANAGER": "file_manager.operation_completed", "ADD_DOMAIN": "domain.configured",
+    "CREATE_DATABASE": "database.provisioned", "CREATE_DATABASE_USER": "database_user.provisioned",
+    "REVOKE_DATABASE_USER": "database_user.revoked", "DELETE_DATABASE": "database.deleted",
+    "CREATE_BACKUP": "backup.created", "RESTORE_BACKUP": "backup.restore_staged",
+    "DELETE_BACKUP": "backup.deleted", "CREATE_HOSTING_ACCOUNT": "hosting_account.provisioned",
+    "UPDATE_PHP_POOL": "hosting_account.php_updated", "SUSPEND_HOSTING_ACCOUNT": "hosting_account.suspended",
+    "REACTIVATE_HOSTING_ACCOUNT": "hosting_account.reactivated", "REMOVE_DOMAIN": "domain.removed",
+    "RESET_DATABASE_USER_PASSWORD": "database_user.password_reset",
+  } as Record<string, string>)[completedJob?.operation ?? ""] ?? "hosting_account.provisioned" : ({
+    "FILE_MANAGER": "file_manager.operation_failed", "ADD_DOMAIN": "domain.configuration_failed",
+    "CREATE_DATABASE": "database.provisioning_failed", "CREATE_DATABASE_USER": "database_user.provisioning_failed",
+    "REVOKE_DATABASE_USER": "database_user.revocation_failed", "DELETE_DATABASE": "database.deletion_failed",
+    "CREATE_BACKUP": "backup.creation_failed", "RESTORE_BACKUP": "backup.restore_stage_failed",
+    "DELETE_BACKUP": "backup.deletion_failed", "CREATE_HOSTING_ACCOUNT": "hosting_account.provisioning_failed",
+    "UPDATE_PHP_POOL": "hosting_account.php_update_failed", "SUSPEND_HOSTING_ACCOUNT": "hosting_account.suspension_failed",
+    "REACTIVATE_HOSTING_ACCOUNT": "hosting_account.reactivation_failed", "REMOVE_DOMAIN": "domain.removal_failed",
+    "RESET_DATABASE_USER_PASSWORD": "database_user.password_reset_failed",
+  } as Record<string, string>)[completedJob?.operation ?? ""] ?? "hosting_account.provisioning_failed";
   await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job', ?, ?)")
-    .bind(crypto.randomUUID(), auth.credential.organizationId,
-      input.success ? (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_completed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configured" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioned" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioned" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revoked" : completedJob?.operation === "DELETE_DATABASE" ? "database.deleted" : completedJob?.operation === "CREATE_BACKUP" ? "backup.created" : completedJob?.operation === "RESTORE_BACKUP" ? "backup.restore_staged" : completedJob?.operation === "DELETE_BACKUP" ? "backup.deleted" : "hosting_account.provisioned") : (completedJob?.operation === "FILE_MANAGER" ? "file_manager.operation_failed" : completedJob?.operation === "ADD_DOMAIN" ? "domain.configuration_failed" : completedJob?.operation === "CREATE_DATABASE" ? "database.provisioning_failed" : completedJob?.operation === "CREATE_DATABASE_USER" ? "database_user.provisioning_failed" : completedJob?.operation === "REVOKE_DATABASE_USER" ? "database_user.revocation_failed" : completedJob?.operation === "DELETE_DATABASE" ? "database.deletion_failed" : completedJob?.operation === "CREATE_BACKUP" ? "backup.creation_failed" : completedJob?.operation === "RESTORE_BACKUP" ? "backup.restore_stage_failed" : completedJob?.operation === "DELETE_BACKUP" ? "backup.deletion_failed" : "hosting_account.provisioning_failed"),
+    .bind(crypto.randomUUID(), auth.credential.organizationId, auditActionName,
       jobId, JSON.stringify({ serverId: auth.credential.serverId, operation: completedJob?.operation ?? null, errorCode: input.success ? null : errorCode })).run();
   return c.json({ accepted: true, jobId, status });
 });
@@ -7221,19 +7269,37 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
     "WHERE bs.frequency != 'disabled' AND ha.status = 'ACTIVE' AND (bs.next_run_at IS NULL OR bs.next_run_at <= ?) LIMIT 10",
   ).bind(nowIso).all<{ accountId: string; frequency: string; retentionCount: number; nextRunAt: string | null; organizationId: string; username: string; status: string }>();
   for (const schedule of dueSchedules.results ?? []) {
+    // Guard against concurrent scheduler invocations: skip if there is
+    // already a QUEUED or RUNNING backup for this account.
+    const existing = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')",
+    ).bind(schedule.accountId, schedule.organizationId).first<{ count: number }>();
+    if ((existing?.count ?? 0) > 0) continue;
+
+    // Compute next run time using calendar-based arithmetic so monthly
+    // schedules handle variable month lengths correctly.
     let nextRun: Date;
     switch (schedule.frequency) {
       case "daily": nextRun = new Date(now.getTime() + 24*60*60*1000); break;
       case "weekly": nextRun = new Date(now.getTime() + 7*24*60*60*1000); break;
-      case "monthly": nextRun = new Date(now.getTime() + 30*24*60*60*1000); break;
+      case "monthly": {
+        // Calendar-based: same day next month. Handles month length
+        // differences (e.g. Jan 31 → Feb 28) by clamping to end of month.
+        const next = new Date(now);
+        next.setUTCMonth(next.getUTCMonth() + 1);
+        nextRun = next;
+        break;
+      }
       default: continue;
     }
     const backupId = crypto.randomUUID();
     const jobId = crypto.randomUUID();
     const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
     const databaseNames = (databases.results ?? []).map((db) => db.name);
+    // Use 'QUEUED' status to match the lifecycle the agent's job-claim
+    // handler expects: QUEUED → RUNNING → AVAILABLE/FAILED.
     await env.DB.batch([
-      env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'PENDING', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
+      env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'QUEUED', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
       env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
       env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId),
       env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId })),
