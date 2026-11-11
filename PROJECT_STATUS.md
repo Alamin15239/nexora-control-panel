@@ -1,6 +1,6 @@
 # Nexora Control Panel — Project Status & Tutorial
 
-Last updated: 11 November 2026 (MFA login enforcement, audit log dashboard mapping, lint cleanup, documentation refresh)
+Last updated: 11 November 2026 (MFA login enforcement and atomicity hardening, audit-log mapping, CI coverage)
 
 ## 1. Project Overview
 
@@ -111,14 +111,13 @@ Implemented but not verified end-to-end against live infrastructure:
 
 Not implemented or intentionally disabled:
 
-- Email verification endpoint (no `/v1/auth/verify-email`).
-- Multi-factor authentication (no TOTP/WebAuthn/SMS routes).
-- PHP version / PHP-FPM admin API (PHP only appears as a heartbeat
-  service check key).
-- Organization CRUD (organizations are created at registration but
-  cannot be listed/updated/deleted via the API).
-- Audit log read endpoint (`audit_logs` is written by ~30 handlers
-  but never exposed via any GET route).
+- PHP version / PHP-FPM administration API (PHP only appears as a
+  heartbeat service check key).
+- Full organization administration: an update route exists, but
+  organization listing and deletion workflows are incomplete.
+- Mailbox / forwarding / filter CRUD (only outbound email via Resend
+  for password reset, verification, incident notifications, and test
+  emails).
 - Mailbox / forwarding / filter CRUD (only outbound email via Resend
   for password reset, incident notifications, and test emails).
 - Automated subscription billing, invoicing, and renewal workflows
@@ -1542,9 +1541,10 @@ yet verified) does NOT count as enrolled, because it cannot gate login.
 
 ### Tests — `mfa-login.integration.test.ts`
 
-Eleven integration tests covering the full MFA login lifecycle, all
-running against the real Worker `fetch` handler with a focused in-memory
-mock D1:
+Fifteen endpoint integration tests cover the MFA login lifecycle, running
+against the real Worker `fetch` handler with a focused in-memory mock D1.
+The mock verifies endpoint behavior and SQL predicates, but does not prove
+database concurrency semantics.
 
 1. Login with no MFA factor → session issued directly (no challenge).
 2. Login with an active factor → 200 with `mfaRequired: true` +
@@ -1569,7 +1569,10 @@ mock D1:
     challengeId directly to `/v1/auth/login/mfa` — 404, no session, no
     challenge row modified.
 
-Test result: **11/11 pass**.
+The four additional endpoint tests cover parallel invalid submissions,
+same-period TOTP replay across separate challenges, and user/organization
+suspension after password verification. Their CI result is tracked against
+the current branch HEAD, not inferred from the earlier 11-test run.
 
 ### Lint cleanup
 
@@ -1665,11 +1668,15 @@ hosting-account memberships, organization scoping on every customer
 query.
 
 Remaining:
-- Email verification flow (new endpoint + migration).
-- MFA (TOTP preferred; new endpoints + migration + enrollment UI).
-- Audit-log read endpoint (the table is already written; only a GET
-  handler with role gating is needed).
-- Organization CRUD for platform admins.
+- Complete organization administration (list, safe ownership transfer,
+  and deletion with dependency checks).
+- Email verification deliverability and dashboard UX must be validated
+  against a configured production email provider; the verification
+  endpoint and token storage already exist.
+- MFA login enforcement, TOTP enrollment, challenge verification, and
+  dashboard challenge UI are implemented; see sections 5d and 5e.
+- Audit-log read API and dashboard are implemented; the dashboard field
+  mapping was corrected on 11 November 2026.
 
 ### Phase 4 — Hosting account, domain, website, file management
 
@@ -1829,3 +1836,33 @@ Use these statuses:
 - [ ] Remaining — implementation or verification is incomplete.
 
 Implementation does not automatically mean production-ready.
+
+
+## 5e. MFA Atomicity and Authorization Follow-up (2026-11-11)
+
+A follow-up code review identified that the earlier challenge implementation
+still derived failed-attempt values from a stale read and updated the factor's
+TOTP counter unconditionally. Those patterns could lose increments or permit
+two different challenges to race on the same TOTP period.
+
+The follow-up changes on `test/deploy-node-acceptance`:
+
+- Failed-attempt counters are now incremented in one conditional SQL UPDATE;
+  the persisted count cannot exceed the five-attempt cap.
+- Challenge consumption is conditional on the exact challenge, user,
+  organization, unconsumed/unlocked state, and unexpired timestamp.
+- TOTP period claims are conditional on the factor's previously stored period
+  being NULL or lower than the submitted period. This database write, not the
+  earlier read, is the replay/concurrency authority.
+- The factor claim is tied to the exact consumed challenge.
+- User, organization, and membership status are checked before consuming
+  the challenge and rechecked immediately before session persistence.
+- Endpoint tests cover parallel invalid attempts, parallel challenges using
+  the same TOTP period, and suspended user/organization states.
+- A separate real-SQLite test uses concurrent independent connections to
+  exercise the same atomic SQL statements.
+
+**Acceptance boundary:** SQLite regression tests do not prove behavior of the
+remote Cloudflare D1 service. A controlled D1 environment check remains
+required before production release. The latest CI workflow must pass on the
+exact branch HEAD before this follow-up is considered verified.
