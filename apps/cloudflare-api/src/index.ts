@@ -216,6 +216,31 @@ export async function decryptDatabaseSecret(env: Bindings, ciphertext: string, i
   return new TextDecoder().decode(plaintext);
 }
 
+// isUniqueConstraintError reports whether a D1/SQLite error is a UNIQUE
+// constraint violation. D1 wraps the SQLite error in various shapes
+// (message, cause.message), so we walk the chain looking for the
+// constraint marker. Used to distinguish a legitimate exclusion conflict
+// (another active backup already exists → 409) from unrelated database
+// failures (→ 500, must not be swallowed).
+export function isUniqueConstraintError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current; depth++) {
+    if (current instanceof Error) {
+      if (/UNIQUE constraint failed/i.test(current.message)) return true;
+      current = (current as Error & { cause?: unknown }).cause;
+    } else if (typeof current === "string") {
+      return /UNIQUE constraint failed/i.test(current);
+    } else if (current && typeof current === "object" && "message" in current) {
+      const message = String((current as { message: unknown }).message);
+      if (/UNIQUE constraint failed/i.test(message)) return true;
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
 function normalizeEmail(value: unknown): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
@@ -2739,13 +2764,27 @@ app.post("/v1/hosting-accounts/:id/backups", async (c) => {
   // Atomic exclusion: conditional INSERT (NOT EXISTS) checks for an active
   // backup AND inserts in a single SQL statement. D1's atomic execution
   // guarantees no race. The partial unique index
-  // idx_hosting_backups_active_exclusion is the database-level backstop.
-  // If changes() = 0, another active backup exists → 409 Conflict.
-  const insertResult = await c.env.DB.prepare(
-    "INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) " +
-    "SELECT ?, ?, ?, ?, 'QUEUED', ?, ?, ? " +
-    "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
-  ).bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now, account.id).run();
+  // idx_hosting_backups_active_exclusion is the database-level backstop:
+  // if two racing requests both pass the NOT EXISTS check, the index
+  // rejects the second with SQLITE_CONSTRAINT_UNIQUE.
+  //
+  // Conflicts surface in two ways and both map to 409:
+  //   1. changes() = 0 — the NOT EXISTS check saw an active backup.
+  //   2. A UNIQUE constraint error — the index rejected a racing insert.
+  // Unrelated database errors are NOT swallowed — they propagate as 500.
+  let insertResult: { meta?: { changes?: number } };
+  try {
+    insertResult = await c.env.DB.prepare(
+      "INSERT INTO hosting_backups (id, organization_id, hosting_account_id, server_id, status, database_names_json, requested_by_user_id, created_at) " +
+      "SELECT ?, ?, ?, ?, 'QUEUED', ?, ?, ? " +
+      "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
+    ).bind(backupId, identity.organizationId, account.id, account.server_id, JSON.stringify(databaseNames), identity.id, now, account.id).run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: "A backup is already queued or running for this hosting account. Wait for it to complete before requesting another." }, 409);
+    }
+    return c.json({ message: "Unable to queue the hosting backup" }, 500);
+  }
   if ((insertResult.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "A backup is already queued or running for this hosting account. Wait for it to complete before requesting another." }, 409);
   }
@@ -7498,7 +7537,7 @@ export function nextMonthlyRunFromAnchor(anchorDay: number | null, from: Date, m
   return new Date(Date.UTC(targetYear, targetMonthIndex, clampedDay, from.getUTCHours(), from.getUTCMinutes(), from.getUTCSeconds(), from.getUTCMilliseconds()));
 }
 
-async function runBackupSchedules(env: Bindings): Promise<void> {
+export async function runBackupSchedules(env: Bindings): Promise<void> {
   if (!env.DB) return;
   const now = new Date();
   const nowIso = now.toISOString();
@@ -7516,10 +7555,25 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
     "WHERE frequency != 'disabled' AND (next_run_at IS NULL OR next_run_at <= ?) " +
     "AND (lease_expires_at IS NULL OR lease_expires_at < ?) " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE status = 'ACTIVE') " +
-    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId, anchor_day_of_month AS anchorDayOfMonth, next_run_at AS nextRunAt",
-  ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string; anchorDayOfMonth: number | null; nextRunAt: string | null }>();
+    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId, anchor_day_of_month AS anchorDayOfMonth, next_run_at AS nextRunAt, " +
+    "(SELECT server_id FROM hosting_accounts WHERE id = backup_schedules.hosting_account_id) AS serverId",
+  ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string; anchorDayOfMonth: number | null; nextRunAt: string | null; serverId: string }>();
 
   for (const schedule of claimed.results ?? []) {
+    // releaseLeaseAndOrphan cleans up a half-created backup: it removes the
+    // queued row (so the exclusion is released) and clears the schedule
+    // lease. Cleanup failures are swallowed (best-effort) so they cannot
+    // mask the original error, and the next scheduler tick — or lease
+    // expiry — recovers the state.
+    const releaseLeaseAndOrphan = async (backupId: string) => {
+      try {
+        await env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND status = 'QUEUED'").bind(backupId).run();
+      } catch { /* best-effort: lease expiry covers it */ }
+      try {
+        await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
+      } catch { /* best-effort: lease expiry covers it */ }
+    };
+
     // Compute the next run time. For monthly schedules, use the stable
     // anchor day (anchorDayOfMonth) to prevent drift. If the anchor is
     // NULL (pre-migration schedule), infer it from the current next_run_at
@@ -7555,48 +7609,64 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
     }
 
     // Atomic exclusion: conditional INSERT (NOT EXISTS) checks for an
-    // active backup AND inserts in a single SQL statement. Replaces the
-    // non-atomic SELECT-COUNT-then-INSERT that allowed races. The partial
+    // active backup AND inserts in a single SQL statement. The partial
     // unique index idx_hosting_backups_active_exclusion is the DB backstop.
-    // If changes() = 0, another backup won the race. Release the lease,
-    // do NOT advance next_run_at (the scheduled backup was not created),
-    // and skip. next_run_at stays at its current value so the scheduler
-    // retries on the next tick once the winning backup completes.
+    //
+    // Conflicts surface in two ways and both take the same conflict path:
+    //   1. changes() = 0 — the NOT EXISTS check saw an active backup.
+    //   2. UNIQUE constraint error — the index rejected a racing insert.
+    // The conflict path releases the lease and does NOT advance
+    // next_run_at or last_run_at — the scheduled backup was not created.
+    // Unrelated database errors are NOT swallowed: they clean up the
+    // half-created state and rethrow so the caller (cron handler) logs them.
     const backupId = crypto.randomUUID();
-    const insertResult = await env.DB.prepare(
-      "INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) " +
-      "SELECT ?, ?, ?, 'QUEUED', ? " +
-      "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
-    ).bind(backupId, schedule.accountId, schedule.organizationId, nowIso, schedule.accountId).run();
+    let insertResult: { meta?: { changes?: number } };
+    try {
+      insertResult = await env.DB.prepare(
+        "INSERT INTO hosting_backups (id, hosting_account_id, organization_id, server_id, status, created_at) " +
+        "SELECT ?, ?, ?, ?, 'QUEUED', ? " +
+        "WHERE NOT EXISTS (SELECT 1 FROM hosting_backups WHERE hosting_account_id = ? AND status IN ('QUEUED', 'RUNNING'))",
+      ).bind(backupId, schedule.accountId, schedule.organizationId, schedule.serverId, nowIso, schedule.accountId).run();
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        // Lost the race at the index level. Same handling as changes() = 0.
+        await releaseLeaseAndOrphan(backupId);
+        continue;
+      }
+      // Unrelated database error: clean up half-created state and rethrow
+      // so the failure is visible to the cron handler, not silently swallowed.
+      await releaseLeaseAndOrphan(backupId);
+      throw error;
+    }
     if ((insertResult.meta?.changes ?? 0) !== 1) {
       // Another backup won the race. Release the lease, do NOT advance
       // next_run_at or last_run_at — the scheduled backup was not created.
-      await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
+      await releaseLeaseAndOrphan(backupId);
       continue;
     }
 
+    // Backup row inserted. The databases query, provisioning job, schedule
+    // update, and audit log are ALL inside this try block: any failure —
+    // including the databases-list query — cleans up the orphan queued
+    // backup (releasing the exclusion) and the lease, and does NOT advance
+    // next_run_at. Unrelated errors rethrow so they are visible upstream.
     const jobId = crypto.randomUUID();
-    const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
-    const databaseNames = (databases.results ?? []).map((db) => db.name);
-    // Backup row inserted. Now queue the job, update the schedule, and
-    // audit log. If this batch fails, clean up the orphan backup row so
-    // the exclusion is released and the next tick can retry. Do NOT
-    // advance next_run_at — the scheduled backup failed to create the job.
     const scheduleUpdate = inferredAnchor !== null
       ? env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ?, anchor_day_of_month = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), inferredAnchor, schedule.accountId)
       : env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId);
     try {
+      const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
+      const databaseNames = (databases.results ?? []).map((db) => db.name);
       await env.DB.batch([
         env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
         scheduleUpdate,
         env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString(), anchorDayOfMonth: schedule.anchorDayOfMonth ?? inferredAnchor })),
       ]);
-    } catch {
-      // Clean up the orphan backup row so the exclusion is released.
-      // Do NOT advance next_run_at — retry on the next tick.
-      await env.DB.prepare("DELETE FROM hosting_backups WHERE id = ? AND status = 'QUEUED'").bind(backupId).run();
-      await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
-      continue;
+    } catch (error) {
+      // The scheduled backup was not created. Release the exclusion and
+      // the lease; do NOT advance next_run_at — retry on the next tick.
+      await releaseLeaseAndOrphan(backupId);
+      throw error;
     }
   }
 }

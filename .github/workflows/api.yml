@@ -64,6 +64,8 @@ jobs:
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-password-reset.integration.test.ts
       - name: Backup concurrency exclusion tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/backup-concurrency.integration.test.ts
+      - name: Backup exclusion real-SQLite migration tests
+        run: python3 apps/cloudflare-api/scripts/test_backup_exclusion.py
       - name: Validate Nexora static deployment workflow security contract
         run: python3 scripts/test_nexora_deploy_workflow.py
       - name: Validate Prisma schema

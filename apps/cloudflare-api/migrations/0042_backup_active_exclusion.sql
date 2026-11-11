@@ -17,17 +17,29 @@
 -- to a terminal state, the row is removed from the index and the exclusion
 -- is released — the next backup can be created immediately.
 --
--- Before creating the index, mark any stuck QUEUED/RUNNING backups as
--- FAILED. These are orphaned from crashed scheduler/agent runs where the
--- lease has expired (10 minutes for the scheduler, 5 minutes for the job).
--- We do NOT delete them — they remain in the backup history with status
--- FAILED so the admin can see what happened. This is a data correction,
--- not a deletion. Without this step, the CREATE UNIQUE INDEX would fail
--- if any account already had duplicate active backups from the race.
-UPDATE hosting_backups SET status = 'FAILED', error_message = 'Marked as failed during migration 0042: stale active backup from a pre-exclusion race'
-WHERE status IN ('QUEUED', 'RUNNING')
-  AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes');
-
+-- PREFLIGHT — READ BEFORE APPLYING:
+--
+-- This migration does NOT modify, delete, or alter any existing backup
+-- rows. If the pre-exclusion race has already produced duplicate active
+-- backups for one or more accounts, CREATE UNIQUE INDEX fails with
+--
+--   [SQLITE_CONSTRAINT] UNIQUE constraint failed: hosting_backups.hosting_account_id
+--
+-- and the migration aborts WITHOUT creating the index and WITHOUT touching
+-- any data. That failure is the explicit resolution gate required before
+-- the exclusion can be enforced.
+--
+-- To inspect the duplicates that blocked this migration, run:
+--
+--   SELECT hosting_account_id, organization_id, id, status, created_at
+--   FROM hosting_backups
+--   WHERE status IN ('QUEUED', 'RUNNING')
+--   ORDER BY hosting_account_id, created_at;
+--
+-- Resolution must be an explicit operator decision per row — for example
+-- transitioning a provably stale row (agent crashed, job lease expired)
+-- to FAILED via the admin API, or letting a genuinely in-flight backup
+-- finish. No automated data rewriting is performed here.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hosting_backups_active_exclusion
 ON hosting_backups(hosting_account_id)
 WHERE status IN ('QUEUED', 'RUNNING');
