@@ -2768,6 +2768,120 @@ app.delete("/v1/backups/:id", async (c) => {
   return c.json({ job: { id: jobId, status: "QUEUED" }, message: "Backup deletion queued." }, 202);
 });
 
+// ---------------------------------------------------------------------------
+// PHP admin API. The agent already generates per-account PHP-FPM pools;
+// these endpoints expose the settings to the dashboard so administrators
+// can change PHP version, memory limits, execution time, upload limits,
+// and display_errors without SSH access. Changes queue an
+// UPDATE_PHP_POOL provisioning job so the agent rewrites and reloads.
+// ---------------------------------------------------------------------------
+
+app.get("/v1/hosting-accounts/:id/php", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  const settings = await c.env.DB.prepare(
+    "SELECT php_version AS phpVersion, memory_limit_mib AS memoryLimitMib, max_execution_time_seconds AS maxExecutionTimeSeconds, upload_max_filesize_mib AS uploadMaxFilesizeMib, max_input_vars AS maxInputVars, display_errors AS displayErrors, updated_at AS updatedAt FROM hosting_account_php_settings WHERE hosting_account_id = ? LIMIT 1",
+  ).bind(accountId).first<{ phpVersion: string; memoryLimitMib: number; maxExecutionTimeSeconds: number; uploadMaxFilesizeMib: number; maxInputVars: number; displayErrors: number; updatedAt: string }>();
+  if (!settings) {
+    // Return defaults if no row exists yet (account was created before this migration).
+    return c.json({ phpVersion: "8.3", memoryLimitMib: 256, maxExecutionTimeSeconds: 30, uploadMaxFilesizeMib: 64, maxInputVars: 1000, displayErrors: 0, updatedAt: null });
+  }
+  return c.json(settings);
+});
+
+app.put("/v1/hosting-accounts/:id/php", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const phpVersion = typeof input.phpVersion === "string" && ["8.1","8.2","8.3","8.4"].includes(input.phpVersion) ? input.phpVersion : "8.3";
+  const memoryLimitMib = Number(input.memoryLimitMib);
+  const maxExecutionTimeSeconds = Number(input.maxExecutionTimeSeconds);
+  const uploadMaxFilesizeMib = Number(input.uploadMaxFilesizeMib);
+  const maxInputVars = Number(input.maxInputVars);
+  const displayErrors = input.displayErrors === true ? 1 : 0;
+  if (!Number.isInteger(memoryLimitMib) || memoryLimitMib < 64 || memoryLimitMib > 4096) return c.json({ message: "Memory limit must be between 64 and 4096 MiB" }, 400);
+  if (!Number.isInteger(maxExecutionTimeSeconds) || maxExecutionTimeSeconds < 5 || maxExecutionTimeSeconds > 300) return c.json({ message: "Max execution time must be between 5 and 300 seconds" }, 400);
+  if (!Number.isInteger(uploadMaxFilesizeMib) || uploadMaxFilesizeMib < 1 || uploadMaxFilesizeMib > 2048) return c.json({ message: "Upload max filesize must be between 1 and 2048 MiB" }, 400);
+  if (!Number.isInteger(maxInputVars) || maxInputVars < 100 || maxInputVars > 10000) return c.json({ message: "Max input vars must be between 100 and 10000" }, 400);
+
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "INSERT INTO hosting_account_php_settings (hosting_account_id, php_version, memory_limit_mib, max_execution_time_seconds, upload_max_filesize_mib, max_input_vars, display_errors, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now')) " +
+      "ON CONFLICT(hosting_account_id) DO UPDATE SET php_version = excluded.php_version, memory_limit_mib = excluded.memory_limit_mib, max_execution_time_seconds = excluded.max_execution_time_seconds, upload_max_filesize_mib = excluded.upload_max_filesize_mib, max_input_vars = excluded.max_input_vars, display_errors = excluded.display_errors, updated_at = datetime('now')",
+    ).bind(accountId, phpVersion, memoryLimitMib, maxExecutionTimeSeconds, uploadMaxFilesizeMib, maxInputVars, displayErrors),
+    c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key) VALUES (?, ?, 'UPDATE_PHP_POOL', 'QUEUED', ?)").bind(crypto.randomUUID(), accountId, `update-php:${accountId}`),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.php_updated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ phpVersion, memoryLimitMib, maxExecutionTimeSeconds })),
+  ]);
+  return c.json({ success: true, message: "PHP settings updated. The agent will regenerate the PHP-FPM pool." });
+});
+
+// ---------------------------------------------------------------------------
+// Organization update. Workspace OWNER can rename the organization.
+// Platform admins can update any organization.
+// ---------------------------------------------------------------------------
+
+app.put("/v1/organizations/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const orgId = c.req.param("id");
+  const isPlatformAdmin = identity.platformRole === "PLATFORM_OWNER" || identity.platformRole === "PLATFORM_ADMIN";
+  if (!isPlatformAdmin && identity.role !== "OWNER") return c.json({ message: "Workspace owner access required" }, 403);
+  // Verify the user belongs to this org (unless platform admin).
+  if (!isPlatformAdmin && identity.organizationId !== orgId) return c.json({ message: "You can only update your own organization" }, 403);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (!name || name.length > 120) return c.json({ message: "Organization name is required (max 120 characters)" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("UPDATE organizations SET name = ?, updated_at = datetime('now') WHERE id = ?").bind(name, orgId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'organization.updated', 'organization', ?, ?)").bind(crypto.randomUUID(), orgId, identity.id, orgId, JSON.stringify({ name })),
+  ]);
+  return c.json({ success: true, message: "Organization updated." });
+});
+
+// ---------------------------------------------------------------------------
+// Backup scheduling. Per-account schedule for automated backups.
+// ---------------------------------------------------------------------------
+
+app.get("/v1/hosting-accounts/:id/backup-schedule", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  const schedule = await c.env.DB.prepare("SELECT frequency, retention_count AS retentionCount, next_run_at AS nextRunAt, last_run_at AS lastRunAt, updated_at AS updatedAt FROM backup_schedules WHERE hosting_account_id = ? LIMIT 1").bind(accountId).first<{ frequency: string; retentionCount: number; nextRunAt: string | null; lastRunAt: string | null; updatedAt: string }>();
+  if (!schedule) return c.json({ frequency: "weekly", retentionCount: 4, nextRunAt: null, lastRunAt: null, updatedAt: null });
+  return c.json(schedule);
+});
+
+app.put("/v1/hosting-accounts/:id/backup-schedule", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const accountId = c.req.param("id");
+  const account = await c.env.DB.prepare("SELECT id FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1").bind(accountId, identity.organizationId).first<{ id: string }>();
+  if (!account) return c.json({ message: "Hosting account not found" }, 404);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const frequency = typeof input.frequency === "string" && ["daily","weekly","monthly","disabled"].includes(input.frequency) ? input.frequency : "weekly";
+  const retentionCount = Number(input.retentionCount);
+  if (!Number.isInteger(retentionCount) || retentionCount < 1 || retentionCount > 52) return c.json({ message: "Retention count must be between 1 and 52" }, 400);
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO backup_schedules (hosting_account_id, frequency, retention_count, updated_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(hosting_account_id) DO UPDATE SET frequency = excluded.frequency, retention_count = excluded.retention_count, updated_at = datetime('now')").bind(accountId, frequency, retentionCount),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup_schedule.updated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ frequency, retentionCount })),
+  ]);
+  return c.json({ success: true, message: "Backup schedule updated." });
+});
+
 type DomainRecord = { id: string; name: string; document_root: string; is_primary: number; created_at: string; hosting_account_id: string; username: string; account_status: string; server_hostname: string; job_status: string | null };
 app.get("/v1/domains/:id/dns-check", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
