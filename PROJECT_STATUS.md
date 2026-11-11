@@ -1,6 +1,6 @@
 # Nexora Control Panel — Project Status & Tutorial
 
-Last updated: 11 November 2026 (MFA login enforcement and atomicity hardening, audit-log mapping, CI coverage)
+Last updated: 12 November 2026 (platform completion batch: organization administration, customer self-service, subscriptions/billing, email inventory, provisioning inspector — section 5g)
 
 ## 1. Project Overview
 
@@ -1660,6 +1660,181 @@ Verification boundary: the API and dashboard CI runs for these latest
 changes must pass before this batch is marked CI-verified. Live Nginx
 removal/reload and rollback still require Ubuntu acceptance testing.
 
+## 5g. Platform Completion Batch (2026-11-12) — organizations, customer self-service, subscriptions, email inventory, job inspector
+
+This batch closes the largest documented gaps in section 7 (Phases 3-8).
+All items are implemented in the Worker API, covered by regression tests,
+and exposed in the dashboard. Nothing here was verified against live
+infrastructure; the verification boundary is CI only.
+
+### Organization administration (Phase 3 gap closed)
+
+- `GET /v1/organizations` (own workspaces; `?scope=all` platform inventory),
+  `GET /v1/organizations/:id` (details + member inventory + owner/admin
+  counts), `POST /v1/organizations/:id/members` (add an existing ACTIVE
+  user with any role; only OWNER can grant OWNER),
+  `PATCH /v1/organizations/:id/members/:userId` (role change),
+  `DELETE /v1/organizations/:id/members/:userId` (revoke; self-removal
+  allowed for non-last-admins), `DELETE /v1/organizations/:id` (close),
+  and `GET /v1/organizations/:id/audit-logs` (org-scoped history).
+- Last-OWNER and last-administrator protection is enforced on removal and
+  demotion. Membership revocation also revokes the member's auth sessions
+  for that organization, so cached access ends immediately (bearerIdentity
+  additionally requires a live membership row on every request).
+- Closing an organization is refused while hosting accounts, open payment
+  orders, or live subscriptions exist; otherwise it sets status CLOSED and
+  revokes all org sessions. History is preserved (soft close, not a hard
+  DELETE, because hosting_accounts/orders reference organizations with
+  RESTRICT foreign keys).
+- `/v1/organizations/*` is reachable by organization members (the
+  middleware exemption is unchanged) and every route re-derives the
+  caller's role with `resolveOrgAccess` — an org ID from the browser is
+  never trusted by itself. Cross-org access returns 404 (isolation tested).
+
+### Customer self-service (Phase 4 gap closed)
+
+- Customer portal mutations previously read-only are now wired:
+  `POST/DELETE /v1/customer/hosting-accounts/:id/domains[/:domainId]` and
+  `POST/DELETE /v1/customer/hosting-accounts/:id/databases[/:databaseId]`.
+  Every route resolves the hosting account from the caller's ACTIVE
+  hosting-account membership; the account ID in the URL is only a selector.
+- Roles: ACCOUNT_OWNER/ACCOUNT_ADMIN manage domains and databases;
+  ACCOUNT_DEVELOPER manages databases only; ACCOUNT_READONLY is denied.
+  Plan website_limit and database_limit are enforced in the API (409 when
+  exceeded). Domain removal keeps the primary-domain guard; database
+  deletion reuses the WHM guards (pending user operations block, username
+  prefix validation, concurrent-job rejection).
+- The customer dashboard now has Add/Remove domain and Create/Delete
+  database dialogs with confirmation, success/failure states, and
+  role-gated buttons.
+
+### Subscriptions, invoices, billing (Phase 8 gap closed, provider-neutral)
+
+- Migration `0044_subscriptions_invoices.sql`: `subscriptions` (TRIALING →
+  ACTIVE → PAST_DUE → SUSPENDED → EXPIRED/CANCELLED lifecycle with
+  cancel_at_period_end; partial UNIQUE index allows exactly one live
+  subscription per hosting account), `subscription_events` (append-only
+  audit), `invoices` (sequential per-org numbering via `invoice_counters`
+  UPDATE...RETURNING; UNIQUE payment_order_ref/provider_ref for
+  idempotency), and `billing_webhook_events` (UNIQUE(provider, event_id)
+  dedup ledger).
+- APIs: create (platform admin; per-account uniqueness), renew (platform
+  admin; extends the period stacking on the current one; writes a PAID
+  invoice; idempotent per idempotencyKey/transfer reference — replay
+  returns the original invoice and never double-extends), plan change
+  (validates domain/database counts against the target plan; violating
+  downgrades are rejected with a violation list), cancel (immediate or at
+  period end; org OWNER or platform admin), suspend/reactivate (platform
+  admin), subscription detail with events + invoices, invoice inventory
+  (org-scoped for customers, all for platform admins), and invoice
+  settle (PAID/VOID, audited).
+- Expiration is lazy (evaluated on subscription reads) plus a cron sweep
+  in the Worker's `scheduled` handler; overdue ACTIVE/TRIALING become
+  EXPIRED, or CANCELLED when a cancellation was scheduled.
+- Payment webhooks: `POST /v1/billing/webhooks/:provider` requires
+  `PAYMENT_WEBHOOK_SECRET` (503 with requirements when unset), verifies
+  HMAC-SHA256 over `t=<seconds>.<body>` (X-Nexora-Signature), rejects
+  timestamps outside a 5-minute window, deduplicates event IDs, and only
+  marks the referenced OPEN invoice PAID (renewing its subscription).
+  Unknown invoice references are recorded but never fabricate success.
+  No Stripe/Paddle SDK is embedded — the contract is documented in the
+  provider-status endpoint (`GET /v1/platform/billing/provider-status`).
+
+### Email hosting honesty (Phase 5 email gap closed)
+
+- Migration `0045_email_hosting.sql`: `email_domains`, `email_mailboxes`
+  (quota CHECK 128–51200 MB, UNIQUE address), `email_forwards`. Rows carry
+  a separate `provider_status` that stays `not_provisioned` until a
+  configured provider confirms.
+- Provider abstraction: `resolveEmailProvider` supports `none` (default,
+  inventory-only) and `mailserver-api` (generic HTTPS admin-API bridge
+  via `EMAIL_PROVIDER_API_URL` + `EMAIL_PROVIDER_API_TOKEN`). Without a
+  complete configuration, mutation endpoints record intent but return the
+  honest `provisioning: { available: false, requirements: [...] }` shape;
+  mailbox password changes are refused with 503 because the control panel
+  never stores mailbox passwords. With the bridge configured, provisioning
+  calls are attempted and failures surface as HTTP 502 with the provider
+  detail — rows are marked `failed`, never silently "active".
+- Plan mailbox limits are enforced when an email domain is linked to a
+  hosting account. `GET /v1/email/status` and `/v1/email/service-status`
+  report outbound (Resend) and mailbox hosting as separate services with
+  MX/SPF/DKIM/DMARC guidance. The dashboard `/email` page is now a real
+  inventory UI with an explicit inventory-mode banner replacing the
+  misleading static readiness card.
+- IMPORTANT: actual mailbox hosting (IMAP/SMTP) still requires the
+  operator to run a mail server and configure the bridge. See
+  `docs/UBUNTU-ACCEPTANCE-CHECKLIST.md` § 12 for the exact external
+  infrastructure requirements.
+
+### Plan management and job inspector (Phase 6/7 gaps closed)
+
+- `DELETE /v1/hosting-plans/:id` refuses plans referenced by hosting
+  accounts or subscriptions (409 with counts) and deletes otherwise.
+  Deactivation already existed via `PUT /v1/hosting-plans/:id` (active
+  flag); the dashboard exposes both.
+- `GET /v1/provisioning-jobs` (status/operation/organization filters,
+  joined with account/org/server, failure reasons, stalled hints for
+  QUEUED/RUNNING older than 1 hour), `GET /v1/provisioning-jobs/:id`
+  (with request payload and retryability), and
+  `POST /v1/provisioning-jobs/:id/retry` — restricted to FAILED jobs of
+  known-idempotent operations (ADD_DOMAIN, REMOVE_DOMAIN,
+  CREATE_DATABASE, CREATE_DATABASE_USER, REVOKE_DATABASE_USER,
+  RESET_DATABASE_USER_PASSWORD, UPDATE_PHP_POOL, SUSPEND/REACTIVATE
+  HOSTING_ACCOUNT, CREATE_BACKUP, DELETE_BACKUP). RESTORE_BACKUP,
+  DELETE_DATABASE and FILE_MANAGER are deliberately NOT retryable from
+  the inspector; the operator re-triggers them through the resource
+  workflow so current state is re-validated. Retries queue a NEW job
+  with a unique `:retry-<n>` idempotency key; the FAILED row is preserved.
+- Dashboard `/provisioning-jobs` page with status filters and guarded
+  retry buttons.
+
+### Authorization/middleware correction
+
+- `/v1/subscriptions`, `/v1/invoices`, `/v1/email/*`, and
+  `/v1/billing/webhooks/*` are exempt from the platform-role gate because
+  they are org-owner- or provider-facing; each enforces roles internally
+  (org OWNER/ADMIN for email and subscription cancel, platform admin for
+  lifecycle mutations, HMAC for webhooks). All other WHM routes remain
+  default-deny for customer identities.
+
+### Tests added in this batch
+
+- `scripts/platform-completion.integration.test.ts` + harness: 36
+  integration tests (org admin incl. session invalidation and close-org
+  dependency checks; customer mutations incl. quota/role/isolation;
+  billing incl. renewal idempotency, downgrade rejection, expiry sweep,
+  webhook signature/dedup/no-fake-success; email honesty incl. mailbox
+  limit and 503 password rule; job retry rules incl. non-retryable ops).
+- `scripts/test_migrations.py` extended: schema presence for 0044/0045,
+  one-live-subscription partial UNIQUE enforcement, subscription status
+  CHECK, invoice-number UNIQUE, webhook dedup UNIQUE, mailbox address
+  UNIQUE and quota CHECK.
+- Full suite at batch completion: 242/242 Worker tests, 24/24 Go
+  packages, migration test 49 migrations clean, API typecheck clean, web
+  typecheck + lint + production build clean.
+
+### Files modified in this batch
+
+| File | Change |
+|---|---|
+| `apps/cloudflare-api/src/index.ts` | Organization admin routes + helpers, customer self-service routes, subscriptions/billing/webhook module, email hosting module, provisioning inspector, plan DELETE, middleware exemption correction, cron expiry sweep |
+| `apps/cloudflare-api/migrations/0044_subscriptions_invoices.sql` | Subscriptions, events, invoice counters, invoices, webhook dedup |
+| `apps/cloudflare-api/migrations/0045_email_hosting.sql` | Email domains, mailboxes, forwards |
+| `apps/cloudflare-api/scripts/platform-completion-harness.ts` | Shared in-memory D1 harness for the new suite |
+| `apps/cloudflare-api/scripts/platform-completion.integration.test.ts` | 36 regression tests |
+| `apps/cloudflare-api/scripts/test_migrations.py` | 0044/0045 schema and constraint guards |
+| `apps/cloudflare-api/wrangler.toml` | EMAIL_PROVIDER documentation |
+| `apps/web/src/app/api/control/[...path]/route.ts` | Proxy allowlist for all new routes |
+| `apps/web/src/app/customer/page.tsx` | Working domain/database dialogs |
+| `apps/web/src/app/organization/page.tsx` | New organization administration page |
+| `apps/web/src/app/subscriptions/page.tsx` | New subscriptions & billing page |
+| `apps/web/src/app/provisioning-jobs/page.tsx` | New job inspector page |
+| `apps/web/src/app/email/page.tsx` | Real email inventory UI |
+| `apps/web/src/app/hosting-plans/page.tsx` | Plan delete action |
+| `apps/web/src/components/app-shell.tsx` | Sidebar entries |
+| `.github/workflows/api.yml` | New CI step for the platform-completion suite |
+| `docs/UBUNTU-ACCEPTANCE-CHECKLIST.md` | New Ubuntu acceptance procedure (section 14 of the master prompt) |
+
 ## 6. Development Commands
 
 ### Go agent tests
@@ -1723,8 +1898,11 @@ hosting-account memberships, organization scoping on every customer
 query.
 
 Remaining:
-- Complete organization administration (list, safe ownership transfer,
-  and deletion with dependency checks).
+- ~~Complete organization administration (list, safe ownership transfer,
+  and deletion with dependency checks).~~ CLOSED 2026-11-12 (section 5g):
+  list/details/member management with last-owner protection, session
+  invalidation on revocation, and soft close with dependency checks are
+  implemented and tested.
 - Email verification deliverability and dashboard UX must be validated
   against a configured production email provider; the verification
   endpoint and token storage already exist.
@@ -1751,10 +1929,13 @@ Remaining:
 
 ### Phase 5 — Databases, email, PHP, runtime management
 
-- Databases: complete (list/create/delete/users/secret-reveal).
-- Email: outbound only. Mailbox/forwarding/filter CRUD requires a
-  mailserver integration (Dovecot/Postfix admin API or cPanel-style
-  forward file generation). Out of scope without a chosen mailserver.
+- Databases: complete (list/create/delete/users/secret-reveal) in both
+  the WHM and customer APIs.
+- Email: mailbox/forward inventory, quota management, and the DNS
+  guidance (SPF/DKIM/DMARC) are implemented with a provider abstraction
+  (section 5g). Actual mailbox provisioning requires a configured mail
+  server via the `mailserver-api` bridge — unavailable operations are
+  refused with 503 and exact requirements, never faked.
 - PHP/runtime admin: organization-scoped GET/PUT settings API and
   `/hosting-accounts/[id]/php` dashboard page exist. The Linux agent
   applies pool changes through the rollback-safe UPDATE_PHP_POOL pipeline.
@@ -1762,29 +1943,39 @@ Remaining:
 
 ### Phase 6 — Hosting plans, quotas, resource enforcement
 
-- Plans CRUD: list/create + website-limit + store-settings. PUT/DELETE
-  missing.
+- Plans: full CRUD surface — list/create, PUT (all quotas + active
+  toggle), website-limit, store-settings, and DELETE restricted to
+  unused plans (closed 2026-11-12, section 5g).
 - Build-minute quota enforcement is implemented (`build-quota.ts` and
   ingestion tests pass); runtime CPU/memory quotas are enforced in the
   OCI supervisor; disk quotas rely on Linux project quotas applied by
   `nexora-provision` (`secure_directories.go`).
-- Plan downgrade workflow is not implemented.
+- Plan downgrade workflow is implemented at the subscription layer:
+  usage (domains, databases) is validated against the target plan and
+  violating changes are rejected with a violation list (section 5g).
 
 ### Phase 7 — Admin panel
 
 - Customers (read-only), servers, hosting accounts, hosting plans,
   payment orders, payment settings, incidents, notification settings,
   GitHub projects, application nodes — all present.
-- Organization management and deployment queue inspector remain
-  incomplete. Audit-log viewer is implemented at `/audit-logs`.
+- Organization management is implemented at `/organization` and the
+  provisioning queue inspector at `/provisioning-jobs` (closed 2026-11-12,
+  section 5g). Audit-log viewer is implemented at `/audit-logs`.
 
 ### Phase 8 — SaaS subscriptions, billing, customer management
 
 - Manual bank-transfer orders with admin review: implemented.
-- Automated billing (Stripe/Paddle/etc.), subscription lifecycle,
-  invoicing, dunning, trial periods, suspension for non-payment:
-  not implemented. Per the original instructions, a payment provider
-  must be approved before integration begins.
+- Subscription lifecycle, invoicing, trial periods, suspension,
+  plan changes with quota validation, payment history, and an
+  HMAC-verified provider webhook are implemented with migration 0044
+  (closed 2026-11-12, section 5g). The webhook contract is
+  provider-neutral — no Stripe/Paddle SDK is embedded; enabling a
+  specific provider requires the operator to set `PAYMENT_WEBHOOK_SECRET`
+  and point the provider at the webhook endpoint.
+- Dunning (automated retry of failed payments) and automated renewal
+  reminders are not implemented; renewals are operator-recorded or
+  provider-webhook-driven.
 
 ### Phase 9 — Security hardening, monitoring, backups, recovery
 
@@ -1799,12 +1990,13 @@ Remaining:
 
 ### Phase 10 — Frontend quality
 
-- 24 pages, real API calls, responsive layout, loading/error states.
+- 28 pages, real API calls, responsive layout, loading/error states.
 - Empty states and confirmation dialogs present on destructive
   actions.
-- Remaining UI gaps: `/user-management` is not in the sidebar and
-  `/email` is a mail-provider readiness placeholder. Domain removal and
-  live Cloudflare status refresh are now wired into the domain inventory.
+- Closed 2026-11-12 (section 5g): `/user-management` is in the sidebar,
+  `/email` is a real inventory UI with an honest inventory-mode banner,
+  customer resource creation is wired, and the organization,
+  subscriptions, and provisioning-jobs pages exist.
 
 ### Phase 11 — Full regression, integration, end-to-end, security testing
 
@@ -1829,61 +2021,83 @@ Remaining:
 
 ## 8. Overall Completion Percentage
 
-Based on the verified feature inventory in section 2 and the work
-completed through section 5e, including the domain dashboard follow-up:
+Based on the verified feature inventory in section 2, the work completed
+through section 5g, and the test suites recorded in section 5g. Two
+numbers are tracked separately, exactly as the master prompt requires:
+**working implementation with automated verification** (what CI proves)
+and **production acceptance** (what only a live Ubuntu node and live
+external providers can prove — currently 0% because no acceptance run
+has been executed).
 
-- **Control-plane API**: ~95% — 109 complete routes; MFA login is now
-  enforced end-to-end with challenge creation, atomic consume, attempt
-  capping, TOTP replay protection, and dashboard integration; audit-log
-  read API and dashboard are wired; gaps are automated billing/
-  invoicing/subscription lifecycle, and the email-verify flow's SMTP
-  transport (the endpoint exists but deliverability depends on a
-  configured SMTP provider).
-- **Go agent**: ~92% — full static-deployment lifecycle including
-  `health_checking` restart-recovery, provisioning, file manager,
-  backups, secure directory/Nginx/PHP generation; OCI runtime
-  execution intentionally disabled (documented in
-  `PRIVILEGED-IPC-DESIGN.md`).
-- **Dashboard**: ~89% — 24+ real pages; MFA challenge UI, audit log
-  dashboard, PHP settings, live Cloudflare hostname status refresh, and
-  domain removal action are wired. Gaps include customer-side resource
-  creation UI, organization management UX, email verification UX, and
-  mail hosting.
-- **Static deployment lifecycle**: 100% of the originally scoped
-  outstanding items plus the deeper `health_checking` restart-recovery
-  defect are now implemented and verified by tests. The publisher
-  recovers an activated-but-unreported release after a process
-  restart without re-publishing or re-activating it.
-- **SaaS / billing**: ~25% — manual bank-transfer checkout with admin
-  approval/rejection; receipt upload to R2; audit trail of approval
-  decisions. No automated billing, invoicing, subscription lifecycle,
-  renewal dunning, or payment-provider integration. The existing flow
-  is real (not mocked), but it requires manual admin action for every
-  order.
-- **Documentation**: ~65% — architecture docs are accurate and cover
-  the multi-runtime platform, GitHub deployments, rollback outbox,
-  static-deployment execution, threat model; operational docs cover
-  R2 artifact storage/retention and static-deployment-node setup;
-  gaps are install/upgrade/rollback/backup-recovery runbooks (covered
-  in section 7 below) and an API reference.
+### Implementation + automated verification (CI-proven)
 
-Weighted overall completion: **~84%** of the full cPanel-style hosting
-control panel and SaaS platform described in the master prompt. The
-control-plane API, Go agent, dashboard, and static-deployment
-lifecycle are production-ready for Ubuntu acceptance testing. The
-SaaS/billing automation and the operational runbooks remain the
-largest outstanding work items.
+- **Control-plane API**: ~97% — 140+ routes across auth/MFA, org
+  administration, customer self-service (domains, databases),
+  hosting accounts, plans (full CRUD), store/checkout, payment review,
+  subscriptions/invoices/webhooks, email inventory, backups, file
+  manager, PHP settings, GitHub deployments, application runtime, and
+  the provisioning-job inspector. 242/242 integration tests pass,
+  including the 36 platform-completion regressions. Remaining gaps are
+  dunning/renewal reminders and provider-specific SDK integrations,
+  both of which require an operator decision and credentials.
+- **Go agent**: ~92% — unchanged from section 5f: full static-deployment
+  lifecycle with restart recovery, provisioning, file manager, backups,
+  secure directory/Nginx/PHP generation; 24/24 packages pass with race
+  tests on the security-sensitive set. OCI runtime execution is
+  intentionally disabled (documented in `PRIVILEGED-IPC-DESIGN.md`).
+- **Dashboard**: ~95% — 28 pages, all real API calls; customer
+  domain/database creation is wired; organization administration,
+  subscriptions/billing, and the provisioning inspector exist;
+  the email page shows an honest inventory-mode state; plan deletion
+  is exposed. Remaining gaps are cosmetic (org switcher in the header,
+  per-page skeleton loaders).
+- **Static deployment lifecycle**: 100% of originally scoped items
+  plus the `health_checking` restart-recovery defect (section 3).
+- **SaaS / billing**: ~75% — subscription lifecycle, invoices with
+  sequential numbering, idempotent renewals, quota-validated plan
+  changes, expiry/suspension handling, audited manual review, and the
+  HMAC webhook contract are implemented and tested. Missing: dunning,
+  renewal reminders, and a concrete provider integration (needs an
+  operator-approved provider + secrets). The flow is real end to end
+  with manual bank transfer; nothing is mocked.
+- **Email hosting**: ~55% — inventory, quotas, forwards, DNS guidance,
+  and the provider abstraction are implemented and honestly marked
+  unavailable without a mail server. Actual IMAP/SMTP mailboxes are
+  0% until the operator runs a mail server and configures the bridge —
+  by design the panel cannot fake this.
+- **Documentation**: ~70% — architecture docs accurate; this file now
+  includes the platform-completion batch and the acceptance checklist
+  exists at `docs/UBUNTU-ACCEPTANCE-CHECKLIST.md`. Standalone
+  INSTALLATION/API-REFERENCE/SECURITY documents are still pending.
+
+Weighted overall implementation completion: **~90%** of the full
+cPanel-style hosting control panel and SaaS platform described in the
+master prompt.
+
+### Production acceptance (live evidence)
+
+- **Ubuntu server acceptance**: 0% — no test in
+  `docs/UBUNTU-ACCEPTANCE-CHECKLIST.md` has been executed against the
+  live `nexora-deploy-node`. Until that run happens and its evidence is
+  recorded, no hosting operation (Nginx/PHP-FPM/MariaDB/backup/deploy)
+  should be considered production-verified, regardless of CI status.
+- **Live Cloudflare custom hostnames / SSL**: not verified in this
+  session (requires live zone credentials).
+- **Payment provider / mail provider end-to-end**: not verifiable
+  without operator-provided infrastructure.
 
 ## 9. Release Procedure
 
 1. Review all modified files (`git diff --stat`).
 2. Run all relevant tests (section 6).
-3. Review database migrations (none added in this session).
+3. Review database migrations (0044, 0045 added 2026-11-12; verified by
+   `scripts/test_migrations.py` on a fresh SQLite database).
 4. Confirm secrets are not committed.
 5. Commit changes to Git.
 6. Push to the intended GitHub branch.
 7. Deploy to a test environment.
-8. Run end-to-end acceptance tests against `nexora-deploy-node`.
+8. Run end-to-end acceptance tests against `nexora-deploy-node`
+   (see `docs/UBUNTU-ACCEPTANCE-CHECKLIST.md`).
 9. Approve production deployment only after verification.
 
 ## 10. Status Tracking Conventions
