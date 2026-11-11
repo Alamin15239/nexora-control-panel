@@ -2891,9 +2891,16 @@ app.put("/v1/hosting-accounts/:id/backup-schedule", async (c) => {
   const frequency = typeof input.frequency === "string" && ["daily","weekly","monthly","disabled"].includes(input.frequency) ? input.frequency : "weekly";
   const retentionCount = Number(input.retentionCount);
   if (!Number.isInteger(retentionCount) || retentionCount < 1 || retentionCount > 52) return c.json({ message: "Retention count must be between 1 and 52" }, 400);
+  // For monthly schedules, capture the anchor day (1-31) from the current
+  // UTC date. This preserves the original intended day-of-month across
+  // short-month clamping: a schedule created on Jan 31 always targets day
+  // 31, so Feb clamps to 28, March expands back to 31. Without the anchor,
+  // computing next_run from the execution date causes permanent drift
+  // (Jan 31 → Feb 28 → March 28 → April 28 → ...).
+  const anchorDayOfMonth = frequency === "monthly" ? new Date().getUTCDate() : null;
   await c.env.DB.batch([
-    c.env.DB.prepare("INSERT INTO backup_schedules (hosting_account_id, frequency, retention_count, updated_at) VALUES (?, ?, ?, datetime('now')) ON CONFLICT(hosting_account_id) DO UPDATE SET frequency = excluded.frequency, retention_count = excluded.retention_count, updated_at = datetime('now')").bind(accountId, frequency, retentionCount),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup_schedule.updated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ frequency, retentionCount })),
+    c.env.DB.prepare("INSERT INTO backup_schedules (hosting_account_id, frequency, retention_count, anchor_day_of_month, updated_at) VALUES (?, ?, ?, ?, datetime('now')) ON CONFLICT(hosting_account_id) DO UPDATE SET frequency = excluded.frequency, retention_count = excluded.retention_count, anchor_day_of_month = excluded.anchor_day_of_month, updated_at = datetime('now')").bind(accountId, frequency, retentionCount, anchorDayOfMonth),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'backup_schedule.updated', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, accountId, JSON.stringify({ frequency, retentionCount, anchorDayOfMonth })),
   ]);
   return c.json({ success: true, message: "Backup schedule updated." });
 });
@@ -3679,40 +3686,67 @@ app.post("/internal/v1/agent/jobs/:jobId/credential", async (c) => {
   const jobId = c.req.param("jobId");
   if (!/^[a-f0-9-]{36}$/.test(jobId)) return c.json({ message: "Invalid job id" }, 400);
 
-  // Look up the job and verify it belongs to a hosting account on the
-  // authenticated agent's server. This prevents an agent on server A
-  // from fetching a credential for a job queued against server B.
+  // Pre-check for clear error messages. These checks are advisory — the
+  // real security enforcement is in the atomic UPDATE below, which
+  // re-verifies every condition inside the SQL WHERE clause so no TOCTOU
+  // race is possible even if two requests pass the pre-check simultaneously.
   const job = await c.env.DB.prepare(
-    "SELECT j.operation AS operation, j.status AS status, j.hosting_account_id AS accountId, " +
-    "ha.server_id AS serverId, ha.organization_id AS organizationId " +
+    "SELECT j.operation AS operation, j.status AS status, j.claimed_by_node_id AS claimedByNodeId, " +
+    "j.hosting_account_id AS accountId, ha.server_id AS serverId, ha.organization_id AS organizationId " +
     "FROM provisioning_jobs j JOIN hosting_accounts ha ON ha.id = j.hosting_account_id " +
     "WHERE j.id = ? LIMIT 1",
-  ).bind(jobId).first<{ operation: string; status: string; accountId: string; serverId: string; organizationId: string }>();
+  ).bind(jobId).first<{ operation: string; status: string; claimedByNodeId: string | null; accountId: string; serverId: string; organizationId: string }>();
   if (!job) return c.json({ message: "Job not found" }, 404);
-  if (job.serverId !== auth.credential.serverId) return c.json({ message: "Job is not assigned to this node" }, 403);
   if (job.operation !== "RESET_DATABASE_USER_PASSWORD") return c.json({ message: "Job does not carry a database credential" }, 400);
-  if (job.status !== "QUEUED" && job.status !== "RUNNING") return c.json({ message: "Job is no longer active" }, 410);
+  if (job.serverId !== auth.credential.serverId) return c.json({ message: "Job is not assigned to this server" }, 403);
+  // The job MUST be RUNNING (claimed), not QUEUED. A QUEUED job has no
+  // claimed_by_node_id, so the exact-node binding cannot be verified.
+  // Returning 410 here is correct: the credential is not yet revealable.
+  if (job.status !== "RUNNING") return c.json({ message: "Credential is not available for a job that has not been claimed" }, 410);
+  if (job.organizationId !== auth.credential.organizationId) return c.json({ message: "Job does not belong to this organization" }, 403);
+  if (job.claimedByNodeId !== auth.credential.nodeId) return c.json({ message: "Job is not claimed by this node" }, 403);
 
-  // Atomically claim the secret: UPDATE ... WHERE agent_revealed_at IS
-  // NULL AND expires_at > now RETURNING the encrypted blob. The atomic
-  // UPDATE is the replay-prevention primitive — a second request hits
-  // the agent_revealed_at IS NULL filter and gets no rows back.
+  // Atomic one-time retrieval. The UPDATE's WHERE clause enforces ALL of
+  // the following in a single SQL statement — no TOCTOU race possible:
+  //   - The secret is bound to this exact job_id.
+  //   - The secret belongs to this organization.
+  //   - The secret has not been agent-retrieved (one-time consumption).
+  //   - The secret has not expired.
+  //   - The job is RUNNING (not QUEUED, not COMPLETED, not FAILED).
+  //   - The job's claimed_by_node_id is this exact agent's node ID.
+  //   - The job belongs to a hosting account on this agent's server.
+  //   - The hosting account's organization matches the secret's organization.
+  //   - The database user + database are still ACTIVE (not revoked/deleted
+  //     between the reset request and the agent retrieval).
+  // The EXISTS subquery joins provisioning_jobs → hosting_accounts so the
+  // node binding is checked at the database level, not in application
+  // memory. Even if two concurrent requests from different nodes on the
+  // same server both pass the pre-check above, only one can match the
+  // claimed_by_node_id = ? condition in the UPDATE — the other gets zero
+  // rows back and receives 410.
   const nowIso = new Date().toISOString();
   let secret: { ciphertext: string; iv: string } | null;
   try {
     secret = await c.env.DB.prepare(
       "UPDATE database_user_secrets SET agent_revealed_at = ? " +
       "WHERE job_id = ? AND organization_id = ? AND agent_revealed_at IS NULL AND expires_at > ? " +
+      "AND EXISTS (SELECT 1 FROM provisioning_jobs j " +
+      "  JOIN hosting_accounts ha ON ha.id = j.hosting_account_id " +
+      "  WHERE j.id = database_user_secrets.job_id " +
+      "  AND j.status = 'RUNNING' " +
+      "  AND j.claimed_by_node_id = ? " +
+      "  AND ha.server_id = ? " +
+      "  AND ha.organization_id = database_user_secrets.organization_id) " +
       "AND EXISTS (SELECT 1 FROM hosting_database_users u JOIN hosting_databases d ON d.id = u.database_id " +
       "  WHERE u.id = database_user_secrets.database_user_id AND d.id = u.database_id " +
       "  AND u.organization_id = database_user_secrets.organization_id " +
       "  AND u.status = 'ACTIVE' AND d.status = 'ACTIVE') " +
       "RETURNING ciphertext, iv",
-    ).bind(nowIso, jobId, auth.credential.organizationId, nowIso).first<{ ciphertext: string; iv: string }>();
+    ).bind(nowIso, jobId, auth.credential.organizationId, nowIso, auth.credential.nodeId, auth.credential.serverId).first<{ ciphertext: string; iv: string }>();
   } catch {
     return c.json({ message: "Unable to retrieve the database credential." }, 503);
   }
-  if (!secret) return c.json({ message: "The database credential is unavailable, expired, already retrieved, or does not belong to this tenant." }, 410);
+  if (!secret) return c.json({ message: "The database credential is unavailable, expired, already retrieved, or does not belong to this node." }, 410);
 
   try {
     const credential = JSON.parse(await decryptDatabaseSecret(c.env, secret.ciphertext, secret.iv)) as { username: string; password: string };
@@ -3910,9 +3944,19 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
           const deleteBackups = (allBackups.results ?? []).slice(schedule.retentionCount);
           if (keepIds.length > 0 && deleteBackups.length > 0) {
             for (const backup of deleteBackups) {
+              // Atomically transition the backup to DELETING. The
+              // WHERE status = 'AVAILABLE' clause ensures only one
+              // concurrent retention run can claim a given backup —
+              // if another run already transitioned it, this UPDATE
+              // affects 0 rows and we skip queuing a duplicate
+              // DELETE_BACKUP job. This is the idempotency guarantee
+              // for retention deletions.
+              const transition = await c.env.DB.prepare(
+                "UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND status = 'AVAILABLE' AND organization_id = ?",
+              ).bind(backup.id, auth.credential.organizationId).run();
+              if ((transition.meta?.changes ?? 0) === 0) continue;
               const deleteJobId = crypto.randomUUID();
               await c.env.DB.batch([
-                c.env.DB.prepare("UPDATE hosting_backups SET status = 'DELETING' WHERE id = ? AND status = 'AVAILABLE'").bind(backup.id),
                 c.env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'DELETE_BACKUP', 'QUEUED', ?, ?)")
                   .bind(deleteJobId, completedJob.hostingAccountId, `backup-delete:${backup.id}`, JSON.stringify({ backupId: backup.id, databaseNames: [] })),
                 c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.retention_delete', 'hosting_backup', ?, ?)")
@@ -7407,6 +7451,36 @@ export function addMonthsClamped(from: Date, months: number): Date {
   return new Date(Date.UTC(targetYear, targetMonthIndex, clampedDay, result.getUTCHours(), result.getUTCMinutes(), result.getUTCSeconds(), result.getUTCMilliseconds()));
 }
 
+// nextMonthlyRunFromAnchor computes the next monthly run date from a stable
+// anchor day, NOT from the execution date. This prevents permanent schedule
+// drift: a schedule anchored on day 31 fires Jan 31 → Feb 28 (clamped) →
+// March 31 (re-expanded) → April 30 → ... The anchor day is preserved across
+// short months so the schedule always targets the original intended day.
+//
+// Parameters:
+//   anchorDay: the original intended day-of-month (1-31).
+//   from: the reference date (typically the current execution time).
+//   months: how many months to advance (usually 1).
+//
+// The hour/minute/second are preserved from `from` (UTC). If from is the
+// execution time, the next run inherits the same time-of-day, which is
+// correct for schedules that should fire at a specific UTC hour.
+//
+// If anchorDay is null or invalid, falls back to addMonthsClamped(from, months)
+// — this is the backward-compatibility path for schedules created before the
+// anchor_day_of_month migration.
+export function nextMonthlyRunFromAnchor(anchorDay: number | null, from: Date, months: number = 1): Date {
+  if (!anchorDay || anchorDay < 1 || anchorDay > 31) {
+    return addMonthsClamped(from, months);
+  }
+  const targetMonth = from.getUTCMonth() + months;
+  const targetYear = from.getUTCFullYear() + Math.floor(targetMonth / 12);
+  const targetMonthIndex = ((targetMonth % 12) + 12) % 12;
+  const lastDayOfTargetMonth = new Date(Date.UTC(targetYear, targetMonthIndex + 1, 0)).getUTCDate();
+  const clampedDay = Math.min(anchorDay, lastDayOfTargetMonth);
+  return new Date(Date.UTC(targetYear, targetMonthIndex, clampedDay, from.getUTCHours(), from.getUTCMinutes(), from.getUTCSeconds(), from.getUTCMilliseconds()));
+}
+
 async function runBackupSchedules(env: Bindings): Promise<void> {
   if (!env.DB) return;
   const now = new Date();
@@ -7419,42 +7493,57 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
 
   // Atomic claim: UPDATE backup_schedules SET lease_expires_at = ? WHERE
   // the schedule is due AND no active lease exists, RETURNING the claimed
-  // row. D1's atomic UPDATE guarantees that exactly one concurrent
-  // invocation can claim a given schedule row — the others see zero rows
-  // returned and skip it. This replaces the previous non-atomic
-  // SELECT-COUNT-then-INSERT pattern that allowed duplicate backups under
-  // concurrent scheduler runs.
+  // row (including the anchor_day_of_month for stable recurrence).
   const claimed = await env.DB.prepare(
     "UPDATE backup_schedules SET lease_expires_at = ? " +
     "WHERE frequency != 'disabled' AND (next_run_at IS NULL OR next_run_at <= ?) " +
     "AND (lease_expires_at IS NULL OR lease_expires_at < ?) " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE status = 'ACTIVE') " +
-    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId",
-  ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string }>();
+    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId, anchor_day_of_month AS anchorDayOfMonth, next_run_at AS nextRunAt",
+  ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string; anchorDayOfMonth: number | null; nextRunAt: string | null }>();
 
   for (const schedule of claimed.results ?? []) {
-    // Compute the next run time using calendar-based arithmetic with
-    // end-of-month clamping. Jan 31 + 1 month = Feb 28 (or 29 in a leap
-    // year), not March 3. Daily and weekly use fixed-length intervals.
+    // Compute the next run time. For monthly schedules, use the stable
+    // anchor day (anchorDayOfMonth) to prevent drift. If the anchor is
+    // NULL (pre-migration schedule), infer it from the current next_run_at
+    // day, or fall back to today's day. The inferred anchor is persisted
+    // below so subsequent ticks use the stable value.
     let nextRun: Date;
+    let inferredAnchor: number | null = null;
     switch (schedule.frequency) {
       case "daily": nextRun = new Date(now.getTime() + 24 * 60 * 60 * 1000); break;
       case "weekly": nextRun = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); break;
-      case "monthly": nextRun = addMonthsClamped(now, 1); break;
+      case "monthly": {
+        let anchor = schedule.anchorDayOfMonth;
+        if (!anchor || anchor < 1 || anchor > 31) {
+          // Backward-compatibility: infer the anchor from the current
+          // next_run_at (the originally intended day), or from today if
+          // next_run_at is NULL (first-ever tick for this schedule).
+          const refDate = schedule.nextRunAt ? new Date(schedule.nextRunAt) : now;
+          anchor = refDate.getUTCDate();
+          inferredAnchor = anchor;
+        }
+        // Compute the next run from the ORIGINAL next_run_at (if it
+        // exists), not from the execution date. This prevents drift when
+        // the scheduler fires late: if the schedule was supposed to run
+        // on Jan 31 but actually fired on Feb 2, the next run is computed
+        // from Jan 31 → Feb 28 (correct), NOT from Feb 2 → March 31
+        // (wrong — skips February entirely). For the first-ever tick
+        // (next_run_at is NULL), use `now` as the reference.
+        const monthlyRefDate = schedule.nextRunAt ? new Date(schedule.nextRunAt) : now;
+        nextRun = nextMonthlyRunFromAnchor(anchor, monthlyRefDate, 1);
+        break;
+      }
       default: continue;
     }
 
     // Idempotency: skip if a QUEUED or RUNNING backup already exists for
     // this account (e.g., a manual backup was queued between the claim
-    // and the INSERT). This is a defense-in-depth check — the atomic
-    // schedule claim above already prevents concurrent scheduler runs
-    // from claiming the same schedule, but a manual user-initiated
-    // backup could still race with the scheduler.
+    // and the INSERT). Release the lease so the next tick can re-evaluate.
     const existing = await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM hosting_backups WHERE hosting_account_id = ? AND organization_id = ? AND status IN ('QUEUED', 'RUNNING')",
     ).bind(schedule.accountId, schedule.organizationId).first<{ count: number }>();
     if ((existing?.count ?? 0) > 0) {
-      // Release the lease so the next scheduler tick can re-evaluate.
       await env.DB.prepare("UPDATE backup_schedules SET lease_expires_at = NULL WHERE hosting_account_id = ?").bind(schedule.accountId).run();
       continue;
     }
@@ -7463,16 +7552,19 @@ async function runBackupSchedules(env: Bindings): Promise<void> {
     const jobId = crypto.randomUUID();
     const databases = await env.DB.prepare("SELECT name FROM hosting_databases WHERE hosting_account_id = ? AND organization_id = ? AND status = 'ACTIVE'").bind(schedule.accountId, schedule.organizationId).all<{ name: string }>();
     const databaseNames = (databases.results ?? []).map((db) => db.name);
-    // Insert the backup row with QUEUED status (matching the agent's
-    // lifecycle: QUEUED → RUNNING → AVAILABLE/FAILED) and the matching
-    // provisioning job with an idempotency key scoped to the backup ID.
-    // The idempotency key prevents duplicate CREATE_BACKUP jobs for the
-    // same backup even if the scheduler somehow re-runs.
+    // Batch: insert backup row + provisioning job + update schedule
+    // (last_run_at, next_run_at, and persist the inferred anchor if one
+    // was computed) + audit log. The inferred anchor is persisted so
+    // subsequent ticks use the stable value — this is the one-time
+    // backward-compatibility upgrade for pre-migration schedules.
+    const scheduleUpdate = inferredAnchor !== null
+      ? env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ?, anchor_day_of_month = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), inferredAnchor, schedule.accountId)
+      : env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId);
     await env.DB.batch([
       env.DB.prepare("INSERT INTO hosting_backups (id, hosting_account_id, organization_id, status, created_at) VALUES (?, ?, ?, 'QUEUED', ?)").bind(backupId, schedule.accountId, schedule.organizationId, nowIso),
       env.DB.prepare("INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, request_payload) VALUES (?, ?, 'CREATE_BACKUP', 'QUEUED', ?, ?)").bind(jobId, schedule.accountId, `backup-create:${backupId}`, JSON.stringify({ backupId, databaseNames })),
-      env.DB.prepare("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE hosting_account_id = ?").bind(nowIso, nextRun.toISOString(), schedule.accountId),
-      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString() })),
+      scheduleUpdate,
+      env.DB.prepare("INSERT INTO audit_logs (id, organization_id, action, resource_type, resource_id, metadata) VALUES (?, ?, 'backup.scheduled_run', 'hosting_backup', ?, ?)").bind(crypto.randomUUID(), schedule.organizationId, backupId, JSON.stringify({ frequency: schedule.frequency, jobId, nextRunAt: nextRun.toISOString(), anchorDayOfMonth: schedule.anchorDayOfMonth ?? inferredAnchor })),
     ]);
   }
 }

@@ -131,13 +131,13 @@ class PasswordResetD1 {
           if (!job || job.status !== "RUNNING" || job.claimed_by_node_id !== values[1]) return null;
           return { operation: job.operation, idempotencyKey: job.idempotency_key } as T;
         }
-        // credential endpoint: lookup job by id.
+        // credential endpoint: lookup job by id (includes claimed_by_node_id).
         if (q.startsWith("SELECT j.operation") && q.includes("provisioning_jobs j JOIN hosting_accounts")) {
           const job = db.jobs.get(values[0] as string);
           if (!job) return null;
           const account = db.accounts.get(job.hosting_account_id);
           if (!account) return null;
-          return { operation: job.operation, status: job.status, accountId: job.hosting_account_id, serverId: account.server_id, organizationId: account.organization_id } as T;
+          return { operation: job.operation, status: job.status, claimedByNodeId: job.claimed_by_node_id, accountId: job.hosting_account_id, serverId: account.server_id, organizationId: account.organization_id } as T;
         }
         // admin reveal endpoint: atomic UPDATE ... RETURNING.
         if (q.startsWith("UPDATE database_user_secrets SET revealed_at")) {
@@ -152,13 +152,25 @@ class PasswordResetD1 {
         // agent credential retrieval: atomic UPDATE ... RETURNING via .first().
         // The Worker uses .first() here (not .all()), so this must be in the
         // first() handler, not all().
+        // Bind order matches the Worker: nowIso, jobId, orgId, expiryCheck, nodeId, serverId
         if (q.startsWith("UPDATE database_user_secrets SET agent_revealed_at") && q.includes("RETURNING")) {
           const nowIso = values[0] as string;
           const jobId = values[1] as string;
           const orgId = values[2] as string;
           const expiryCheck = values[3] as string;
+          const expectedNodeId = values[4] as string;
+          const expectedServerId = values[5] as string;
           const secret = [...db.secrets.values()].find((s) => s.job_id === jobId && s.organization_id === orgId && !s.agent_revealed_at && s.expires_at > expiryCheck);
           if (!secret) return null;
+          // EXISTS subquery 1: provisioning_jobs JOIN hosting_accounts
+          const job = db.jobs.get(secret.job_id ?? "");
+          const account = job ? db.accounts.get(job.hosting_account_id) : null;
+          if (!job || !account) return null;
+          if (job.status !== "RUNNING") return null;
+          if (job.claimed_by_node_id !== expectedNodeId) return null;
+          if (account.server_id !== expectedServerId) return null;
+          if (account.organization_id !== secret.organization_id) return null;
+          // EXISTS subquery 2: database user + database are ACTIVE + same org
           const user = db.databaseUsers.get(secret.database_user_id);
           const database = user ? db.databases.get(user.database_id) : null;
           if (!user || !database || user.status !== "ACTIVE" || database.status !== "ACTIVE") return null;
@@ -171,17 +183,26 @@ class PasswordResetD1 {
       async all<T>() {
         const q = query.replace(/\s+/g, " ").trim();
         if (q.startsWith("UPDATE database_user_secrets SET agent_revealed_at") && q.includes("RETURNING")) {
-          // Atomic claim: find a matching secret, set agent_revealed_at, return it.
+          // Same logic as first() but returns { results: [...] }.
+          const nowIso = values[0] as string;
           const jobId = values[1] as string;
           const orgId = values[2] as string;
-          const now = values[3] as string;
-          const secret = [...db.secrets.values()].find((s) => s.job_id === jobId && s.organization_id === orgId && !s.agent_revealed_at && s.expires_at > now);
+          const expiryCheck = values[3] as string;
+          const expectedNodeId = values[4] as string;
+          const expectedServerId = values[5] as string;
+          const secret = [...db.secrets.values()].find((s) => s.job_id === jobId && s.organization_id === orgId && !s.agent_revealed_at && s.expires_at > expiryCheck);
           if (!secret) return { results: [] as T[] } as { results: T[] };
-          // Verify the database user + database are still ACTIVE (EXISTS subquery).
+          const job = db.jobs.get(secret.job_id ?? "");
+          const account = job ? db.accounts.get(job.hosting_account_id) : null;
+          if (!job || !account) return { results: [] as T[] } as { results: T[] };
+          if (job.status !== "RUNNING") return { results: [] as T[] } as { results: T[] };
+          if (job.claimed_by_node_id !== expectedNodeId) return { results: [] as T[] } as { results: T[] };
+          if (account.server_id !== expectedServerId) return { results: [] as T[] } as { results: T[] };
+          if (account.organization_id !== secret.organization_id) return { results: [] as T[] } as { results: T[] };
           const user = db.databaseUsers.get(secret.database_user_id);
           const database = user ? db.databases.get(user.database_id) : null;
-          if (!user || !database || user.status !== "ACTIVE" || database.status !== "ACTIVE") return { results: [] as T[] };
-          secret.agent_revealed_at = now;
+          if (!user || !database || user.status !== "ACTIVE" || database.status !== "ACTIVE") return { results: [] as T[] } as { results: T[] };
+          secret.agent_revealed_at = nowIso;
           return { results: [{ ciphertext: secret.ciphertext, iv: secret.iv } as T] };
         }
         return { results: [] as T[] };
@@ -306,12 +327,24 @@ function setupEnv() {
 // it out — since the test doesn't have a real session token, we directly
 // insert the secret + job the way the reset endpoint would, then test the
 // credential retrieval endpoint (which is the security-critical part).
-function seedSecretForJob(db: PasswordResetD1, jobId: string, password: string, expiresAt: Date) {
+// Helper: seed a secret + job for testing. By default the job is seeded
+// as RUNNING with claimed_by_node_id set to "1234567890" (node-a's ID),
+// matching the state the credential retrieval endpoint now requires.
+// Callers can override status/claimedByNodeId to test rejection paths.
+function seedSecretForJob(
+  db: PasswordResetD1,
+  jobId: string,
+  password: string,
+  expiresAt: Date,
+  opts: { status?: string; claimedByNodeId?: string | null; organizationId?: string; databaseUserId?: string } = {},
+) {
   const encrypted = encryptWithKey(DB_SECRET_KEY, JSON.stringify({ username: "wp", password }));
+  const orgId = opts.organizationId ?? "org-a";
+  const userId = opts.databaseUserId ?? "user-a";
   db.secrets.set("secret-" + jobId, {
     id: "secret-" + jobId,
-    database_user_id: "user-a",
-    organization_id: "org-a",
+    database_user_id: userId,
+    organization_id: orgId,
     job_id: jobId,
     ciphertext: encrypted.ciphertext,
     iv: encrypted.iv,
@@ -321,13 +354,13 @@ function seedSecretForJob(db: PasswordResetD1, jobId: string, password: string, 
   });
   db.jobs.set(jobId, {
     id: jobId,
-    hosting_account_id: "acct-a",
+    hosting_account_id: opts.organizationId === "org-b" ? "acct-b" : "acct-a",
     operation: "RESET_DATABASE_USER_PASSWORD",
-    status: "QUEUED",
-    idempotency_key: "reset-db-user:user-a",
+    status: opts.status ?? "RUNNING",
+    idempotency_key: "reset-db-user:" + userId,
     request_payload: JSON.stringify({ databaseName: "client01_db", databaseUserName: "wp", jobId }),
-    lease_expires_at: null,
-    claimed_by_node_id: null,
+    lease_expires_at: opts.status === "RUNNING" ? new Date(Date.now() + 5 * 60 * 1000).toISOString() : null,
+    claimed_by_node_id: opts.claimedByNodeId ?? "1234567890",
   });
 }
 
@@ -563,4 +596,185 @@ test("agent with invalid HMAC signature is rejected", async () => {
     env, {} as ExecutionContext,
   );
   assert.equal(response.status, 401);
+});
+
+// ---------------------------------------------------------------------------
+// NEW: Exact-node-binding regression tests (Fix 1, this batch).
+// These verify the credential retrieval endpoint binds to the exact claiming
+// node, not just the server. A different node on the same server, a node on
+// another server, an unclaimed/queued job, and a completed job must all be
+// rejected. The enforcement is in the atomic UPDATE's WHERE clause, not in
+// application memory.
+// ---------------------------------------------------------------------------
+
+// Helper: a second node on the SAME server (server-a) as node-a. This node
+// has its own HMAC secret and node_id, but shares the server. If the
+// credential endpoint only checked server_id (not claimed_by_node_id), this
+// node could retrieve node-a's credential — a critical breach.
+const NODE_A2_RAW_SECRET = "e".repeat(64);
+const NODE_A2_ID = "1111111111";
+
+function setupEnvWithSecondNodeOnSameServer() {
+  const { db, env } = setupEnv();
+  // Add a second node on the same server (server-a, org-a).
+  db.agentCreds.set("node-a2", {
+    node_id: NODE_A2_ID,
+    secret_hash: createHash("sha256").update(NODE_A2_RAW_SECRET).digest("hex"),
+    server_id: "server-a",
+    organization_id: "org-a",
+    revoked_at: null,
+  });
+  return { db, env };
+}
+
+test("another node on the SAME server cannot retrieve the credential (exact-node binding)", async () => {
+  const { db, env } = setupEnvWithSecondNodeOnSameServer();
+  const jobId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  // Job is claimed by node-a (1234567890).
+  seedSecretForJob(db, jobId, "ExactNodeBindingPass1!", expiresAt);
+
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  // Sign with node-a2's secret — node-a2 is on the same server but did NOT
+  // claim this job.
+  const signature = signRequest(NODE_A2_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": NODE_A2_ID, "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  // The pre-check catches claimedByNodeId mismatch → 403.
+  // Even if the pre-check were bypassed, the atomic UPDATE's WHERE clause
+  // (claimed_by_node_id = ?) would reject it → 410.
+  assert.ok(response.status === 403 || response.status === 410, `expected 403 or 410, got ${response.status}`);
+});
+
+test("unclaimed (QUEUED) job cannot reveal its credential", async () => {
+  const { db, env } = setupEnv();
+  const jobId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  // Seed as QUEUED with no claimed_by_node_id.
+  seedSecretForJob(db, jobId, "QueuedJobPass12345678!", expiresAt, { status: "QUEUED", claimedByNodeId: null });
+
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  const signature = signRequest(AGENT_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": "1234567890", "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  // QUEUED status → pre-check returns 410 "not available for a job that
+  // has not been claimed".
+  assert.equal(response.status, 410);
+});
+
+test("completed job cannot reveal its credential (status=COMPLETED)", async () => {
+  const { db, env } = setupEnv();
+  const jobId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  seedSecretForJob(db, jobId, "CompletedJobPass1234!", expiresAt, { status: "COMPLETED" });
+
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  const signature = signRequest(AGENT_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": "1234567890", "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 410);
+});
+
+test("failed job cannot reveal its credential (status=FAILED)", async () => {
+  const { db, env } = setupEnv();
+  const jobId = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  seedSecretForJob(db, jobId, "FailedJobPass123456!", expiresAt, { status: "FAILED" });
+
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  const signature = signRequest(AGENT_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": "1234567890", "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 410);
+});
+
+test("wrong-organization agent cannot retrieve the credential (cross-tenant)", async () => {
+  const { db, env } = setupEnv();
+  const jobId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  seedSecretForJob(db, jobId, "CrossOrgPass12345678!", expiresAt);
+
+  // Node-b is in org-b, on server-b. The job belongs to org-a/server-a.
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  const signature = signRequest(NODE_B_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": "9876543210", "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  // Server mismatch → 403 "Job is not assigned to this server".
+  assert.equal(response.status, 403);
+});
+
+test("correct claiming node retrieves the credential after claim", async () => {
+  const { db, env } = setupEnv();
+  const jobId = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+  // Seed as RUNNING, claimed by node-a (1234567890) — the happy path.
+  seedSecretForJob(db, jobId, "HappyPathPass123456!", expiresAt);
+
+  const body = "{}";
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(16).toString("hex");
+  const path = "/internal/v1/agent/jobs/" + jobId + "/credential";
+  const signature = signRequest(AGENT_RAW_SECRET, "POST", path, body, timestamp, nonce);
+
+  const response = await worker.fetch(
+    new Request("https://api.test" + path, {
+      method: "POST",
+      headers: { "X-Nexora-Node": "1234567890", "X-Nexora-Timestamp": timestamp, "X-Nexora-Nonce": nonce, "X-Nexora-Signature": signature, "Content-Type": "application/json" },
+      body,
+    }),
+    env, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 200);
+  const result = await response.json() as { credential: { password: string } };
+  assert.equal(result.credential.password, "HappyPathPass123456!");
 });
