@@ -788,6 +788,142 @@ func processNextJob(ctx context.Context, client *http.Client, cfg Config) error 
 				}
 			}
 		}
+	} else if job.Operation == "UPDATE_PHP_POOL" {
+		// PHP-FPM pool update: pass the per-account PHP settings from
+		// the job payload to the privileged helper. The helper runs a
+		// strict phased pipeline (validate, backup, atomic swap,
+		// php-fpm -tt, reload, socket verify) and rolls back on any
+		// failure.
+		var payload struct {
+			PhpVersion              string `json:"phpVersion"`
+			MemoryLimitMib          int    `json:"memoryLimitMib"`
+			MaxExecutionTimeSeconds int    `json:"maxExecutionTimeSeconds"`
+			UploadMaxFilesizeMib    int    `json:"uploadMaxFilesizeMib"`
+			MaxInputVars            int    `json:"maxInputVars"`
+			DisplayErrors           int    `json:"displayErrors"`
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The PHP pool update payload is invalid"
+		} else {
+			encoded, _ := json.Marshal(map[string]any{
+				"operation":              "UPDATE_PHP_POOL",
+				"username":               job.Account.Username,
+				"phpVersion":             payload.PhpVersion,
+				"memoryLimitMib":         payload.MemoryLimitMib,
+				"maxExecutionTimeSeconds": payload.MaxExecutionTimeSeconds,
+				"uploadMaxFilesizeMib":   payload.UploadMaxFilesizeMib,
+				"maxInputVars":           payload.MaxInputVars,
+				"displayErrors":          payload.DisplayErrors,
+			})
+			output, commandErr := runProvisionerCombined(ctx, encoded)
+			if commandErr == nil {
+				success = true
+				fmt.Printf("Provisioning job %s (UPDATE_PHP_POOL) completed for account %s\n", job.ID, job.Account.Username)
+			} else {
+				errorCode = "PHP_POOL_UPDATE_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if errorMessage == "" {
+					errorMessage = "The PHP-FPM pool update could not be completed"
+				}
+				if len(errorMessage) > 400 {
+					errorMessage = errorMessage[:400]
+				}
+			}
+		}
+	} else if job.Operation == "SUSPEND_HOSTING_ACCOUNT" || job.Operation == "REACTIVATE_HOSTING_ACCOUNT" {
+		encoded, _ := json.Marshal(map[string]string{
+			"operation": job.Operation,
+			"username":  job.Account.Username,
+		})
+		output, commandErr := runProvisionerCombined(ctx, encoded)
+		if commandErr == nil {
+			success = true
+			fmt.Printf("Provisioning job %s (%s) completed for account %s\n", job.ID, job.Operation, job.Account.Username)
+		} else {
+			errorCode = "ACCOUNT_STATE_CHANGE_FAILED"
+			errorMessage = strings.TrimSpace(string(output))
+			if errorMessage == "" {
+				errorMessage = "The hosting account state change could not be completed"
+			}
+			if len(errorMessage) > 400 {
+				errorMessage = errorMessage[:400]
+			}
+		}
+	} else if job.Operation == "REMOVE_DOMAIN" {
+		if job.Account.Domain == "" {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The domain removal job is missing its domain name"
+		} else {
+			encoded, _ := json.Marshal(map[string]string{
+				"operation": "REMOVE_DOMAIN",
+				"username":  job.Account.Username,
+				"domain":    job.Account.Domain,
+			})
+			output, commandErr := runProvisionerCombined(ctx, encoded)
+			if commandErr == nil {
+				success = true
+				fmt.Printf("Provisioning job %s (REMOVE_DOMAIN) completed for account %s\n", job.ID, job.Account.Username)
+			} else {
+				errorCode = "DOMAIN_REMOVAL_FAILED"
+				errorMessage = strings.TrimSpace(string(output))
+				if errorMessage == "" {
+					errorMessage = "The domain could not be removed"
+				}
+				if len(errorMessage) > 400 {
+					errorMessage = errorMessage[:400]
+				}
+			}
+		}
+	} else if job.Operation == "RESET_DATABASE_USER_PASSWORD" {
+		var payload struct {
+			DatabaseName     string `json:"databaseName"`
+			DatabaseUserName string `json:"databaseUserName"`
+		}
+		if len(job.RequestPayload) == 0 || json.Unmarshal(job.RequestPayload, &payload) != nil || payload.DatabaseName == "" || payload.DatabaseUserName == "" {
+			errorCode = "INVALID_JOB_PAYLOAD"
+			errorMessage = "The database password reset payload is invalid"
+		} else {
+			credResp, credErr := signedRequest(ctx, client, cfg, http.MethodPost, "/internal/v1/agent/jobs/"+url.PathEscape(job.ID)+"/credential", []byte("{}"))
+			if credErr != nil {
+				errorCode = "CREDENTIAL_FETCH_FAILED"
+				errorMessage = "Unable to reach the credential endpoint: " + credErr.Error()
+			} else if credResp.StatusCode != http.StatusOK {
+				credBody, _ := io.ReadAll(io.LimitReader(credResp.Body, 1024))
+				credResp.Body.Close()
+				errorCode = "CREDENTIAL_FETCH_FAILED"
+				errorMessage = fmt.Sprintf("Credential endpoint returned %s: %s", credResp.Status, strings.TrimSpace(string(credBody)))
+			} else {
+				credBody, _ := io.ReadAll(io.LimitReader(credResp.Body, 1<<20))
+				credResp.Body.Close()
+				var credResult struct {
+					Credential struct {
+						Username string `json:"username"`
+						Password string `json:"password"`
+					} `json:"credential"`
+				}
+				if json.Unmarshal(credBody, &credResult) != nil || credResult.Credential.Password == "" {
+					errorCode = "CREDENTIAL_FETCH_FAILED"
+					errorMessage = "The credential endpoint returned an invalid response"
+				} else {
+					encoded, _ := json.Marshal(map[string]string{
+						"operation":         "RESET_DATABASE_USER_PASSWORD",
+						"username":          job.Account.Username,
+						"databaseName":      payload.DatabaseName,
+						"databaseUserName":  payload.DatabaseUserName,
+						"databasePassword":  credResult.Credential.Password,
+					})
+					_, commandErr := runProvisionerCombined(ctx, encoded)
+					if commandErr == nil {
+						success = true
+						fmt.Printf("Provisioning job %s (RESET_DATABASE_USER_PASSWORD) completed for account %s\n", job.ID, job.Account.Username)
+					} else {
+						errorCode = "DATABASE_USER_RESET_FAILED"
+						errorMessage = "The database user password could not be rotated"
+					}
+				}
+			}
+		}
 	} else if job.Operation != "CREATE_HOSTING_ACCOUNT" && job.Operation != "ADD_DOMAIN" {
 		errorCode = "UNSUPPORTED_OPERATION"
 		errorMessage = "This agent version does not support the requested operation"

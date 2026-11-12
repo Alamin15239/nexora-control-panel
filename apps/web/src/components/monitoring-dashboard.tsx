@@ -195,7 +195,7 @@ export default function MonitoringDashboard() {
             <div className="grid gap-5 lg:grid-cols-2">
               <div className="rounded-xl border border-slate-200 p-4">
                 <div className="flex items-center justify-between"><h3 className="text-sm font-semibold">CPU history</h3><span className="text-xs text-slate-500">Last {samples.length} samples</span></div>
-                {samples.length ? <div className="mt-4 flex h-24 items-end gap-1">{samples.slice(-30).map((sample, index) => <div key={sample.id} title={`${sample.cpu_usage_percent.toFixed(1)}% · ${new Date(sample.collected_at).toLocaleString()}`} className="min-w-0 flex-1 rounded-t bg-blue-500/80" style={{ height: `${Math.max(3, sample.cpu_usage_percent)}%` }} />)}</div> : <p className="mt-4 text-sm text-slate-500">No history received yet.</p>}
+                {samples.length ? <div className="mt-4 flex h-24 items-end gap-1">{samples.slice(-30).map((sample) => <div key={sample.id} title={`${sample.cpu_usage_percent.toFixed(1)}% · ${new Date(sample.collected_at).toLocaleString()}`} className="min-w-0 flex-1 rounded-t bg-blue-500/80" style={{ height: `${Math.max(3, sample.cpu_usage_percent)}%` }} />)}</div> : <p className="mt-4 text-sm text-slate-500">No history received yet.</p>}
               </div>
               <div className="rounded-xl border border-slate-200 p-4">
                 <h3 className="text-sm font-semibold">Linux services</h3>

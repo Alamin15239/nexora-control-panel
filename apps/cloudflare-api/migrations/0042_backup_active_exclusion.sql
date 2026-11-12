@@ -1,0 +1,45 @@
+-- Atomic backup exclusion: at most one active backup per hosting account.
+--
+-- Defect: The previous scheduler used a non-atomic SELECT-COUNT-then-INSERT
+-- to check for existing QUEUED/RUNNING backups. The manual backup endpoint
+-- (POST /v1/hosting-accounts/:id/backups) did no check at all. A manual
+-- backup could be inserted between the scheduler's count check and its
+-- insert, producing duplicate active backups for the same account.
+--
+-- Fix: a partial UNIQUE index on hosting_backups(hosting_account_id) where
+-- status is QUEUED or RUNNING. SQLite/D1 enforces this at the storage level
+-- — a second INSERT with the same hosting_account_id while an active backup
+-- exists fails with SQLITE_CONSTRAINT_UNIQUE, regardless of the isolation
+-- level or the order of concurrent requests.
+--
+-- The index automatically excludes backups in terminal states (AVAILABLE,
+-- FAILED, DELETED, RESTORING, RESTORE_STAGED). When a backup transitions
+-- to a terminal state, the row is removed from the index and the exclusion
+-- is released — the next backup can be created immediately.
+--
+-- PREFLIGHT — READ BEFORE APPLYING:
+--
+-- This migration does NOT modify, delete, or alter any existing backup
+-- rows. If the pre-exclusion race has already produced duplicate active
+-- backups for one or more accounts, CREATE UNIQUE INDEX fails with
+--
+--   [SQLITE_CONSTRAINT] UNIQUE constraint failed: hosting_backups.hosting_account_id
+--
+-- and the migration aborts WITHOUT creating the index and WITHOUT touching
+-- any data. That failure is the explicit resolution gate required before
+-- the exclusion can be enforced.
+--
+-- To inspect the duplicates that blocked this migration, run:
+--
+--   SELECT hosting_account_id, organization_id, id, status, created_at
+--   FROM hosting_backups
+--   WHERE status IN ('QUEUED', 'RUNNING')
+--   ORDER BY hosting_account_id, created_at;
+--
+-- Resolution must be an explicit operator decision per row — for example
+-- transitioning a provably stale row (agent crashed, job lease expired)
+-- to FAILED via the admin API, or letting a genuinely in-flight backup
+-- finish. No automated data rewriting is performed here.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hosting_backups_active_exclusion
+ON hosting_backups(hosting_account_id)
+WHERE status IN ('QUEUED', 'RUNNING');

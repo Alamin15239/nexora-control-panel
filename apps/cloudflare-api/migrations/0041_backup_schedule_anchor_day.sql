@@ -1,0 +1,26 @@
+-- Stable calendar anchor for monthly backup schedules.
+--
+-- Problem: The previous scheduler computed next_run_at from the execution
+-- date (addMonthsClamped(now, 1)). This caused permanent schedule drift:
+--   Original schedule: January 31
+--   February execution fires on Feb 28 (clamped from Feb 31)
+--   Next run computed from Feb 28 → March 28 (WRONG — should be March 31)
+--   March execution fires on March 28
+--   Next run computed from March 28 → April 28 (drift compounds)
+--
+-- Fix: anchor_day_of_month preserves the original intended day (1-31).
+-- The scheduler computes the next run as:
+--   target_month = current_month + 1
+--   target_day = min(anchor_day_of_month, last_day_of_target_month)
+-- This way, even if the scheduler fires late (e.g., Feb 28 instead of
+-- Feb 29), the next run is still computed from the ANCHOR day (31),
+-- not the execution date. Jan 31 → Feb 28 → March 31 → April 30 → ...
+--
+-- For daily and weekly schedules, anchor_day_of_month is unused (NULL).
+--
+-- Backward compatibility: existing schedules get anchor_day_of_month = NULL.
+-- The scheduler treats NULL as "infer from current next_run_at" on the
+-- first tick after upgrade, then sets the anchor permanently. This
+-- prevents any behavior change for schedules that were already running
+-- before the migration.
+ALTER TABLE backup_schedules ADD COLUMN anchor_day_of_month INTEGER;

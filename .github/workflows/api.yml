@@ -50,6 +50,30 @@ jobs:
         run: pnpm --filter @nexora/cloudflare-api typecheck
       - name: Cloudflare API runtime admission regression tests
         run: node --experimental-strip-types --test apps/cloudflare-api/scripts/runtime-admission.test.ts
+      - name: Cloudflare API monthly build quota regression tests
+        run: node --experimental-strip-types --test apps/cloudflare-api/scripts/build-quota.test.ts
+      - name: Cloudflare API database secret encryption tests (Fix 5)
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-secret-encryption.test.ts
+      - name: Cloudflare API database lifecycle agent-result regression tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-lifecycle-result.integration.test.ts
+      - name: Cloudflare API backup scheduler recurrence tests (Fix 3)
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/backup-scheduler-recurrence.test.ts
+      - name: Cloudflare D1 migration and tenant-isolation tests
+        run: python3 apps/cloudflare-api/scripts/test_migrations.py
+      - name: Application-node, artifact, release and rollback integration tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/application-*.integration.test.ts
+      - name: Database password reset integration tests (Fix 1)
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-password-reset.integration.test.ts
+      - name: Backup concurrency exclusion tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/backup-concurrency.integration.test.ts
+      - name: MFA login enforcement integration tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/mfa-login.integration.test.ts
+      - name: Organization, customer self-service, billing and email integration tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/platform-completion.integration.test.ts
+      - name: MFA atomicity real-SQLite concurrency tests
+        run: python3 apps/cloudflare-api/scripts/test_mfa_atomicity.py
+      - name: Backup exclusion real-SQLite migration tests
+        run: python3 apps/cloudflare-api/scripts/test_backup_exclusion.py
       - name: Validate Nexora static deployment workflow security contract
         run: python3 scripts/test_nexora_deploy_workflow.py
       - name: Validate Prisma schema

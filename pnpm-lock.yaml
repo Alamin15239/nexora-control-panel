@@ -48,6 +48,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^5.20261101.1
         version: 5.20261103.1
+      tsx:
+        specifier: '4'
+        version: 4.23.15
       typescript:
         specifier: ^5.7.3
         version: 5.9.3

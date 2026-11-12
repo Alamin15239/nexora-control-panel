@@ -5,6 +5,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "docs/templates/nexora-deploy.yml").read_text(encoding="utf-8")
+api_source = (ROOT / "apps/cloudflare-api/src/index.ts").read_text(encoding="utf-8")
 
 def require(condition: bool, message: str) -> None:
     if not condition:
@@ -36,17 +37,31 @@ require("git rev-parse HEAD" in source and 'actual" == "$EXPECTED_COMMIT"' in so
         "workflow must verify the checked-out commit before building")
 
 require("npm ci" in source and "npm run build" in source, "static npm build profile is incomplete")
-require("test -d dist" in source, "the initial artifact output must be dist/")
+require("output_directory:" in source and "OUTPUT_DIRECTORY: ${{ inputs.output_directory }}" in source,
+        "workflow must receive the configured static output directory")
+require('[[ "$OUTPUT_DIRECTORY" =~ ^[A-Za-z0-9._/-]{1,160}$ ]]' in source,
+        "output directory must be constrained to a safe relative path")
+require('test -d "$OUTPUT_DIRECTORY"' in source,
+        "workflow must verify the configured output directory exists")
 require("build_command" not in source and "install_command" not in source,
         "customer-provided commands must not be interpolated into the workflow")
 
-require("find dist -type l" in source, "symlink rejection is required")
-require("find dist ! -type d ! -type f" in source, "special-file rejection is required")
+require('find "$OUTPUT_DIRECTORY" -type l' in source, "symlink rejection is required")
+require('find "$OUTPUT_DIRECTORY" ! -type d ! -type f' in source, "special-file rejection is required")
+require('-C "$OUTPUT_DIRECTORY" -czf "$artifact" .' in source,
+        "archive must contain the configured output directory, not a hard-coded dist/")
 require("bytes > 104857600" in source, "compressed artifact must be capped at 100 MiB")
 require('sha256sum "$artifact"' in source, "artifact SHA-256 must be calculated")
 require("OIDC_AUDIENCE" in source and "/oidc/exchange" in source,
         "workflow must exchange a GitHub OIDC token for a scoped upload capability")
 require('/v1/github/deployments/$DEPLOYMENT_ID/artifact"' in source,
         "workflow must upload only to the deployment-scoped artifact endpoint")
+
+require("output_directory: project.outputDirectory" in api_source,
+        "control-plane dispatch must pass the saved output directory to GitHub Actions")
+require('runtimeAssignment.profileKey !== "static-v1"' in api_source and
+        'runtimeAssignment.runtimeFamily !== "static"' in api_source and
+        'runtimeAssignment.buildMethod !== "static"' in api_source,
+        "static-only workflow dispatch must reject unsupported runtime profiles")
 
 print("PASS: Nexora static deployment workflow security contract")

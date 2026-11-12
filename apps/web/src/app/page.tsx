@@ -38,14 +38,6 @@ type DashboardDetails = {
   incidents: DashboardIncident[];
 };
 
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let amount = value;
-  let unit = 0;
-  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
-  return `${amount.toFixed(amount >= 10 ? 0 : 1)} ${units[unit]}`;
-}
 function usagePercent(used: number, total: number): number {
   return total > 0 ? Math.max(0, Math.min(100, used / total * 100)) : 0;
 }

@@ -2,7 +2,7 @@
 
 import { Fragment, FormEvent, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CircleAlert, Clock3, Globe2, Plus, RefreshCw, Server, Users, UserPlus, UserX, Trash2 } from "lucide-react";
+import { ArrowLeft, CircleAlert, Clock3, Plus, RefreshCw, Users, UserPlus, UserX, Trash2 } from "lucide-react";
 
 type ServerItem = { id: string; hostname: string; status: string };
 type PlanItem = { id: string; name: string; active: number; disk_limit_bytes: number; website_limit: number; database_limit: number; mailbox_limit: number };

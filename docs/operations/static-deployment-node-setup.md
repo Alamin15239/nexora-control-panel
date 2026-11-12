@@ -2,6 +2,58 @@
 
 This is an operator runbook for a **disposable, explicitly approved static publisher node**. It does not authorize enrolling the existing development VM or enabling production deployments. Complete the architecture acceptance gates before running these commands.
 
+## 0. Install reviewed binaries on an approved disposable node
+
+The repository includes `scripts/install-static-deployment-node.sh`. It defaults to
+a read-only plan and accepts only a directory containing these four reviewed
+artifacts:
+
+- `nexora-static-vhostd`
+- `nexora-static-publisher`
+- `nexora-static-vhostd.service`
+- `nexora-static-publisher.service`
+
+First inspect the plan without changing the node:
+
+```sh
+bash scripts/install-static-deployment-node.sh --artifact-dir /path/to/reviewed-artifacts --plan
+```
+
+Applying requires all of the following: an explicitly disposable test node, a
+root-owned approval file with mode `0600`, an exact node identity match, and
+the explicit `--apply` flag. The approval file schema is exactly:
+
+```json
+{
+  "environment": "disposable-test",
+  "node_identity": "YOUR_APPROVED_NODE_ID",
+  "allow_static_publisher_install": true
+}
+```
+
+Create that approval file only through the authenticated operator process on
+the disposable test node. Never create it on the existing development VM
+(`nexora-server`) or a production host. The installer independently refuses
+the protected hostname `nexora-server`.
+
+After the approval file and reviewed artifacts are present, the explicit
+installation command is:
+
+```sh
+sudo bash scripts/install-static-deployment-node.sh \
+  --artifact-dir /path/to/reviewed-artifacts \
+  --node-id YOUR_APPROVED_NODE_ID --apply
+```
+
+The installer creates/verifies the dedicated service identity and data
+directories, then installs root-owned binaries and unit files. It refuses to
+overwrite existing binary/unit targets. It does **not** install private keys,
+trust JSON, account/domain bindings, or publisher configuration. It does not
+run `systemctl daemon-reload`, start, enable, or reload either service.
+Complete the remaining operator trust/configuration steps below, then run the
+read-only preflight. Service activation remains a separate, explicit
+acceptance decision and is not authorized by a successful install or preflight.
+
 ## 1. Create the deployment-envelope signing key pair
 
 Generate a dedicated RSA key pair on a trusted operator workstation. Keep the private key outside the repository and outside every hosting node.
@@ -24,9 +76,9 @@ Choose a stable key ID matching `^[A-Za-z0-9._-]{1,64}$`. Configure the Cloudfla
 
 Use the correct Worker environment when setting secrets. Never commit the private PEM, paste it into source files, or install it on a runtime node. The Worker signs five-minute RS256 envelopes; the nodes receive only the public key.
 
-## 2. Install the public trust on the node
+## 2. Install the root broker trust
 
-Transfer only the public PEM and trust JSON over an authenticated operator channel. Create the root broker trust directory and install the public key:
+Transfer the public PEM, trust JSON, and account/domain registry over an authenticated operator channel. Create the root broker trust directory and install the files:
 
 ```sh
 sudo install -d -o root -g root -m 0750 /etc/nexora-static-vhost
@@ -52,19 +104,32 @@ The broker also requires a separate root-owned `bindings.json` registry. Start f
 
 The file is deliberately a local operator-managed trust anchor. Provision and update it only through an authenticated root-level configuration-management process; do not expose a customer API for editing it. After changing it, verify ownership and permissions and restart the broker during a controlled maintenance window.
 
-The publisher also needs the same public key. Install a read-only copy at the path in `config.static-publisher.example.json`:
+## 3. Establish the publisher and Nginx group boundary
+
+The publisher runs as `nexora-runtime:www-data`. This is intentional: its account directories are created with the process's primary group, and Nginx workers need read/traverse access through `www-data`. The publisher receives `nexora-static` only as a supplementary group so it can connect to the root broker's Unix socket. Do not reverse these groups: doing so creates release directories that Nginx cannot traverse.
+
+Create the publisher account and group membership through the host's normal account-management process. Before installing the service, provision the publisher-owned paths with the exact owner/group expected by the daemon:
 
 ```sh
-sudo install -o root -g nexora-static -m 0640 \
-  nexora-deployment-envelope-public.pem \
-  /etc/nexora-static-publisher/deployment-envelope-public.pem
+sudo install -d -o nexora-runtime -g www-data -m 0750 /var/lib/nexora-static
+sudo install -d -o nexora-runtime -g www-data -m 0750 /var/lib/nexora-static/accounts
+sudo install -d -o nexora-runtime -g www-data -m 0700 /var/lib/nexora-static/replay
+sudo install -d -o nexora-runtime -g www-data -m 0700 /etc/nexora-static-publisher
 ```
 
-The broker independently loads its root-owned copy. The publisher's copy is used for its own full deployment-identity verification. The private signing key never leaves the Worker.
+Install the publisher's public verification key, node private key, and JSON config as publisher-owned files with exact mode `0600` and group `www-data`, because the daemon verifies both UID and primary GID:
 
-## 3. Prepare serving permissions
+```sh
+sudo install -o nexora-runtime -g www-data -m 0600 \
+  nexora-deployment-envelope-public.pem \
+  /etc/nexora-static-publisher/deployment-envelope-public.pem
+sudo install -o nexora-runtime -g www-data -m 0600 node-ed25519.key \
+  /etc/nexora-static-publisher/node-ed25519.key
+sudo install -o nexora-runtime -g www-data -m 0600 node.json \
+  /etc/nexora-static-publisher/node.json
+```
 
-The publisher service runs as `nexora-runtime`, primary group `nexora-static`, with `www-data` as a supplementary read group. Keep the publisher write boundary separate from Nginx's read boundary.
+The publisher's public-key copy is used for its own full deployment-identity verification. The broker independently loads its root-owned copy. The private deployment-signing key never leaves the Worker.
 
 For each provisioned account, the expected shape is:
 
@@ -73,11 +138,11 @@ For each provisioned account, the expected shape is:
 - Activated release directories: group `www-data`, readable/traversable by that group, not group-writable.
 - Website files: mode `0644`; directories: mode `0755`; active pointer: publisher-managed symlink named `current`.
 
-All parent directories from `/var/lib` through the account root must be traversable by `www-data`. Do not make release directories or files writable by `www-data`. The static publisher normalizes extracted file and directory modes; the setgid serving directories preserve the read group.
+All parent directories from `/var/lib` through the account root must be traversable by `www-data`. Do not make release directories or files writable by `www-data`. The publisher normalizes extracted file and directory modes; the setgid serving directories preserve the read group.
 
 ## 4. Install and verify services without enabling them
 
-Build the Linux binaries from the reviewed branch and install the broker binary and unit only after its trust files and service accounts exist. The broker unit runs as root with primary group `nexora-static`; systemd creates `/run/nexora-static-vhost` with that group. The daemon creates a `0660` socket and does not require `CAP_CHOWN`.
+Build the Linux binaries from the reviewed branch and install the broker binary and unit only after its trust files and service accounts exist. The broker unit runs as root with primary group `nexora-static`; systemd creates `/run/nexora-static-vhost` with that group. The daemon creates a `0660` socket. The publisher's supplementary `nexora-static` membership grants access to that socket without granting it general root or provisioning privileges.
 
 Before starting either service:
 
@@ -88,10 +153,24 @@ sudo stat -c '%U:%G:%a %n' \
   /etc/nexora-static-vhost \
   /etc/nexora-static-vhost/trust.json \
   /etc/nexora-static-vhost/deployment-envelope-public.pem \
-  /etc/nexora-static-vhost/bindings.json
+  /etc/nexora-static-vhost/bindings.json \
+  /var/lib/nexora-static \
+  /var/lib/nexora-static/accounts \
+  /var/lib/nexora-static/replay \
+  /etc/nexora-static-publisher/node.json \
+  /etc/nexora-static-publisher/node-ed25519.key \
+  /etc/nexora-static-publisher/deployment-envelope-public.pem
 ```
 
-Expected permissions are root-owned, directory `750` or stricter, trust JSON and binding registry `600`, and public PEM `644` or stricter. The broker refuses symlinked or group/world-writable trust files and rejects a missing or inconsistent account/domain registry.
+Expected broker trust permissions are root-owned, directory `750` or stricter, trust JSON and binding registry `600`, and public PEM `644` or stricter. Publisher config/key files must be owned by `nexora-runtime:www-data` with mode `600`; publisher root/accounts directories must be `nexora-runtime:www-data` mode `750`, and replay storage `nexora-runtime:www-data` mode `700`. The broker refuses symlinked or group/world-writable trust files and rejects a missing or inconsistent account/domain registry.
+
+Run the repository's read-only preflight after installing the reviewed binaries, units, trust files, publisher config and directory layout. From the reviewed checkout:
+
+```sh
+sudo bash scripts/preflight-static-deployment-node.sh
+```
+
+The preflight checks service identities and group membership, exact file ownership/modes, both copies of the deployment public key, matching issuer/audience/key ID, NSS UID mappings, unique account/domain bindings, Nginx traversal, `nginx -t`, and systemd unit validity. It does not create or modify files and never starts, stops, enables, or reloads services. A non-zero exit means the node is not ready; correct the issue through the approved operator process and rerun it. A successful preflight is necessary but does not replace the disposable-hostname deployment, health, rollback, or Cloudflare-path acceptance tests.
 
 Do not enable the services until all of the following are true:
 

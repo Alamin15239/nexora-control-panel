@@ -75,7 +75,7 @@ func envelopeFor(t *testing.T, key *rsa.PrivateKey, expected deployenvelope.Expe
 	return input+"."+enc.EncodeToString(signature)
 }
 
-func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *testing.T) {
+func TestFetchAndPublishStoresArtifactWithoutActivating(t *testing.T) {
 	nodePublic, nodePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatal(err) }
 	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -185,18 +185,12 @@ func TestFetchAndPublishPerformsAuthenticatedDownloadAndAtomicActivation(t *test
 	if result.ReleaseID != expected.DeploymentID || result.ArtifactSHA256 != deployenvelope.DigestHex(artifact) || result.SignedEnvelope != token {
 		t.Fatalf("unexpected publication result: %+v", result)
 	}
-	if err := artifactclient.ReportActivated(context.Background(), server.Client(), config.ArtifactClient, artifactclient.ActivationReport{
-		DeploymentID: result.DeploymentID, ReleaseID: result.ReleaseID, ArtifactSHA256: result.ArtifactSHA256,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !activationReported { t.Fatal("explicit post-publication activation acknowledgement was not submitted") }
 	published, err := os.ReadFile(filepath.Join(base,"releases",expected.DeploymentID,"index.html"))
 	if err != nil { t.Fatal(err) }
 	if string(published) != "<h1>Published by Nexora</h1>" { t.Fatalf("unexpected content: %q", published) }
-	link, err := os.Readlink(filepath.Join(base,"current"))
-	if err != nil { t.Fatal(err) }
-	if link != filepath.Join("releases",expected.DeploymentID) { t.Fatalf("unexpected active link: %q", link) }
+	if _, err := os.Lstat(filepath.Join(base, "current")); !os.IsNotExist(err) {
+		t.Fatalf("artifact delivery unexpectedly activated release: %v", err)
+	}
 
 	_, err = FetchAndPublish(context.Background(), config, expected.DeploymentID)
 	if err == nil || !strings.Contains(err.Error(), "already been consumed") {

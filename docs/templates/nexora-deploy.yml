@@ -11,6 +11,11 @@ on:
         description: Immutable commit SHA selected by Nexora
         required: true
         type: string
+      output_directory:
+        description: Relative static build output directory configured in Nexora
+        required: true
+        type: string
+        default: dist
 
 permissions:
   contents: read
@@ -31,6 +36,7 @@ jobs:
     env:
       DEPLOYMENT_ID: ${{ inputs.deployment_id }}
       EXPECTED_COMMIT: ${{ inputs.commit_sha }}
+      OUTPUT_DIRECTORY: ${{ inputs.output_directory }}
       NEXORA_API: https://api.nexoraedge.digital
       OIDC_AUDIENCE: https://api.nexoraedge.digital/github-deployments
     steps:
@@ -52,22 +58,27 @@ jobs:
             exit 1
           }
 
-      # This example deliberately supports only a static npm project with dist/ output.
+      # This example deliberately supports only a static npm project with a configured output directory.
       # Build commands run on a disposable GitHub-hosted runner, never on Nexora servers.
       - name: Build static site
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$OUTPUT_DIRECTORY" =~ ^[A-Za-z0-9._/-]{1,160}$ ]]
+          [[ "$OUTPUT_DIRECTORY" != /* ]]
+          [[ "$OUTPUT_DIRECTORY" != "." ]]
+          [[ "/$OUTPUT_DIRECTORY/" != *"/../"* ]]
+          [[ "/$OUTPUT_DIRECTORY/" != *"/./"* ]]
           test -f package.json
           test -f package-lock.json
           npm ci
           npm run build
-          test -d dist
-          if find dist -type l -print -quit | grep -q .; then
+          test -d "$OUTPUT_DIRECTORY"
+          if find "$OUTPUT_DIRECTORY" -type l -print -quit | grep -q .; then
             echo "Symbolic links are not permitted in the static output." >&2
             exit 1
           fi
-          if find dist ! -type d ! -type f -print -quit | grep -q .; then
+          if find "$OUTPUT_DIRECTORY" ! -type d ! -type f -print -quit | grep -q .; then
             echo "Special files are not permitted in the static output." >&2
             exit 1
           fi
@@ -78,7 +89,7 @@ jobs:
           set -euo pipefail
           artifact="$RUNNER_TEMP/nexora-static.tar.gz"
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-            -C dist -czf "$artifact" .
+            -C "$OUTPUT_DIRECTORY" -czf "$artifact" .
           bytes="$(stat -c '%s' "$artifact")"
           if (( bytes < 1 || bytes > 104857600 )); then
             echo "Artifact must be between 1 byte and 100 MiB." >&2

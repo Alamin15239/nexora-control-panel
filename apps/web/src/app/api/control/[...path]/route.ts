@@ -27,6 +27,20 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 4 && parts[0] === "platform" && parts[1] === "payment-orders" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "review") return method === "POST";
   if (parts.length === 4 && parts[0] === "platform" && parts[1] === "payment-orders" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "receipt") return method === "GET";
   if (parts.length === 3 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "store-settings") return method === "POST";
+  if (parts.length === 2 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PUT";
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && (parts[2] === "suspend" || parts[2] === "reactivate")) return method === "PATCH";
+  if (parts.length === 1 && parts[0] === "audit-logs") return method === "GET";
+  if (parts.length === 1 && parts[0] === "sessions") return method === "GET";
+  if (parts.length === 2 && parts[0] === "sessions" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
+  if (parts.length === 2 && parts[0] === "domains" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "php") return method === "GET" || method === "PUT";
+  if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "backup-schedule") return method === "GET" || method === "PUT";
+  if (parts.length === 2 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PUT";
+  if (parts.length === 3 && parts[0] === "auth" && parts[1] === "mfa" && ["enroll", "verify", "disable"].includes(parts[2])) return method === "POST";
+  if (parts.length === 2 && parts[0] === "auth" && parts[1] === "verify-email") return method === "POST";
+  if (parts.length === 2 && parts[0] === "auth" && parts[1] === "resend-verification") return method === "POST";
+  if (parts.length === 3 && parts[0] === "auth" && parts[1] === "login" && parts[2] === "mfa") return method === "POST";
+  if (parts.length === 5 && parts[0] === "databases" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "users" && /^[0-9a-f-]{36}$/i.test(parts[3]) && parts[4] === "reset-password") return method === "POST";
   if (parts.length === 2 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
   if (parts.length === 2 && parts[0] === "applications" && parts[1] === "runtime-profiles") return method === "GET";
   if (parts.length === 4 && parts[0] === "applications" && parts[1] === "projects" &&
@@ -85,6 +99,39 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 3 && parts[0] === "backups" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "restore") return method === "POST";
   if (parts.length === 3 && parts[0] === "hosting-accounts" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "files") return method === "POST";
   if (parts.length === 3 && parts[0] === "file-manager" && parts[1] === "jobs" && /^[0-9a-f-]{36}$/i.test(parts[2])) return method === "GET";
+  // Customer self-service mutations (hosting-account membership is verified by the API).
+  if (parts.length === 4 && parts[0] === "customer" && parts[1] === "hosting-accounts" &&
+      /^[0-9a-f-]{36}$/i.test(parts[2]) && ["domains", "databases"].includes(parts[3])) return method === "POST";
+  if (parts.length === 5 && parts[0] === "customer" && parts[1] === "hosting-accounts" &&
+      /^[0-9a-f-]{36}$/i.test(parts[2]) && ["domains", "databases"].includes(parts[3]) &&
+      /^[0-9a-f-]{36}$/i.test(parts[4])) return method === "DELETE";
+  // Organization administration.
+  if (parts.length === 1 && parts[0] === "organizations") return method === "GET";
+  if (parts.length === 2 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "GET" || method === "DELETE";
+  if (parts.length === 3 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "members") return method === "POST";
+  if (parts.length === 4 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "members" && /^[0-9a-f-]{36}$/i.test(parts[3])) return method === "PATCH" || method === "DELETE";
+  if (parts.length === 3 && parts[0] === "organizations" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "audit-logs") return method === "GET";
+  // Subscriptions, invoices, billing provider status.
+  if (parts.length === 1 && parts[0] === "subscriptions") return method === "GET" || method === "POST";
+  if (parts.length === 2 && parts[0] === "subscriptions" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "GET";
+  if (parts.length === 3 && parts[0] === "subscriptions" && /^[0-9a-f-]{36}$/i.test(parts[1]) &&
+      ["renew", "plan", "cancel", "suspend", "reactivate"].includes(parts[2])) return method === "POST";
+  if (parts.length === 1 && parts[0] === "invoices") return method === "GET";
+  if (parts.length === 3 && parts[0] === "invoices" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "settle") return method === "POST";
+  if (parts.length === 2 && parts[0] === "billing" && parts[1] === "provider-status") return method === "GET";
+  // Email hosting module.
+  if (parts.length === 2 && parts[0] === "email" && ["domains", "status", "service-status"].includes(parts[1])) return method === "GET" || (parts[1] === "domains" && method === "POST");
+  if (parts.length === 3 && parts[0] === "email" && parts[1] === "domains" && /^[0-9a-f-]{36}$/i.test(parts[2])) return method === "GET" || method === "DELETE";
+  if (parts.length === 4 && parts[0] === "email" && parts[1] === "domains" && /^[0-9a-f-]{36}$/i.test(parts[2]) &&
+      ["mailboxes", "forwards"].includes(parts[3])) return method === "GET" || method === "POST";
+  if (parts.length === 2 && parts[0] === "email" && parts[1] === "mailboxes" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PATCH" || method === "DELETE";
+  if (parts.length === 2 && parts[0] === "email" && parts[1] === "forwards" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "DELETE";
+  // Provisioning job inspector.
+  if (parts.length === 1 && parts[0] === "provisioning-jobs") return method === "GET";
+  if (parts.length === 2 && parts[0] === "provisioning-jobs" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "GET";
+  if (parts.length === 3 && parts[0] === "provisioning-jobs" && /^[0-9a-f-]{36}$/i.test(parts[1]) && parts[2] === "retry") return method === "POST";
+  // Hosting plan deletion (unused plans only; the API enforces this).
+  if (parts.length === 2 && parts[0] === "hosting-plans" && /^[0-9a-f-]{36}$/i.test(parts[1])) return method === "PUT" || method === "DELETE";
   return false;
 }
 

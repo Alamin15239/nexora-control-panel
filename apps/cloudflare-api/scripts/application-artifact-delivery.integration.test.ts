@@ -39,14 +39,30 @@ class ArtifactD1 {
     healthCheckPath: "/ready",
     previousActiveReleaseId: "previous-release",
     previousDeploymentId: "previous-deployment",
+    previousArtifactDigest: "b".repeat(64),
     previousActiveNodeId: "previous-runtime-node",
+    previousActiveNodeIdentity: "runtime-a",
   };
   nonces = new Set<string>();
   lastSignatureUpdated = false;
   validationEventDetails: string | null = null;
   activationEventDetails: string | null = null;
   healthEventDetails: string | null = null;
-  workloadStatus: string | null = null;
+  rollbackAcknowledged = false;
+  pendingRollbackSameNode = true;
+  pendingRollbackRows: Array<{
+    failedDeploymentId: string; targetDeploymentId: string; failedReleaseId: string;
+    targetReleaseId: string; organizationId: string; projectId: string; hostingAccountId: string;
+    hostname: string; healthCheckPath: string; targetArtifactSha256: string;
+  }> = [];
+  rollbackAcknowledgement: {
+    operationId: string; nodeId: string; failedReleaseId: string; targetReleaseId: string;
+    failedDeploymentId: string; targetDeploymentId: string;
+    targetArtifactSha256: string; httpStatus: number; durationMs: number;
+  } | null = null;
+  workloadActiveReleaseId = "target-release";
+  workloadNodeId = "runtime-node-id";
+  workloadStatus: string | null = "unhealthy";
   githubDeploymentStatus = "building";
 
   async batch(statements: Array<{ run: () => Promise<{ success: boolean; meta: { changes: number } }> }>) {
@@ -77,12 +93,58 @@ class ArtifactD1 {
             signingPublicKey: db.node.signingPublicKey,
           } as T) : null;
         }
+        if (query.includes("FROM application_rollback_acknowledgements")) {
+          if (query.includes("failed_release_id = ?")) {
+            return db.rollbackAcknowledged ? ({ operationId: "rollback-operation-a" } as T) : null;
+          }
+          if (query.includes("operation_id = ?")) {
+            const ack = db.rollbackAcknowledgement;
+            if (!ack || ack.operationId !== values[0]) return null;
+            if (query.includes("failed_deployment_id AS failedDeploymentId")) {
+              return ({
+                nodeId: ack.nodeId, failedDeploymentId: ack.failedDeploymentId,
+                targetDeploymentId: ack.targetDeploymentId,
+                targetArtifactSha256: ack.targetArtifactSha256,
+                httpStatus: ack.httpStatus, durationMs: ack.durationMs,
+              } as T);
+            }
+            return ({
+              nodeId: ack.nodeId, failedReleaseId: ack.failedReleaseId,
+              targetReleaseId: ack.targetReleaseId, targetArtifactSha256: ack.targetArtifactSha256,
+              httpStatus: ack.httpStatus, durationMs: ack.durationMs,
+            } as T);
+          }
+        }
+        if (query.includes("FROM application_releases failed")) {
+          const [targetDeploymentId, failedDeploymentId, failedNodeId, targetNodeId,
+            failedPoolId, targetPoolId, targetDigest, workloadNodeId] = values;
+          const valid = db.release.state === "failed" && failedDeploymentId === db.release.deploymentId &&
+            targetDeploymentId === "previous-deployment" && failedNodeId === db.node.id &&
+            targetNodeId === db.node.id && failedPoolId === db.node.nodePoolId &&
+            targetPoolId === db.node.nodePoolId && targetDigest === db.release.previousArtifactDigest &&
+            workloadNodeId === db.node.id && db.workloadActiveReleaseId === "target-release";
+          return valid ? ({
+            failedReleaseId: db.release.releaseId, organizationId: db.release.organizationId,
+            projectId: db.release.projectId, targetReleaseId: "target-release",
+            targetArtifactDigest: db.release.previousArtifactDigest, workloadId: "workload-a",
+          } as T) : null;
+        }
+        if (query.includes("FROM application_workloads WHERE id = ?")) {
+          return ({
+            status: db.workloadStatus, activeReleaseId: db.workloadActiveReleaseId,
+            nodeId: db.workloadNodeId,
+          } as T);
+        }
         if (query.includes("SELECT id FROM application_release_events")) {
           if (query.includes("release_files_activated")) {
             return db.activationEventDetails === values[1] ? ({ id: "activation-event" } as T) : null;
           }
           if (values[1] === "health_check_succeeded" || values[1] === "health_check_failed") {
-            return db.healthEventDetails === values[2] ? ({ id: "health-event" } as T) : null;
+            // The Worker matches a prior health-check event by (releaseId,
+            // eventCode) only — probe duration and HTTP status are not part
+            // of the durable decision — so any recorded event for this code
+            // is a duplicate match.
+            return db.healthEventDetails !== null ? ({ id: "health-event" } as T) : null;
           }
           return db.validationEventDetails === values[1] ? ({ id: "validation-event" } as T) : null;
         }
@@ -100,7 +162,9 @@ class ArtifactD1 {
                 healthCheckPath: db.release.healthCheckPath,
                 previousActiveReleaseId: db.release.previousActiveReleaseId,
                 previousDeploymentId: db.release.previousDeploymentId,
+                previousArtifactDigest: db.release.previousArtifactDigest,
                 previousActiveNodeId: db.release.previousActiveNodeId,
+                previousActiveNodeIdentity: db.release.previousActiveNodeIdentity,
               } as T) : null;
         }
         if (query.includes("FROM application_releases r") && query.includes("deploymentArtifactDigest")) {
@@ -140,7 +204,40 @@ class ArtifactD1 {
         }
         return null;
       },
+      async all<T>() {
+        if (query.includes("FROM application_releases failed")) {
+          const [failedNodeId, failedPoolId, targetNodeId, targetPoolId, workloadNodeId] = values;
+          const eligible = query.includes("NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements") &&
+            failedNodeId === db.node.id && targetNodeId === db.node.id &&
+            workloadNodeId === db.node.id && failedPoolId === db.node.nodePoolId &&
+            targetPoolId === db.node.nodePoolId && db.pendingRollbackSameNode &&
+            !db.rollbackAcknowledged;
+          return { results: (eligible ? db.pendingRollbackRows : []) as T[] };
+        }
+        return { results: [] as T[] };
+      },
       async run() {
+        if (query.includes("INSERT OR IGNORE INTO application_rollback_acknowledgements")) {
+          if (db.rollbackAcknowledgement) return { success: true, meta: { changes: 0 } };
+          db.rollbackAcknowledgement = {
+            operationId: String(values[0]), nodeId: String(values[3]),
+            failedReleaseId: String(values[4]), targetReleaseId: String(values[5]),
+            failedDeploymentId: String(values[6]), targetDeploymentId: String(values[7]),
+            targetArtifactSha256: String(values[8]), httpStatus: Number(values[9]),
+            durationMs: Number(values[10]),
+          };
+          db.rollbackAcknowledged = true;
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE application_workloads SET status = 'healthy'")) {
+          db.workloadStatus = "healthy";
+          db.workloadActiveReleaseId = String(values[1]);
+          db.workloadNodeId = String(values[2]);
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("INSERT INTO application_release_events") && query.includes("'rollback_completed'")) {
+          return { success: true, meta: { changes: 1 } };
+        }
         if (query.includes("INSERT OR IGNORE INTO application_node_request_nonces")) {
           const nonce = String(values[1]);
           if (db.nonces.has(nonce)) return { success: true, meta: { changes: 0 } };
@@ -229,6 +326,31 @@ async function keyPair(name: "Ed25519" | "RSASSA-PKCS1-v1_5") {
   return { publicKey: pair.publicKey, privateKeyPEM: pem, privateKey: pair.privateKey };
 }
 
+async function signedPendingStaticReleasesRequest(
+  privateKey: CryptoKey,
+  nonce = "c".repeat(32),
+  nodeIdentity = "runtime-a",
+) {
+  const path = "/internal/v1/application-nodes/pending-static-releases";
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("")));
+  const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const message = [
+    "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, "GET", path, bodyHashHex,
+  ].join("\n");
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(message)));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "GET",
+    headers: {
+      "x-nexora-node-identity": nodeIdentity,
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+  });
+}
+
 async function signedArtifactRequest(
   privateKey: CryptoKey,
   nonce = "a".repeat(32),
@@ -305,6 +427,40 @@ async function signedActivationRequest(
     "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, "POST", path, bodyHashHex,
   ].join("\n");
   const signature = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(message)));
+  const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return new Request("https://api.test" + path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nexora-node-identity": nodeIdentity,
+      "x-nexora-node-timestamp": timestamp,
+      "x-nexora-node-nonce": nonce,
+      "x-nexora-node-signature": signatureHex,
+    },
+    body: rawBody,
+  });
+}
+
+async function signedRollbackCompletionRequest(
+  privateKey: CryptoKey,
+  report: {
+    operationId: string; failedDeploymentId: string; targetDeploymentId: string;
+    targetArtifactSha256: string; httpStatus: number; durationMs: number;
+  },
+  nonce = "c".repeat(32),
+  nodeIdentity = "runtime-a",
+) {
+  const path = "/internal/v1/application-nodes/releases/rollback-completed";
+  const rawBody = JSON.stringify(report);
+  const bodyHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody)));
+  const bodyHashHex = Array.from(bodyHash, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const message = [
+    "NEXORA-APPLICATION-NODE-V1", nodeIdentity, timestamp, nonce, "POST", path, bodyHashHex,
+  ].join("\n");
+  const signature = new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" }, privateKey, new TextEncoder().encode(message),
+  ));
   const signatureHex = Array.from(signature, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return new Request("https://api.test" + path, {
     method: "POST",
@@ -705,14 +861,116 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(response.status, 200);
   const body = await response.json() as {
     releaseState: string; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+    rollbackTargetNodeIdentity: string | null;
   };
   assert.equal(body.releaseState, "failed");
   assert.equal(body.rollbackRequired, true);
   assert.equal(body.rollbackTargetDeploymentId, "previous-deployment");
-  assert.equal(body.rollbackTargetNodeId, "previous-runtime-node");
+  assert.equal(body.rollbackTargetNodeIdentity, "runtime-a");
   assert.equal(db.release.state, "failed");
   assert.equal(db.workloadStatus, "unhealthy");
   assert.equal(db.githubDeploymentStatus, "failed");
+});
+
+test("rollback completion is persisted, verified, and idempotent", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "failed";
+  db.workloadActiveReleaseId = "target-release";
+  db.workloadNodeId = db.node.id;
+  db.workloadStatus = "unhealthy";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.previousArtifactDigest = "b".repeat(64);
+  const report = {
+    operationId: "rollback-operation-a",
+    failedDeploymentId: "deployment-a",
+    targetDeploymentId: "previous-deployment",
+    targetArtifactSha256: "b".repeat(64),
+    httpStatus: 200,
+    durationMs: 42,
+  };
+  const env = { DB: db as unknown as D1Database };
+  const first = await worker.fetch(await signedRollbackCompletionRequest(
+    node.privateKey, report, "d".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const firstBody = await first.json() as { accepted: boolean; duplicate: boolean; state: string };
+  assert.equal(firstBody.accepted, true);
+  assert.equal(firstBody.duplicate, false);
+  assert.equal(firstBody.state, "reported");
+  assert.equal(db.workloadStatus, "healthy");
+  assert.equal(db.rollbackAcknowledgement?.operationId, report.operationId);
+
+  const duplicate = await worker.fetch(await signedRollbackCompletionRequest(
+    node.privateKey, report, "e".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(duplicate.status, 200);
+  const duplicateBody = await duplicate.json() as { accepted: boolean; duplicate: boolean };
+  assert.equal(duplicateBody.accepted, true);
+  assert.equal(duplicateBody.duplicate, true);
+
+  const conflict = await worker.fetch(await signedRollbackCompletionRequest(
+    node.privateKey, { ...report, httpStatus: 204 }, "f".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(conflict.status, 409);
+});
+
+test("duplicate failed health check stops requesting rollback after acknowledgement", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "unhealthy" as const, httpStatus: 503,
+    durationMs: 30000, failureCode: "http_5xx",
+  };
+  const env = { DB: db as unknown as D1Database };
+  const first = await worker.fetch(await signedHealthCheckRequest(
+    node.privateKey, report, "a".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(first.status, 200);
+  const firstBody = await first.json() as {
+    rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+  };
+  assert.equal(firstBody.rollbackRequired, true);
+  assert.equal(firstBody.rollbackTargetDeploymentId, "previous-deployment");
+
+  // Model the durable acknowledgement written by the rollback-completion route.
+  db.rollbackAcknowledged = true;
+  const duplicate = await worker.fetch(await signedHealthCheckRequest(
+    node.privateKey, report, "b".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(duplicate.status, 200);
+  const duplicateBody = await duplicate.json() as {
+    duplicate: boolean; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+  };
+  assert.equal(duplicateBody.duplicate, true);
+  assert.equal(duplicateBody.rollbackRequired, false);
+  assert.equal(duplicateBody.rollbackTargetDeploymentId, null);
+});
+
+test("failed health check on another node preserves the previous workload without requesting a local rollback", async () => {
+  const db = new ArtifactD1();
+  db.release.state = "health_checking";
+  db.release.previousActiveNodeIdentity = "previous-runtime-node";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.release.releaseArtifactDigest = await artifactDigestPromise;
+  db.release.artifactSha256 = await artifactDigestPromise;
+  const report = {
+    deploymentId: "deployment-a", artifactSha256: await artifactDigestPromise,
+    probePath: "/ready", healthStatus: "unhealthy" as const, httpStatus: 503,
+    durationMs: 30, failureCode: "http_5xx",
+  };
+  const response = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    releaseState: string; rollbackRequired: boolean;
+    rollbackTargetDeploymentId: string | null; rollbackTargetNodeIdentity: string | null;
+  };
+  assert.equal(body.releaseState, "failed");
+  assert.equal(body.rollbackRequired, false);
+  assert.equal(body.rollbackTargetDeploymentId, null);
+  assert.equal(body.rollbackTargetNodeIdentity, null);
 });
 
 test("health-check report rejects mismatched configured path and digest", async () => {
@@ -736,7 +994,11 @@ test("health-check report rejects mismatched configured path and digest", async 
   assert.equal(db.release.state, "health_checking");
 });
 
-test("successful health-check report is idempotent only for an exact duplicate", async () => {
+test("successful health-check report is idempotent for same-outcome retries including different probe duration", async () => {
+  // PROJECT_STATUS item 3: health-report retries must be idempotent when
+  // probe duration changes. The durable decision is the health outcome, not
+  // the per-probe timing details, so a same-outcome retry with a different
+  // durationMs is accepted as a duplicate rather than rejected as a conflict.
   const db = new ArtifactD1();
   db.release.state = "health_checking";
   const node = await keyPair("Ed25519");
@@ -750,9 +1012,122 @@ test("successful health-check report is idempotent only for an exact duplicate",
   const env = { DB: db as unknown as D1Database };
   const first = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "1".repeat(32)), env, {} as ExecutionContext);
   assert.equal(first.status, 200);
+  // Exact duplicate (same details, fresh nonce) is idempotent.
   const duplicate = await worker.fetch(await signedHealthCheckRequest(node.privateKey, report, "2".repeat(32)), env, {} as ExecutionContext);
   assert.equal(duplicate.status, 200);
-  const body = await duplicate.json() as { duplicate: boolean; releaseState: string };
-  assert.equal(body.duplicate, true);
-  assert.equal(body.releaseState, "succeeded");
+  const duplicateBody = await duplicate.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(duplicateBody.duplicate, true);
+  assert.equal(duplicateBody.releaseState, "succeeded");
+  // Retry with a different probe duration is also idempotent: same outcome,
+  // different timing details, must still be a duplicate rather than a 409.
+  const jitteredRetry = await worker.fetch(await signedHealthCheckRequest(node.privateKey, { ...report, durationMs: 191 }, "3".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(jitteredRetry.status, 200);
+  const jitteredBody = await jitteredRetry.json() as { duplicate: boolean; releaseState: string };
+  assert.equal(jitteredBody.duplicate, true);
+  assert.equal(jitteredBody.releaseState, "succeeded");
+  // A retry that disagrees with the terminal outcome is still rejected.
+  const conflicting = await worker.fetch(await signedHealthCheckRequest(node.privateKey, { ...report, healthStatus: "unhealthy" as const, httpStatus: 503, durationMs: 5, failureCode: "http_5xx" }, "4".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(conflicting.status, 409);
+});
+
+
+test("signed static-node poll returns only eligible same-node rollback work", async () => {
+  const db = new ArtifactD1();
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.pendingRollbackRows = [{
+    failedDeploymentId: "deployment-failed",
+    targetDeploymentId: "deployment-previous",
+    failedReleaseId: "release-failed",
+    targetReleaseId: "release-previous",
+    organizationId: "org-a",
+    projectId: "project-a",
+    hostingAccountId: "hosting-a",
+    hostname: "www.example.test",
+    healthCheckPath: "/ready",
+    targetArtifactSha256: "b".repeat(64),
+  }];
+  const response = await worker.fetch(
+    await signedPendingStaticReleasesRequest(node.privateKey),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json() as {
+    nodeIdentity: string;
+    rollbacks: Array<{ failedDeploymentId: string; targetDeploymentId: string; targetArtifactSha256: string }>;
+  };
+  assert.equal(body.nodeIdentity, "runtime-a");
+  assert.equal(body.rollbacks.length, 1);
+  assert.equal(body.rollbacks[0].failedDeploymentId, "deployment-failed");
+  assert.equal(body.rollbacks[0].targetDeploymentId, "deployment-previous");
+  assert.equal(body.rollbacks[0].targetArtifactSha256, "b".repeat(64));
+  assert.equal(db.lastSignatureUpdated, true);
+});
+
+test("signed static-node poll excludes acknowledged rollback work", async () => {
+  const db = new ArtifactD1();
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.pendingRollbackRows = [{
+    failedDeploymentId: "deployment-failed",
+    targetDeploymentId: "deployment-previous",
+    failedReleaseId: "release-failed",
+    targetReleaseId: "release-previous",
+    organizationId: "org-a",
+    projectId: "project-a",
+    hostingAccountId: "hosting-a",
+    hostname: "www.example.test",
+    healthCheckPath: "/ready",
+    targetArtifactSha256: "b".repeat(64),
+  }];
+  db.rollbackAcknowledged = true;
+  const response = await worker.fetch(
+    await signedPendingStaticReleasesRequest(node.privateKey, "d".repeat(32)),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json() as { rollbacks: unknown[] };
+  assert.deepEqual(body.rollbacks, []);
+});
+
+test("signed static-node poll does not return cross-node rollback work", async () => {
+  const db = new ArtifactD1();
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  db.pendingRollbackSameNode = false;
+  db.pendingRollbackRows = [{
+    failedDeploymentId: "deployment-failed",
+    targetDeploymentId: "deployment-previous",
+    failedReleaseId: "release-failed",
+    targetReleaseId: "release-previous",
+    organizationId: "org-a",
+    projectId: "project-a",
+    hostingAccountId: "hosting-a",
+    hostname: "www.example.test",
+    healthCheckPath: "/ready",
+    targetArtifactSha256: "b".repeat(64),
+  }];
+  const response = await worker.fetch(
+    await signedPendingStaticReleasesRequest(node.privateKey, "e".repeat(32)),
+    { DB: db as unknown as D1Database }, {} as ExecutionContext,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json() as { rollbacks: unknown[] };
+  assert.deepEqual(body.rollbacks, []);
+});
+
+test("signed static-node poll rejects replayed nonces", async () => {
+  const db = new ArtifactD1();
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  const env = { DB: db as unknown as D1Database };
+  const nonce = "f".repeat(32);
+  const first = await worker.fetch(
+    await signedPendingStaticReleasesRequest(node.privateKey, nonce), env, {} as ExecutionContext,
+  );
+  assert.equal(first.status, 200);
+  const replay = await worker.fetch(
+    await signedPendingStaticReleasesRequest(node.privateKey, nonce), env, {} as ExecutionContext,
+  );
+  assert.equal(replay.status, 409);
 });
