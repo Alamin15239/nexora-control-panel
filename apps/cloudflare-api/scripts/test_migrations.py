@@ -530,6 +530,29 @@ db.execute("""INSERT INTO github_webhook_deliveries
 VALUES ('whd-d','org-a','repo-1','delivery-uuid-3','push','skipped_branch_mismatch','dev',?,'branch mismatch')""", ("c" * 40,))
 assert db.execute("SELECT outcome FROM github_webhook_deliveries WHERE delivery_id='delivery-uuid-3'").fetchone()[0] == "skipped_branch_mismatch"
 
+# Deployment logs: org guard, message length, and per-deployment seq uniqueness.
+db.execute("""INSERT INTO github_deployment_logs
+(id,organization_id,project_id,deployment_id,seq,source,message_redacted)
+VALUES ('log-a','org-a','project-a','deployment-a',0,'builder','build started')""")
+db.execute("""INSERT INTO github_deployment_logs
+(id,organization_id,project_id,deployment_id,seq,source,message_redacted)
+VALUES ('log-b','org-a','project-a','deployment-a',1,'builder','[redacted]')""")
+must_reject("log line cross-tenant insert blocked by org-guard trigger",
+            "INSERT INTO github_deployment_logs(id,organization_id,project_id,deployment_id,seq,source,message_redacted) "
+            "VALUES ('log-c','org-b','project-a','deployment-a',2,'builder','line')", ())
+must_reject("log line negative seq",
+            "INSERT INTO github_deployment_logs(id,organization_id,project_id,deployment_id,seq,source,message_redacted) "
+            "VALUES ('log-d','org-a','project-a','deployment-a',-1,'builder','line')", ())
+must_reject("log line overlong message",
+            "INSERT INTO github_deployment_logs(id,organization_id,project_id,deployment_id,seq,source,message_redacted) "
+            "VALUES ('log-e','org-a','project-a','deployment-a',2,'builder',?)", ("x" * 2001,))
+must_reject("log line duplicate seq for the same deployment",
+            "INSERT INTO github_deployment_logs(id,organization_id,project_id,deployment_id,seq,source,message_redacted) "
+            "VALUES ('log-f','org-a','project-a','deployment-a',0,'builder','replay')", ())
+must_reject("log line invalid source",
+            "INSERT INTO github_deployment_logs(id,organization_id,project_id,deployment_id,seq,source,message_redacted) "
+            "VALUES ('log-g','org-a','project-a','deployment-a',2,'attacker','line')", ())
+
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
 print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, deploy platform env-var/alias/webhook constraints and org guards, and foreign keys verified.")

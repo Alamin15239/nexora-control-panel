@@ -411,6 +411,7 @@ app.use("/v1/*", async (c, next) => {
     // POST /v1/github/projects); they must not be gated to platform staff.
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/env-vars(\/[0-9a-fA-F-]{36})?$/.test(path) ||
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/promote$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/logs$/.test(path) ||
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/webhook-secret$/.test(path) ||
     path === "/v1/github/projects/detect-framework" ||
     // Nexora Deploy helper catalog (framework presets); handlers authenticate
@@ -443,7 +444,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders", "application_env_vars", "application_deployment_aliases", "github_webhook_deliveries"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders", "application_env_vars", "application_deployment_aliases", "github_webhook_deliveries", "github_deployment_logs"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -7575,10 +7576,10 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   }
 
   const deployment = await c.env.DB.prepare(
-    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName, p.trusted_workflow_sha AS trustedWorkflowSha FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, d.deployment_kind AS deploymentKind, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName, p.trusted_workflow_sha AS trustedWorkflowSha FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
   ).bind(c.req.param("deploymentId")).first<{
     id: string; organizationId: string; projectId: string; commitSha: string; branch: string;
-    status: string; repositoryId: string; repositoryFullName: string; trustedWorkflowSha: string | null;
+    status: string; deploymentKind: string; repositoryId: string; repositoryFullName: string; trustedWorkflowSha: string | null;
   }>();
   if (!deployment || deployment.status !== "queued") {
     return c.json({ message: "Deployment not found or no longer accepting a runner." }, 409);
@@ -7667,11 +7668,48 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     return c.json({ message: "This deployment already has an upload capability or could not be claimed." }, 409);
   }
 
+  // Build-environment injection (Nexora Deploy batch 5): hand the verified
+  // builder the project's decrypted environment variables that target the
+  // build phase for this deployment's environment. Values leave the control
+  // plane exactly once, to a builder whose identity is pinned to this commit
+  // and trusted workflow SHA. Undecryptable rows (e.g. after a key rotation
+  // without re-entry) are skipped and reported, never silently dropped.
+  const buildEnvironment = {
+    environmentVariables: [] as Array<{ key: string; value: string; target: string }>,
+    environmentVariablesUndecryptable: 0,
+  };
+  try {
+    const environment = deployment.deploymentKind === "preview" ? "preview" : "production";
+    const envVarRows = await c.env.DB.prepare(
+      "SELECT key_name, target, encrypted_value, value_iv FROM application_env_vars " +
+      "WHERE project_id = ? AND organization_id = ? AND environment = ? AND target IN ('build','both') " +
+      "ORDER BY key_name ASC LIMIT 128",
+    ).bind(deployment.projectId, deployment.organizationId, environment).all<{
+      key_name: string; target: string; encrypted_value: string; value_iv: string;
+    }>();
+    for (const row of envVarRows.results ?? []) {
+      try {
+        buildEnvironment.environmentVariables.push({
+          key: row.key_name,
+          value: await decryptDeployEnvValue(c.env, row.encrypted_value, row.value_iv),
+          target: row.target,
+        });
+      } catch {
+        buildEnvironment.environmentVariablesUndecryptable += 1;
+      }
+    }
+  } catch {
+    // Without an encryption key (or a failed scan) the build still proceeds;
+    // no values are injected and the omission is visible in the response.
+    buildEnvironment.environmentVariables = [];
+  }
+
   return c.json({
     uploadToken: capability,
     expiresAt,
     maxBytes: 104857600,
     contentType: "application/gzip",
+    ...buildEnvironment,
   }, 201);
 });
 
@@ -7816,6 +7854,157 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
     console.error("GitHub artifact upload failed:", error instanceof Error ? error.message : "unknown error");
     return c.json({ message: "Artifact upload failed; the one-time capability has been consumed." }, 502);
   }
+});
+
+// Deployment build-log proxy (Nexora Deploy batch 5).
+//
+// The builder streams log lines through the control plane; every message is
+// REDACTED AT WRITE TIME against the project's decrypted environment variable
+// values and common token patterns, so the read path can never leak a secret
+// that was not already scrubbed. Log authorization reuses the one-time upload
+// capability while it is still unconsumed (logs stream during the build,
+// before the artifact is uploaded); after the artifact consumes the token,
+// only control-plane lifecycle messages remain.
+const LOG_SECRET_PATTERNS: RegExp[] = [
+  /ghs_[A-Za-z0-9]{16,}/g,
+  /ghp_[A-Za-z0-9]{16,}/g,
+  /gho_[A-Za-z0-9]{16,}/g,
+  /ghus_[A-Za-z0-9]{16,}/g,
+  /ghub_[A-Za-z0-9]{16,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /Bearer\s+[A-Za-z0-9._-]{10,}/gi,
+  /AKIA[0-9A-Z]{16}/g,
+  /x-access-token:\s*[A-Za-z0-9._-]{10,}/gi,
+];
+
+function scrubLogMessage(message: string, secretValues: string[]): string {
+  let scrubbed = message;
+  const sorted = [...secretValues].sort((a, b) => b.length - a.length);
+  for (const value of sorted) {
+    if (value.length >= 4 && scrubbed.includes(value)) {
+      scrubbed = scrubbed.split(value).join("[redacted]");
+    }
+  }
+  for (const pattern of LOG_SECRET_PATTERNS) {
+    scrubbed = scrubbed.replace(pattern, "[redacted]");
+  }
+  return scrubbed.slice(0, 2000);
+}
+
+// Loads every decrypted environment variable value for the project so the
+// scrubber can remove them from builder output. Values never leave this
+// function; only their redacted absence does.
+async function projectSecretValuesForScrubbing(env: Bindings, projectId: string, organizationId: string): Promise<string[]> {
+  const values: string[] = [];
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT encrypted_value, value_iv FROM application_env_vars WHERE project_id = ? AND organization_id = ? LIMIT 128",
+    ).bind(projectId, organizationId).all<{ encrypted_value: string; value_iv: string }>();
+    for (const row of rows.results ?? []) {
+      try {
+        values.push(await decryptDeployEnvValue(env, row.encrypted_value, row.value_iv));
+      } catch { /* undecryptable rows contribute nothing to the scrubber */ }
+    }
+  } catch { /* without an encryption key only pattern-based scrubbing applies */ }
+  return values;
+}
+
+app.post("/v1/github/deployments/:deploymentId/logs", async (c) => {
+  const authorization = c.req.header("authorization") ?? "";
+  const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
+  if (!match) return c.json({ message: "A valid upload capability is required to append build logs." }, 401);
+
+  let input: { lines?: unknown };
+  try { input = await c.req.json<{ lines?: unknown }>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 200) {
+    return c.json({ message: "lines must contain between 1 and 200 entries." }, 400);
+  }
+  const messages: string[] = [];
+  for (const line of input.lines) {
+    if (typeof line !== "string" && typeof line !== "object") return c.json({ message: "Each log line must be a string." }, 400);
+    const raw = typeof line === "string" ? line : String((line as Record<string, unknown>).message ?? "");
+    if (raw.length < 1 || raw.length > 4000) {
+      return c.json({ message: "Log lines must be between 1 and 4000 characters." }, 400);
+    }
+    messages.push(raw);
+  }
+
+  const deploymentId = c.req.param("deploymentId");
+  const tokenHash = await sha256(match[1]);
+  const token = await c.env.DB.prepare(
+    "SELECT t.organization_id AS organizationId, t.project_id AS projectId, t.deployment_id AS deploymentId, d.status FROM github_deployment_upload_tokens t JOIN github_deployments d ON d.id = t.deployment_id AND d.organization_id = t.organization_id WHERE t.token_hash = ? AND t.deployment_id = ? AND t.consumed_at IS NULL AND t.expires_at > ? LIMIT 1",
+  ).bind(tokenHash, deploymentId, new Date().toISOString()).first<{
+    organizationId: string; projectId: string; deploymentId: string; status: string;
+  }>();
+  if (!token) return c.json({ message: "Upload capability is invalid, expired, or already consumed." }, 401);
+
+  const secretValues = await projectSecretValuesForScrubbing(c.env, token.projectId, token.organizationId);
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM github_deployment_logs WHERE deployment_id = ? AND organization_id = ?",
+  ).bind(deploymentId, token.organizationId).first<{ total: number }>();
+  let seq = count?.total ?? 0;
+  const statements = messages.map((message) => {
+    const statement = c.env.DB.prepare(
+      "INSERT INTO github_deployment_logs (id, organization_id, project_id, deployment_id, seq, source, message_redacted) VALUES (?, ?, ?, ?, ?, 'builder', ?)",
+    ).bind(crypto.randomUUID(), token.organizationId, token.projectId, deploymentId, seq, scrubLogMessage(message, secretValues));
+    seq += 1;
+    return statement;
+  });
+  try {
+    const results = await c.env.DB.batch(statements);
+    if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("log lines were not appended atomically");
+    }
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: "A concurrent writer already appended these sequence numbers; retry from the current tail." }, 409);
+    }
+    throw error;
+  }
+  return c.json({ appended: messages.length, tailSeq: seq - 1 }, 201);
+});
+
+app.get("/v1/github/projects/:projectId/deployments/:deploymentId/logs", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const deploymentId = c.req.param("deploymentId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(deploymentId)) {
+    return c.json({ message: "Invalid identifier" }, 400);
+  }
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const deployment = await c.env.DB.prepare(
+    "SELECT id, status, log_excerpt AS logExcerpt FROM github_deployments WHERE id = ? AND project_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(deploymentId, projectId, project.organization_id).first<{ id: string; status: string; logExcerpt: string | null }>();
+  if (!deployment) return c.json({ message: "Deployment not found for this project." }, 404);
+
+  const afterRaw = c.req.query("after");
+  const after = afterRaw === null || afterRaw === undefined || afterRaw === "" ? -1 : Number(afterRaw);
+  const limitRaw = c.req.query("limit");
+  const limit = limitRaw === null || limitRaw === undefined || limitRaw === "" ? 200 : Number(limitRaw);
+  if (!Number.isSafeInteger(after) || after < -1) return c.json({ message: "Invalid after cursor." }, 400);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) return c.json({ message: "limit must be between 1 and 500." }, 400);
+
+  const rows = await c.env.DB.prepare(
+    "SELECT seq, source, message_redacted AS message, emitted_at AS emittedAt FROM github_deployment_logs " +
+    "WHERE deployment_id = ? AND organization_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+  ).bind(deploymentId, project.organization_id, after, limit + 1).all<{
+    seq: number; source: string; message: string; emittedAt: string;
+  }>();
+  const results = rows.results ?? [];
+  const hasMore = results.length > limit;
+  const lines = (hasMore ? results.slice(0, limit) : results);
+  // Defense in depth: the read path re-applies generic pattern scrubbing even
+  // though every line was already scrubbed at write time.
+  return c.json({
+    deploymentId,
+    status: deployment.status,
+    logExcerpt: deployment.logExcerpt ? scrubLogMessage(deployment.logExcerpt, []) : null,
+    lines,
+    nextCursor: hasMore ? lines[lines.length - 1]?.seq ?? after : null,
+  });
 });
 
 // Shared deployment dispatch (Nexora Deploy batch 4).

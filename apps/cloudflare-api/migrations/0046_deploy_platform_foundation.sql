@@ -134,3 +134,36 @@ CREATE TABLE github_webhook_deliveries (
 );
 
 CREATE INDEX idx_github_webhook_deliveries_repo ON github_webhook_deliveries(repository_id, received_at DESC);
+
+-- Deployment build logs. The builder streams lines through the control plane;
+-- every message is redacted at WRITE time (known environment variable values
+-- and common token patterns), so the read path can never leak a secret that
+-- was not already scrubbed. seq is dense per deployment and enforced UNIQUE
+-- so concurrent writers cannot skip or duplicate lines.
+CREATE TABLE github_deployment_logs (
+  id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES github_projects(id) ON DELETE CASCADE,
+  deployment_id TEXT NOT NULL REFERENCES github_deployments(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL CHECK (seq >= 0),
+  source TEXT NOT NULL CHECK (source IN ('builder', 'control_plane')),
+  message_redacted TEXT NOT NULL CHECK (length(message_redacted) <= 2000),
+  emitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (deployment_id, seq)
+);
+
+CREATE INDEX idx_github_deployment_logs_deployment ON github_deployment_logs(deployment_id, seq);
+
+CREATE TRIGGER github_deployment_logs_org_insert_guard
+BEFORE INSERT ON github_deployment_logs
+WHEN NEW.organization_id != (SELECT organization_id FROM github_deployments WHERE id = NEW.deployment_id)
+BEGIN
+  SELECT RAISE(ABORT, 'log line organization must match the linked deployment');
+END;
+
+CREATE TRIGGER github_deployment_logs_org_update_guard
+BEFORE UPDATE OF organization_id, project_id, deployment_id ON github_deployment_logs
+WHEN NEW.organization_id != (SELECT organization_id FROM github_deployments WHERE id = NEW.deployment_id)
+BEGIN
+  SELECT RAISE(ABORT, 'log line organization must match the linked deployment');
+END;
