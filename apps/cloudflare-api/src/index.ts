@@ -6715,7 +6715,7 @@ async function githubAppJwt(env: Bindings): Promise<string> {
   return message + "." + base64Url(new Uint8Array(signature));
 }
 
-async function githubInstallationToken(env: Bindings, installationId: string, repositoryId: string): Promise<string> {
+async function githubInstallationToken(env: Bindings, installationId: string, repositoryId?: string): Promise<string> {
   const jwt = await githubAppJwt(env);
   const response = await fetch(`https://api.github.com/app/installations/${encodeURIComponent(installationId)}/access_tokens`, {
     method: "POST",
@@ -6724,12 +6724,12 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
       "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "Nexora-Control-Panel",
     },
-    body: JSON.stringify({
+    body: JSON.stringify(repositoryId ? {
       repository_ids: [Number(repositoryId)],
       permissions: { actions: "write", contents: "read", metadata: "read" },
-    }),
+    } : {}),
   });
-  if (!response.ok) throw new Error("Unable to mint a repository-scoped GitHub installation token");
+  if (!response.ok) throw new Error("Unable to mint a GitHub installation access token");
   const data = await response.json() as { token?: string; expires_at?: string };
   if (!data.token || !data.expires_at || Date.parse(data.expires_at) <= Date.now()) throw new Error("GitHub returned an invalid installation token");
   return data.token;
@@ -7044,11 +7044,15 @@ app.get("/v1/github/repositories", async (c) => {
       return c.json({ message: providerMessage ? message + " GitHub says: " + providerMessage : message,
         diagnostics: { operation, providerStatus: response.status, requestId: requestId ?? null, rateLimitRemaining: remaining } }, 502);
     };
-    let nextPath: string | null = `/app/installations/${encodeURIComponent(connection.github_installation_id)}/repositories?per_page=100`;
+    // Repository listing is installation-authenticated. GitHub's
+    // GET /installation/repositories endpoint does not accept an App JWT;
+    // mint an installation token first, then use that token for every page.
+    const installationToken = await githubInstallationToken(c.env, connection.github_installation_id);
+    let nextPath: string | null = "/installation/repositories?per_page=100";
     const repositories: Array<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }> = [];
     let pages = 0;
     while (nextPath && pages < 10) {
-      const response = await githubApi(jwt, nextPath);
+      const response = await githubApi(installationToken, nextPath);
       if (!response.ok) return githubFailure(response, "list_installation_repositories");
       const payload = await response.json() as { repositories?: typeof repositories };
       if (!Array.isArray(payload.repositories)) throw new Error("GitHub returned an invalid repository list");
@@ -7056,7 +7060,7 @@ app.get("/v1/github/repositories", async (c) => {
       const nextUrl = /<([^>]+)>;\s*rel="next"/i.exec(response.headers.get("link") ?? "")?.[1];
       if (nextUrl) {
         const parsed = new URL(nextUrl);
-        const expectedPath = `/app/installations/${connection.github_installation_id}/repositories`;
+        const expectedPath = "/installation/repositories";
         if (parsed.origin !== "https://api.github.com" || parsed.pathname !== expectedPath) throw new Error("GitHub returned an unexpected pagination URL");
         nextPath = parsed.pathname + parsed.search;
       } else nextPath = null;
