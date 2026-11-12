@@ -74,6 +74,8 @@ jobs:
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/github-repository-discovery.integration.test.ts
       - name: Deploy platform framework detection and environment variable tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-env-vars.integration.test.ts
+      - name: Deploy platform webhook, preview, and promotion tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-webhooks.integration.test.ts
       - name: MFA atomicity real-SQLite concurrency tests
         run: python3 apps/cloudflare-api/scripts/test_mfa_atomicity.py
       - name: Backup exclusion real-SQLite migration tests

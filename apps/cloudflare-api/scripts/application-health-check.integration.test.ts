@@ -78,6 +78,7 @@ class HealthCheckD1 {
             artifactDigest: db.release.artifactDigest,
             deploymentArtifactDigest: db.release.deploymentArtifactDigest,
             projectId: db.release.projectId,
+            deploymentKind: "production",
             organizationId: db.release.organizationId,
             healthCheckPath: db.release.healthCheckPath,
             previousActiveReleaseId: db.release.previousActiveReleaseId,

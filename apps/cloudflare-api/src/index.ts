@@ -20,6 +20,7 @@ type Bindings = {
   GITHUB_OAUTH_CALLBACK_URL?: string;
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
   DEPLOY_ENV_ENCRYPTION_KEY?: string;
+  DEPLOY_DOMAIN?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_SLUG?: string;
@@ -402,10 +403,15 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
     path.startsWith("/v1/github/deployments/") ||
+    // GitHub push/PR webhooks authenticate with the per-project HMAC secret,
+    // not a user session; the handler rejects unsigned or replayed deliveries.
+    path === "/v1/github/webhooks" ||
     // Nexora Deploy project-scoped routes authenticate inside their handlers
     // (organization role or active hosting-account membership, mirroring
     // POST /v1/github/projects); they must not be gated to platform staff.
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/env-vars(\/[0-9a-fA-F-]{36})?$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/promote$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/webhook-secret$/.test(path) ||
     path === "/v1/github/projects/detect-framework" ||
     // Nexora Deploy helper catalog (framework presets); handlers authenticate
     // with bearerIdentity and are safe for customer identities.
@@ -7812,31 +7818,78 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
   }
 });
 
-app.post("/v1/github/projects/:projectId/deployments", async (c) => {
-  const identity = await bearerIdentity(c.req.raw, c.env.DB);
-  if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
-  if (!c.env.GITHUB_APP_ID || !c.env.GITHUB_APP_PRIVATE_KEY) {
-    return c.json({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
+// Shared deployment dispatch (Nexora Deploy batch 4).
+//
+// One code path dispatches every deployment — manual dashboard dispatches,
+// push-webhook auto deploys, and preview (pull request) deploys. The helper
+// owns every prerequisite check (GitHub App credentials, workflow trust,
+// runtime admission, static-v1 gating, output directory validity, in-flight
+// dedup), the atomic deployment+release creation, the trusted workflow
+// dispatch, and the failure bookkeeping. Routes only load their project and
+// choose the kind/branch/trigger, so webhook-driven deploys can never skip a
+// gate that manual deploys honor.
+
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=UTF-8" },
+  });
+}
+
+// The serving domain for deployment hostnames. DEPLOY_DOMAIN may point at a
+// dedicated zone; the default is the platform apex domain.
+function deployDomain(env: Bindings): string {
+  const value = (env.DEPLOY_DOMAIN ?? "nexoraedge.digital").trim().toLowerCase();
+  return /^[a-z0-9.-]{3,253}$/.test(value) ? value : "nexoraedge.digital";
+}
+
+function productionAliasHostname(projectId: string, domain: string): string {
+  return `prod-${projectId.replace(/-/g, "").slice(0, 12)}.${domain}`;
+}
+
+function previewAliasHostname(deploymentId: string, projectId: string, domain: string): string {
+  return `dpl-${deploymentId.replace(/-/g, "").slice(0, 12)}.proj-${projectId.replace(/-/g, "").slice(0, 12)}.${domain}`;
+}
+
+type DispatchProject = {
+  id: string;
+  organizationId: string;
+  repositoryId: string;
+  repositoryFullName: string;
+  installationId: string | null;
+  productionBranch: string;
+  trustedWorkflowSha: string | null;
+  status: string;
+  outputDirectory: string;
+};
+
+async function dispatchGitHubDeployment(
+  env: Bindings,
+  args: {
+    project: DispatchProject;
+    deploymentKind: "production" | "preview";
+    branch: string;
+    triggerType: "manual" | "push";
+    actorType: "user" | "github_webhook";
+    actorId: string | null;
+    sourceDeploymentId?: string | null;
+    commitSha?: string | null;
+    commitMessage?: string | null;
+    detailSource: string;
+  },
+): Promise<Response> {
+  const { project } = args;
+  const db = env.DB;
+  if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
+    return jsonResponse({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
   }
-  const project = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName,
-            p.github_installation_id AS installationId, p.production_branch AS productionBranch,
-            p.trusted_workflow_sha AS trustedWorkflowSha, p.status,
-            COALESCE(NULLIF(s.output_directory, ''), p.output_directory) AS outputDirectory
-     FROM github_projects p
-     LEFT JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(c.req.param("projectId"), identity.organizationId).first<{
-    id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
-    productionBranch: string; trustedWorkflowSha: string | null; status: string; outputDirectory: string;
-  }>();
-  if (!project) return c.json({ message: "GitHub project not found." }, 404);
-  if (!project.installationId) return c.json({ message: "Reconnect the GitHub App and relink this repository." }, 409);
+  if (!project.installationId) {
+    return jsonResponse({ message: "Reconnect the GitHub App and relink this repository." }, 409);
+  }
   if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
-    return c.json({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
+    return jsonResponse({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
   }
-  const runtimeAssignment = await c.env.DB.prepare(
+  const runtimeAssignment = await db.prepare(
     "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
     "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, rp.profile_key AS profileKey, " +
     "rp.runtime_family AS runtimeFamily, s.build_method AS buildMethod, p.status AS poolStatus, " +
@@ -7849,14 +7902,14 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
     "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
-  ).bind(project.id, identity.organizationId).first<{
+  ).bind(project.id, project.organizationId).first<{
     runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
     runtimeEnabled: number; profileKey: string; runtimeFamily: string; buildMethod: string;
     poolStatus: string | null; isolationLevel: string | null; assignedNodeId: string | null;
   }>();
   // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
   if (!runtimeAssignment || !isRuntimeAssignmentAdmitted(runtimeAssignment)) {
-    return c.json({
+    return jsonResponse({
       message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
   }
@@ -7865,7 +7918,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (runtimeAssignment.profileKey !== "static-v1" ||
       runtimeAssignment.runtimeFamily !== "static" ||
       runtimeAssignment.buildMethod !== "static") {
-    return c.json({
+    return jsonResponse({
       message: "This deployment workflow currently supports only the static-v1 runtime with static output. Other runtime profiles remain disabled until their dedicated build and execution pipelines pass acceptance.",
     }, 409);
   }
@@ -7873,53 +7926,57 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       !/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) ||
       project.outputDirectory.startsWith("/") ||
       project.outputDirectory.split("/").some((part) => part === "." || part === "..")) {
-    return c.json({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
+    return jsonResponse({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
   }
 
-  const active = await c.env.DB.prepare(
+  const active = await db.prepare(
     "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
   ).bind(project.id).first<{ id: string }>();
-  if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
+  if (active) return jsonResponse({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
   const applicationReleaseId = crypto.randomUUID();
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
-    const token = await githubInstallationToken(c.env, project.installationId, project.repositoryId);
-    const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(project.productionBranch)}`, {
+    const token = await githubInstallationToken(env, project.installationId, project.repositoryId);
+    // Webhook payloads carry a commit SHA; verify it exists rather than
+    // trusting the payload. Manual dispatches resolve the branch head.
+    const commitRef = args.commitSha ?? args.branch;
+    const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(commitRef)}`, {
       headers: {
         Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Nexora-Control-Panel",
       },
     });
-    if (!refResponse.ok) return c.json({ message: "Unable to resolve the configured production branch in GitHub." }, 502);
+    if (!refResponse.ok) return jsonResponse({ message: args.commitSha ? "The pushed commit is no longer available in GitHub." : "Unable to resolve the configured production branch in GitHub." }, 502);
     const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
-    if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
+    if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return jsonResponse({ message: "GitHub returned an invalid commit SHA." }, 502);
+    const resolvedMessage = args.commitMessage ?? commitData.commit?.message ?? "";
 
     const creationStatements = [
-      c.env.DB.prepare(
-        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
-         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
-      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha.toLowerCase(), project.productionBranch,
-        (commitData.commit?.message ?? "").slice(0, 500)),
+      db.prepare(
+        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message, deployment_kind, source_deployment_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+      ).bind(deploymentId, project.organizationId, project.id, commitData.sha.toLowerCase(), args.branch,
+        args.triggerType, resolvedMessage.slice(0, 500), args.deploymentKind, args.sourceDeploymentId ?? null),
     ];
     if (runtimeAssignment && applicationReleaseId) {
-      creationStatements.push(c.env.DB.prepare(
+      creationStatements.push(db.prepare(
         "INSERT INTO application_releases " +
         "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, assigned_node_id, spec_version, state, source_commit_sha) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-      ).bind(applicationReleaseId, identity.organizationId, project.id, deploymentId,
+      ).bind(applicationReleaseId, project.organizationId, project.id, deploymentId,
         runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.assignedNodeId,
         runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
-      creationStatements.push(c.env.DB.prepare(
+      creationStatements.push(db.prepare(
         "INSERT INTO application_release_events " +
         "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
-        "VALUES (?, ?, ?, NULL, 'queued', 'user', ?, 'deployment_queued', ?)",
-      ).bind(crypto.randomUUID(), identity.organizationId, applicationReleaseId, identity.id,
-        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId })));
+        "VALUES (?, ?, ?, NULL, 'queued', ?, ?, 'deployment_queued', ?)",
+      ).bind(crypto.randomUUID(), project.organizationId, applicationReleaseId, args.actorType, args.actorId,
+        JSON.stringify({ source: args.detailSource, nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId, deploymentKind: args.deploymentKind })));
     }
-    const created = await c.env.DB.batch(creationStatements);
+    const created = await db.batch(creationStatements);
     if (Number(created[0]?.meta?.changes ?? 0) !== 1 ||
         (runtimeAssignment && Number(created[1]?.meta?.changes ?? 0) !== 1)) {
       throw new Error("Unable to create the deployment and its application release atomically");
@@ -7937,7 +7994,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
           "User-Agent": "Nexora-Control-Panel",
         },
         body: JSON.stringify({
-          ref: project.productionBranch,
+          ref: args.branch,
           inputs: {
             deployment_id: deploymentId,
             commit_sha: commitData.sha,
@@ -7947,26 +8004,26 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       },
     );
     if (dispatch.status !== 204) {
-      await c.env.DB.prepare(
+      await db.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
-      ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, identity.organizationId).run();
+      ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, project.organizationId).run();
       if (applicationReleaseId) {
-        await c.env.DB.batch([
-          c.env.DB.prepare(
+        await db.batch([
+          db.prepare(
             "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_rejected', " +
             "failure_message_redacted = 'GitHub workflow dispatch was rejected.', updated_at = datetime('now') " +
             "WHERE id = ? AND organization_id = ? AND state = 'queued'",
-          ).bind(applicationReleaseId, identity.organizationId),
-          c.env.DB.prepare(
+          ).bind(applicationReleaseId, project.organizationId),
+          db.prepare(
             "INSERT INTO application_release_events " +
             "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
             "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_rejected', '{}' " +
             "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
             "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_rejected')",
-          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+          ).bind(crypto.randomUUID(), applicationReleaseId, project.organizationId),
         ]);
       }
-      return c.json({
+      return jsonResponse({
         message: dispatch.status === 404
           ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
           : "GitHub did not accept the deployment workflow dispatch.",
@@ -7975,15 +8032,15 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     }
 
     dispatchAccepted = true;
-    await c.env.DB.batch([
-      c.env.DB.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
-        .bind(project.id, identity.organizationId),
-      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
-        .bind(crypto.randomUUID(), identity.organizationId, identity.id, deploymentId,
-          JSON.stringify({ repository: project.repositoryFullName, branch: project.productionBranch, commitSha: commitData.sha })),
+    await db.batch([
+      db.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
+        .bind(project.id, project.organizationId),
+      db.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
+        .bind(crypto.randomUUID(), project.organizationId, args.actorId, deploymentId,
+          JSON.stringify({ repository: project.repositoryFullName, branch: args.branch, commitSha: commitData.sha, deploymentKind: args.deploymentKind, source: args.detailSource })),
     ]);
-    return c.json({
-      deployment: { id: deploymentId, commitSha: commitData.sha, branch: project.productionBranch, status: "queued" },
+    return jsonResponse({
+      deployment: { id: deploymentId, commitSha: commitData.sha, branch: args.branch, status: "queued", deploymentKind: args.deploymentKind },
       applicationRelease: applicationReleaseId ? {
         id: applicationReleaseId,
         deploymentId,
@@ -7995,34 +8052,391 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     }, 202);
   } catch (error) {
     if (deploymentCreated && !dispatchAccepted) {
-      await c.env.DB.prepare(
+      await db.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'GitHub did not accept the workflow dispatch.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
-      ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
+      ).bind(deploymentId, project.organizationId).run().catch(() => undefined);
       if (applicationReleaseId) {
-        await c.env.DB.batch([
-          c.env.DB.prepare(
+        await db.batch([
+          db.prepare(
             "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_error', " +
             "failure_message_redacted = 'GitHub workflow dispatch did not complete.', updated_at = datetime('now') " +
             "WHERE id = ? AND organization_id = ? AND state = 'queued'",
-          ).bind(applicationReleaseId, identity.organizationId),
-          c.env.DB.prepare(
+          ).bind(applicationReleaseId, project.organizationId),
+          db.prepare(
             "INSERT INTO application_release_events " +
             "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
             "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_error', '{}' " +
             "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
             "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_error')",
-          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+          ).bind(crypto.randomUUID(), applicationReleaseId, project.organizationId),
         ]).catch(() => undefined);
       }
     }
     const detail = error instanceof Error ? error.message : "unknown error";
     console.error("GitHub deployment dispatch failed:", detail);
     if (/UNIQUE constraint failed/i.test(detail)) {
-      return c.json({ message: "A deployment is already queued or running for this project." }, 409);
+      return jsonResponse({ message: "A deployment is already queued or running for this project." }, 409);
     }
-    return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
+    return jsonResponse({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
   }
+}
+
+app.post("/v1/github/projects/:projectId/deployments", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName,
+            p.github_installation_id AS installationId, p.production_branch AS productionBranch,
+            p.trusted_workflow_sha AS trustedWorkflowSha, p.status,
+            COALESCE(NULLIF(s.output_directory, ''), p.output_directory) AS outputDirectory
+     FROM github_projects p
+     LEFT JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<{
+    id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
+    productionBranch: string; trustedWorkflowSha: string | null; status: string; outputDirectory: string;
+  }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  return dispatchGitHubDeployment(c.env, {
+    project: { ...project, organizationId: identity.organizationId },
+    deploymentKind: "production",
+    branch: project.productionBranch,
+    triggerType: "manual",
+    actorType: "user",
+    actorId: identity.id,
+    detailSource: "github_manual_dispatch",
+  });
 });
+
+// Rotates the per-project webhook secret. The raw secret is returned exactly
+// once — the stored copy is encrypted and is never readable again.
+app.put("/v1/github/projects/:projectId/webhook-secret", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const rawSecret = randomHex(32);
+  let encrypted: { iv: string; ciphertext: string };
+  try {
+    encrypted = await encryptGithubToken(c.env, rawSecret);
+  } catch {
+    return c.json({ message: "GITHUB_TOKEN_ENCRYPTION_KEY (64 hex chars) must be configured before webhook secrets can be stored." }, 503);
+  }
+  const result = await c.env.DB.prepare(
+    "UPDATE github_projects SET webhook_secret_encrypted = ?, webhook_secret_iv = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?",
+  ).bind(encrypted.ciphertext, encrypted.iv, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Project not found in this workspace." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.webhook_secret_rotated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({})).run();
+  return c.json({
+    webhookSecret: rawSecret,
+    message: "Store this secret in the repository's GitHub webhook settings now. It is encrypted at rest and cannot be retrieved again.",
+  });
+});
+
+// Push/PR webhook receiver (Nexora Deploy batch 4).
+//
+// Trust model: each project stores its own webhook secret (encrypted). A
+// delivery is trusted only when its x-hub-signature-256 verifies against the
+// secret of a project linked to the delivered repository; anything else gets
+// a uniform 401 with no record written (an attacker must not be able to
+// poison the delivery ledger or discover which repositories are linked).
+// Verified deliveries are recorded once per x-github-delivery id (UNIQUE
+// index makes replays explicit skipped_replay outcomes) and every skip or
+// dispatch decision is auditable.
+function webhookPathIsIgnored(path: string, patterns: string[]): boolean {
+  return patterns.some((raw) => {
+    const pattern = raw.trim().replace(/^\/+|\/+$/g, "");
+    if (!pattern) return false;
+    return path === pattern || path.startsWith(pattern + "/");
+  });
+}
+
+app.post("/v1/github/webhooks", async (c) => {
+  const deliveryId = (c.req.header("x-github-delivery") ?? "").trim();
+  const eventType = (c.req.header("x-github-event") ?? "").trim();
+  const signatureHeader = (c.req.header("x-hub-signature-256") ?? "").trim();
+  if (!deliveryId || !/^[A-Za-z0-9-]{1,128}$/.test(deliveryId) || !eventType) {
+    return c.json({ message: "GitHub delivery headers are required." }, 400);
+  }
+  const rawBody = await c.req.text();
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return c.json({ message: "Webhook payload is not valid JSON." }, 400);
+  }
+  const repository = payload.repository as { id?: unknown } | undefined;
+  const repositoryId = repository && typeof repository.id === "number" ? String(repository.id) : null;
+  if (!repositoryId) return c.json({ message: "Webhook payload does not identify a repository." }, 400);
+
+  const candidates = await c.env.DB.prepare(
+    `SELECT id, organization_id, repository_full_name AS repositoryFullName,
+            github_repository_id AS repositoryId, github_installation_id AS installationId,
+            production_branch AS productionBranch, trusted_workflow_sha AS trustedWorkflowSha,
+            status, auto_deploy, preview_enabled, ignored_build_paths,
+            COALESCE(NULLIF((SELECT s.output_directory FROM application_project_settings s
+                             WHERE s.project_id = github_projects.id AND s.organization_id = github_projects.organization_id), ''),
+                     github_projects.output_directory) AS outputDirectory,
+            webhook_secret_encrypted AS webhookSecretEncrypted, webhook_secret_iv AS webhookSecretIv
+     FROM github_projects WHERE github_repository_id = ?`,
+  ).bind(repositoryId).all<{
+    id: string; organization_id: string; repositoryFullName: string; repositoryId: string;
+    installationId: string | null; productionBranch: string; trustedWorkflowSha: string | null;
+    status: string; auto_deploy: number; preview_enabled: number; ignored_build_paths: string;
+    outputDirectory: string; webhookSecretEncrypted: string | null; webhookSecretIv: string | null;
+  }>();
+
+  // Verify the signature against each candidate project's secret. Only a
+  // verified delivery is attributed and recorded.
+  let verified: (typeof candidates.results)[number] | null = null;
+  if (signatureHeader.startsWith("sha256=")) {
+    const provided = signatureHeader.slice("sha256=".length).toLowerCase();
+    for (const candidate of candidates.results ?? []) {
+      if (!candidate.webhookSecretEncrypted || !candidate.webhookSecretIv) continue;
+      let secret: string;
+      try {
+        secret = await decryptGithubToken(c.env, candidate.webhookSecretEncrypted, candidate.webhookSecretIv);
+      } catch {
+        continue;
+      }
+      const expected = await hmacSha256(secret, rawBody);
+      if (constantTimeEqual(expected, provided)) {
+        verified = candidate;
+        break;
+      }
+    }
+  }
+  if (!verified) return c.json({ message: "Webhook signature verification failed." }, 401);
+
+  // Idempotency: a delivery id is processed exactly once.
+  const replay = await c.env.DB.prepare(
+    "SELECT id FROM github_webhook_deliveries WHERE delivery_id = ? LIMIT 1",
+  ).bind(deliveryId).first<{ id: string }>();
+  if (replay) return c.json({ outcome: "skipped_replay", deliveryId }, 200);
+
+  const verifiedProject = verified;
+  const recordDelivery = async (outcome: string, detail: Record<string, unknown>, branch: string | null, commitSha: string | null) => {
+    await c.env.DB.prepare(
+      `INSERT INTO github_webhook_deliveries (id, organization_id, repository_id, delivery_id, event_type, branch, commit_sha, outcome, detail_redacted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), verifiedProject.organization_id, repositoryId, deliveryId, eventType, branch, commitSha, outcome,
+      JSON.stringify(detail).slice(0, 2000)).run();
+  };
+
+  const project = verifiedProject;
+  const projectContext: DispatchProject = {
+    id: project.id,
+    organizationId: project.organization_id,
+    repositoryId: project.repositoryId,
+    repositoryFullName: project.repositoryFullName,
+    installationId: project.installationId,
+    productionBranch: project.productionBranch,
+    trustedWorkflowSha: project.trustedWorkflowSha,
+    status: project.status,
+    outputDirectory: project.outputDirectory,
+  };
+
+  if (eventType === "push") {
+    const ref = typeof payload.ref === "string" ? payload.ref : "";
+    const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : "";
+    const deleted = payload.after === "0000000000000000000000000000000000000000" || payload.deleted === true;
+    const headCommit = (payload.head_commit ?? {}) as { id?: unknown; message?: unknown };
+    const commitSha = typeof headCommit.id === "string" ? headCommit.id : null;
+    if (!branch) {
+      await recordDelivery("skipped_branch_mismatch", { reason: "payload ref is not a branch head" }, null, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId }, 200);
+    }
+    // Decision order: configuration skips first, then targeting, then
+    // content, then concurrency — so a disabled project never reaches the
+    // more expensive checks.
+    if (project.auto_deploy !== 1) {
+      await recordDelivery("skipped_auto_deploy_disabled", {}, branch, commitSha);
+      return c.json({ outcome: "skipped_auto_deploy_disabled", deliveryId }, 200);
+    }
+    if (deleted) {
+      await recordDelivery("skipped_branch_deleted", {}, branch, commitSha);
+      return c.json({ outcome: "skipped_branch_deleted", deliveryId }, 200);
+    }
+    if (branch !== project.productionBranch) {
+      await recordDelivery("skipped_branch_mismatch", { branch, productionBranch: project.productionBranch }, branch, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId, branch }, 200);
+    }
+    let ignoredPatterns: string[] = [];
+    try {
+      const parsed = JSON.parse(project.ignored_build_paths) as unknown;
+      if (Array.isArray(parsed)) ignoredPatterns = parsed.filter((item): item is string => typeof item === "string");
+    } catch { /* treat as no ignore list */ }
+    const commits = Array.isArray(payload.commits) ? payload.commits as Array<Record<string, unknown>> : [];
+    const changedFiles = new Set<string>();
+    for (const commit of commits) {
+      for (const key of ["added", "modified", "removed"]) {
+        const list = commit[key];
+        if (Array.isArray(list)) for (const file of list) if (typeof file === "string") changedFiles.add(file);
+      }
+    }
+    if (changedFiles.size > 0 && [...changedFiles].every((file) => webhookPathIsIgnored(file, ignoredPatterns))) {
+      await recordDelivery("skipped_ignored_paths", { changedFiles: [...changedFiles].slice(0, 25), ignoredPatterns }, branch, commitSha);
+      return c.json({ outcome: "skipped_ignored_paths", deliveryId }, 200);
+    }
+    const headMessage = typeof headCommit.message === "string" ? headCommit.message : "";
+    if (headMessage.toLowerCase().includes("[skip deploy]")) {
+      await recordDelivery("skipped_commit_message", { headCommitSha: commitSha }, branch, commitSha);
+      return c.json({ outcome: "skipped_commit_message", deliveryId }, 200);
+    }
+    const inFlight = await c.env.DB.prepare(
+      "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
+    ).bind(project.id).first<{ id: string }>();
+    if (inFlight) {
+      await recordDelivery("skipped_in_flight", { deploymentId: inFlight.id }, branch, commitSha);
+      return c.json({ outcome: "skipped_in_flight", deliveryId }, 200);
+    }
+    const response = await dispatchGitHubDeployment(c.env, {
+      project: projectContext,
+      deploymentKind: "production",
+      branch: project.productionBranch,
+      triggerType: "push",
+      actorType: "github_webhook",
+      actorId: null,
+      commitSha,
+      commitMessage: headMessage || null,
+      detailSource: "github_push_webhook",
+    });
+    if (response.status === 202) {
+      const body = await response.json() as { deployment?: { id?: string } };
+      await recordDelivery("dispatched", { deploymentId: body.deployment?.id, deploymentKind: "production" }, branch, commitSha);
+      return c.json({ outcome: "dispatched", deliveryId, deploymentId: body.deployment?.id }, 200);
+    }
+    const body = await response.json() as { message?: string };
+    await recordDelivery("error", { status: response.status, message: body.message ?? "dispatch failed" }, branch, commitSha);
+    return c.json({ outcome: "error", deliveryId, detail: { status: response.status } }, 200);
+  }
+
+  if (eventType === "pull_request") {
+    const action = typeof payload.action === "string" ? payload.action : "";
+    const pullRequest = (payload.pull_request ?? {}) as {
+      head?: { ref?: unknown; sha?: unknown };
+    };
+    const branch = pullRequest.head && typeof pullRequest.head.ref === "string" ? pullRequest.head.ref : "";
+    const commitSha = pullRequest.head && typeof pullRequest.head.sha === "string" ? pullRequest.head.sha : null;
+    if (project.preview_enabled !== 1) {
+      await recordDelivery("skipped_preview_disabled", { action }, branch || null, commitSha);
+      return c.json({ outcome: "skipped_preview_disabled", deliveryId }, 200);
+    }
+    if (!["opened", "synchronize", "reopened"].includes(action)) {
+      await recordDelivery("skipped_pull_request_closed", { action }, branch || null, commitSha);
+      return c.json({ outcome: "skipped_pull_request_closed", deliveryId }, 200);
+    }
+    if (!branch) {
+      await recordDelivery("skipped_branch_mismatch", { reason: "payload does not identify the pull request branch" }, null, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId }, 200);
+    }
+    const inFlight = await c.env.DB.prepare(
+      "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
+    ).bind(project.id).first<{ id: string }>();
+    if (inFlight) {
+      await recordDelivery("skipped_in_flight", { deploymentId: inFlight.id }, branch, commitSha);
+      return c.json({ outcome: "skipped_in_flight", deliveryId }, 200);
+    }
+    const response = await dispatchGitHubDeployment(c.env, {
+      project: projectContext,
+      deploymentKind: "preview",
+      branch,
+      triggerType: "push",
+      actorType: "github_webhook",
+      actorId: null,
+      commitSha,
+      detailSource: "github_pull_request_webhook",
+    });
+    if (response.status === 202) {
+      const body = await response.json() as { deployment?: { id?: string } };
+      await recordDelivery("dispatched", { deploymentId: body.deployment?.id, deploymentKind: "preview", pullRequestAction: action }, branch, commitSha);
+      return c.json({ outcome: "dispatched", deliveryId, deploymentId: body.deployment?.id, deploymentKind: "preview" }, 200);
+    }
+    const body = await response.json() as { message?: string };
+    await recordDelivery("error", { status: response.status, message: body.message ?? "dispatch failed" }, branch, commitSha);
+    return c.json({ outcome: "error", deliveryId, detail: { status: response.status } }, 200);
+  }
+
+  // Other event types (ping, installation, ...) are acknowledged but never deploy.
+  await recordDelivery("skipped_branch_mismatch", { reason: `unhandled event type ${eventType}` }, null, null);
+  return c.json({ outcome: "skipped_branch_mismatch", deliveryId, unhandledEvent: eventType }, 200);
+});
+
+// Promotion: re-point the production alias at a preview deployment's release
+// without rebuilding. The artifact, digest, and release stay untouched — this
+// is a routing switch, the same primitive rollback uses in reverse.
+app.post("/v1/github/projects/:projectId/deployments/:deploymentId/promote", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const deploymentId = c.req.param("deploymentId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(deploymentId)) {
+    return c.json({ message: "Invalid identifier" }, 400);
+  }
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const deployment = await c.env.DB.prepare(
+    `SELECT d.id, d.deployment_kind AS deploymentKind, d.status, d.branch,
+            r.id AS releaseId, r.state AS releaseState, r.artifact_digest AS artifactDigest
+     FROM github_deployments d
+     LEFT JOIN application_releases r ON r.deployment_id = d.id AND r.organization_id = d.organization_id
+     WHERE d.id = ? AND d.project_id = ? AND d.organization_id = ? LIMIT 1`,
+  ).bind(deploymentId, projectId, project.organization_id).first<{
+    id: string; deploymentKind: string; status: string; branch: string | null;
+    releaseId: string | null; releaseState: string | null; artifactDigest: string | null;
+  }>();
+  if (!deployment) return c.json({ message: "Deployment not found for this project." }, 404);
+  if (deployment.deploymentKind !== "preview") {
+    return c.json({ message: "Only preview deployments can be promoted." }, 409);
+  }
+  if (deployment.status !== "succeeded" || deployment.releaseState !== "succeeded" || !deployment.artifactDigest) {
+    return c.json({ message: "Only a healthy preview deployment with a published artifact can be promoted." }, 409);
+  }
+  const productionAlias = await c.env.DB.prepare(
+    "SELECT id, alias FROM application_deployment_aliases WHERE project_id = ? AND organization_id = ? AND kind = 'production' LIMIT 1",
+  ).bind(projectId, project.organization_id).first<{ id: string; alias: string }>();
+  if (!productionAlias) {
+    return c.json({ message: "No production deployment exists yet; promote after the first production release is live." }, 409);
+  }
+  if (productionAlias.alias === previewAliasHostname(deploymentId, projectId, deployDomain(c.env))) {
+    return c.json({ message: "This preview deployment is already serving production traffic." }, 409);
+  }
+
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_deployment_aliases SET release_id = ?, deployment_id = ?, status = 'active', updated_at = datetime('now') " +
+      "WHERE id = ? AND organization_id = ? AND kind = 'production'",
+    ).bind(deployment.releaseId, deploymentId, productionAlias.id, project.organization_id),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'succeeded', 'succeeded', 'user', ?, 'promoted_to_production', ? " +
+      "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'succeeded'",
+    ).bind(crypto.randomUUID(), identity.id,
+      JSON.stringify({ promotedDeploymentId: deploymentId, alias: productionAlias.alias }),
+      deployment.releaseId, project.organization_id),
+  ]);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Promotion could not be committed safely; the production alias is unchanged." }, 409);
+  }
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.preview_promoted', 'github_deployment', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, deploymentId,
+      JSON.stringify({ alias: productionAlias.alias, releaseId: deployment.releaseId })).run();
+  return c.json({
+    promoted: true,
+    alias: productionAlias.alias,
+    productionReleaseId: deployment.releaseId,
+    sourceDeploymentId: deploymentId,
+    message: "Production traffic now serves the preview deployment's artifact. No rebuild was performed.",
+  });
+});
+
 
 
 // Runtime catalog is metadata only. Disabled profiles cannot be selected for execution.
@@ -9514,6 +9928,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   const release = await c.env.DB.prepare(
     "SELECT r.id AS releaseRowId, r.state, r.artifact_digest AS artifactDigest, " +
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
+    "d.deployment_kind AS deploymentKind, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
     "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
     "previous.artifact_digest AS previousArtifactDigest, previous_node.id AS previousActiveNodeId, " +
@@ -9527,7 +9942,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
-    deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
+    deploymentArtifactDigest: string | null; projectId: string; deploymentKind: string;
+    organizationId: string;
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
     previousArtifactDigest: string | null;
@@ -9645,6 +10061,29 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
+    // Alias activation: the moment a release passes its health check it
+    // becomes the traffic target for its deployment kind. Production
+    // releases take over the project's stable production hostname; preview
+    // releases claim their per-deployment preview hostname. Promotion and
+    // rollback later re-point the production alias without rebuilding.
+    ...(release.deploymentKind === "production"
+      ? [c.env.DB.prepare(
+          "INSERT INTO application_deployment_aliases (id, organization_id, project_id, alias, kind, status, release_id, deployment_id) " +
+          "VALUES (?, ?, ?, ?, 'production', 'active', ?, ?) " +
+          "ON CONFLICT(alias, kind) DO UPDATE SET release_id = excluded.release_id, " +
+          "deployment_id = excluded.deployment_id, status = 'active', updated_at = datetime('now')",
+        ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+          productionAliasHostname(release.projectId, deployDomain(c.env)),
+          release.releaseRowId, body.deploymentId)]
+      : release.deploymentKind === "preview"
+        ? [c.env.DB.prepare(
+            "INSERT INTO application_deployment_aliases (id, organization_id, project_id, alias, kind, status, release_id, deployment_id) " +
+            "VALUES (?, ?, ?, ?, 'preview', 'active', ?, ?) " +
+            "ON CONFLICT(deployment_id, kind) DO UPDATE SET status = 'active', updated_at = datetime('now')",
+          ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+            previewAliasHostname(body.deploymentId, release.projectId, deployDomain(c.env)),
+            release.releaseRowId, body.deploymentId)]
+        : []),
   ] : [
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), " +
