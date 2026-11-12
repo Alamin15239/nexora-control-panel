@@ -410,23 +410,20 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                   <p className="mt-1 text-xs font-medium text-slate-600">{connection?.installed ? "Nexora GitHub App installed · repository access enabled" : "GitHub authorized; Nexora GitHub App installation required."}</p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {!connection?.installed && (
-                    <button onClick={installGithubApp} disabled={busy} className="nx-btn bg-navy-950 text-white shadow-sm hover:bg-navy-900"><Github size={15} /> Install Nexora GitHub App</button>
-                  )}
-                  <ShieldCheck size={16} className="text-emerald-600" />
+                  <button
+                    onClick={installGithubApp}
+                    disabled={busy}
+                    className="nx-btn bg-navy-950 text-white shadow-sm hover:bg-navy-900"
+                    title="Start a fresh, state-protected GitHub App installation or repair flow"
+                  >
+                    <Github size={15} /> Install / repair Nexora GitHub App
+                  </button>
                 </div>
               </div>
             )}
           </SectionCard>
 
-          {connected && !connection?.installed && (
-            <SectionCard
-              title="Install the Nexora GitHub App"
-              description="OAuth authorization is complete. Install the GitHub App on your personal account or organization, then select the repositories Nexora may access."
-            >
-              <button onClick={installGithubApp} disabled={busy} className="nx-btn-primary"><Github size={16} /> Continue to GitHub App installation</button>
-            </SectionCard>
-          )}
+
           {connected && connection?.installed && (
             <SectionCard
               title="Link a repository"
