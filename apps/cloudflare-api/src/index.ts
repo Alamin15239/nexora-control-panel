@@ -21,6 +21,7 @@ type Bindings = {
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_APP_SLUG?: string;
   GITHUB_OIDC_AUDIENCE?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID?: string;
@@ -6605,6 +6606,64 @@ async function githubApi(token: string, path: string): Promise<Response> {
   });
 }
 
+type GithubApiDetail = {
+  status: number;
+  ok: boolean;
+  requestId: string | null;
+  rateLimitRemaining: number | null;
+  rateLimitReset: string | null;
+  retryAfter: number | null;
+  body: unknown | null;
+};
+
+// Performs a GitHub API call and captures safe diagnostics (request id, rate
+// limit headers, parsed JSON). The Authorization header and tokens are never
+// included in the returned detail, logs, or API responses.
+async function githubApiDetail(token: string, path: string): Promise<GithubApiDetail> {
+  const response = await githubApi(token, path);
+  const remainingRaw = response.headers.get("x-ratelimit-remaining");
+  const resetRaw = response.headers.get("x-ratelimit-reset");
+  const retryAfterRaw = response.headers.get("retry-after");
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return {
+    status: response.status,
+    ok: response.ok,
+    requestId: response.headers.get("x-github-request-id"),
+    rateLimitRemaining: remainingRaw === null ? null : Number.parseInt(remainingRaw, 10),
+    rateLimitReset: resetRaw === null || Number.isNaN(Number.parseInt(resetRaw, 10))
+      ? null
+      : new Date(Number.parseInt(resetRaw, 10) * 1000).toISOString(),
+    retryAfter: retryAfterRaw === null || Number.isNaN(Number.parseInt(retryAfterRaw, 10))
+      ? null
+      : Number.parseInt(retryAfterRaw, 10),
+    body,
+  };
+}
+
+// Extracts GitHub's own (safe) error message from a JSON body when present.
+function githubErrorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const record = body as Record<string, unknown>;
+  if (typeof record.message === "string" && record.message.length > 0 && record.message.length <= 400) {
+    return record.message;
+  }
+  return null;
+}
+
+function githubDetailPayload(detail: GithubApiDetail | null): { requestId?: string; rateLimitRemaining?: number; rateLimitReset?: string } {
+  if (!detail) return {};
+  const payload: { requestId?: string; rateLimitRemaining?: number; rateLimitReset?: string } = {};
+  if (detail.requestId) payload.requestId = detail.requestId;
+  if (detail.rateLimitRemaining !== null && Number.isFinite(detail.rateLimitRemaining)) payload.rateLimitRemaining = detail.rateLimitRemaining;
+  if (detail.rateLimitReset) payload.rateLimitReset = detail.rateLimitReset;
+  return payload;
+}
+
 app.get("/v1/github/connection", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
@@ -6711,29 +6770,244 @@ app.get("/v1/github/repositories", async (c) => {
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect a GitHub account first." }, 409);
+
+  const CONFIG_REQUIREMENTS = "GITHUB_TOKEN_ENCRYPTION_KEY (64 hex chars) must be configured to read stored credentials.";
+
+  let token: string;
   try {
-    const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
-    const installationsResponse = await githubApi(token, "/user/installations?per_page=100");
-    if (!installationsResponse.ok) return c.json({ message: "Unable to list GitHub App installations. Reinstall the Nexora GitHub App with repository access." }, 502);
-    const installationsData = await installationsResponse.json() as { installations?: Array<{ id: number; account?: { login?: string } }> };
-    const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
-    for (const installation of (installationsData.installations ?? []).slice(0, 25)) {
-      if (!Number.isSafeInteger(installation.id)) continue;
-      const response = await githubApi(token, `/user/installations/${installation.id}/repositories?per_page=100`);
-      if (!response.ok) continue;
-      const data = await response.json() as { repositories?: Array<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }> };
-      for (const repo of data.repositories ?? []) {
-        if (Number.isSafeInteger(repo.id) && repo.full_name && repo.name && repo.default_branch) repositories.push({
-          id: repo.id, name: repo.name, fullName: repo.full_name, private: Boolean(repo.private),
-          defaultBranch: repo.default_branch, htmlUrl: repo.html_url, installationId: installation.id, owner: repo.owner?.login ?? installation.account?.login ?? "",
-        });
+    token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    console.error("GitHub repositories: credential resolution failed:", detail);
+    // Never log tokens; the thrown messages describe the failure class only.
+    if (/GitHub authorization expired/i.test(detail)) {
+      return c.json({
+        error: "github_authorization_expired",
+        message: "GitHub authorization expired. Reconnect the Nexora GitHub App from this page and try again.",
+      }, 409);
+    }
+    return c.json({
+      error: "credential_resolution_failed",
+      message: `Unable to read the stored GitHub credentials. ${CONFIG_REQUIREMENTS}`,
+    }, 502);
+  }
+
+  type InstallationRow = { id: number; account: string | null; repositorySelection: string | null; suspended: boolean; permissionIssues: string[] };
+  const installations: InstallationRow[] = [];
+  const installationErrors: Array<{ installationId: number; account: string | null; status: number; message: string; requestId?: string }> = [];
+  const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
+  let lastDetail: GithubApiDetail | null = null;
+  let appSlug: string | null = null;
+  let clientConfigMismatch = false;
+
+  try {
+    // Verify the configured App identity directly with the GitHub API. GET /app
+    // authenticates with the App JWT, so this confirms GITHUB_APP_ID/PRIVATE_KEY
+    // describe a real, enabled app and returns its public slug for the
+    // installation link. If GitHub echoes client_id we can also detect a
+    // mismatch between the OAuth client and the App used for installations.
+    if (envHasAppCredentials(c.env)) {
+      try {
+        const appJwt = await githubAppJwt(c.env);
+        const appDetail = await githubApiDetail(`Bearer ${appJwt}`, "/app");
+        lastDetail = appDetail;
+        if (appDetail.ok && appDetail.body && typeof appDetail.body === "object") {
+          const appInfo = appDetail.body as { slug?: unknown; client_id?: unknown };
+          if (typeof appInfo.slug === "string" && appInfo.slug) appSlug = appInfo.slug;
+          if (typeof appInfo.client_id === "string" && appInfo.client_id &&
+              c.env.GITHUB_APP_CLIENT_ID && appInfo.client_id !== c.env.GITHUB_APP_CLIENT_ID) {
+            clientConfigMismatch = true;
+          }
+        }
+      } catch (error) {
+        console.error("GitHub repositories: app identity check failed:", error instanceof Error ? error.message : "unknown error");
       }
     }
-    return c.json({ repositories });
-  } catch {
-    return c.json({ message: "Unable to read GitHub repositories. Reconnect the GitHub App and try again." }, 502);
+
+    // GET /user/installations uses the user access token and lists only
+    // installations of the App that issued that token. Paginate honestly.
+    const MAX_INSTALLATION_PAGES = 10;
+    const MAX_INSTALLATIONS = 50;
+    for (let page = 1; page <= MAX_INSTALLATION_PAGES && installations.length < MAX_INSTALLATIONS; page++) {
+      const detail = await githubApiDetail(token, `/user/installations?per_page=100&page=${page}`);
+      lastDetail = detail;
+      if (!detail.ok) return githubListErrorResponse(c, detail, "list GitHub App installations");
+      const data = detail.body as { installations?: Array<{ id?: unknown; account?: { login?: unknown }; repository_selection?: unknown; suspended_at?: unknown }> } | null;
+      const rows = data?.installations ?? [];
+      for (const row of rows) {
+        if (installations.length >= MAX_INSTALLATIONS) break;
+        if (!Number.isSafeInteger(row.id)) continue;
+        installations.push({
+          id: row.id as number,
+          account: typeof row.account?.login === "string" ? row.account.login : null,
+          repositorySelection: typeof row.repository_selection === "string" ? row.repository_selection : null,
+          suspended: typeof row.suspended_at === "string" && row.suspended_at.length > 0,
+          permissionIssues: [],
+        });
+      }
+      if (rows.length < 100) break;
+    }
+
+    if (installations.length === 0) {
+      const installationUrl = appSlug
+        ? `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new`
+        : (c.env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(c.env.GITHUB_APP_SLUG)}/installations/new` : null);
+      const mismatchNotice = clientConfigMismatch
+        ? " Additionally, the configured GITHUB_APP_CLIENT_ID does not match the GitHub App identified by GITHUB_APP_ID; fix this configuration before reconnecting."
+        : "";
+      return c.json({
+        repositories,
+        installations,
+        installationErrors,
+        app: { slug: appSlug, installationUrl, clientConfigMismatch: clientConfigMismatch || undefined },
+        github: githubDetailPayload(lastDetail),
+        message: `The connected GitHub account has no Nexora GitHub App installations. OAuth authorization alone does not grant repository access: install the GitHub App${installationUrl ? ` at ${installationUrl}` : ""} and grant it access to the repositories you want to deploy.${mismatchNotice}`,
+      });
+    }
+
+    // Per-installation repository discovery with pagination. Errors are
+    // surfaced per installation instead of silently skipped.
+    const MAX_REPO_PAGES = 10;
+    for (const installation of installations) {
+      let pagesFetched = 0;
+      let page = 1;
+      while (pagesFetched < MAX_REPO_PAGES) {
+        const detail = await githubApiDetail(token, `/user/installations/${installation.id}/repositories?per_page=100&page=${page}`);
+        lastDetail = detail;
+        if (!detail.ok) {
+          const upstream = githubErrorMessage(detail.body);
+          const rateLimited = detail.status === 403 && detail.rateLimitRemaining === 0;
+          installationErrors.push({
+            installationId: installation.id,
+            account: installation.account,
+            status: detail.status,
+            message: rateLimited
+              ? "GitHub API rate limit exceeded while listing repositories."
+              : detail.status === 401
+                ? "GitHub rejected the stored authorization for this installation."
+                : detail.status === 403 && upstream && /not accessible/i.test(upstream)
+                  ? "The stored authorization cannot list this installation's repositories. Reconnect the Nexora GitHub App so the user token is issued by the same App."
+                  : upstream ?? `GitHub returned ${detail.status} while listing repositories.`,
+            requestId: detail.requestId ?? undefined,
+          });
+          break;
+        }
+        const data = detail.body as { repositories?: Array<{ id?: unknown; name?: unknown; full_name?: unknown; private?: unknown; default_branch?: unknown; html_url?: unknown; owner?: { login?: unknown } }> } | null;
+        const rows = data?.repositories ?? [];
+        for (const repo of rows) {
+          if (!Number.isSafeInteger(repo.id) || typeof repo.full_name !== "string" ||
+              typeof repo.name !== "string" || typeof repo.default_branch !== "string") continue;
+          repositories.push({
+            id: repo.id as number, name: repo.name, fullName: repo.full_name,
+            private: Boolean(repo.private), defaultBranch: repo.default_branch,
+            htmlUrl: typeof repo.html_url === "string" ? repo.html_url : `https://github.com/${repo.full_name}`,
+            installationId: installation.id,
+            owner: typeof repo.owner?.login === "string" ? repo.owner.login : installation.account ?? "",
+          });
+        }
+        if (rows.length < 100) break;
+        page++;
+        pagesFetched++;
+      }
+    }
+
+    // Verify App-level installation permissions with the App JWT so missing
+    // Metadata/Contents access is reported precisely instead of surfacing as
+    // a generic repository-list failure.
+    if (envHasAppCredentials(c.env)) {
+      for (const installation of installations.slice(0, 25)) {
+        try {
+          const appJwt = await githubAppJwt(c.env);
+          const detail = await githubApiDetail(`Bearer ${appJwt}`, `/app/installations/${installation.id}`);
+          lastDetail = detail;
+          if (!detail.ok || !detail.body || typeof detail.body !== "object") continue;
+          const info = detail.body as { permissions?: Record<string, unknown>; suspended_at?: unknown };
+          const permissions = info.permissions ?? {};
+          if (permissions.metadata !== "read") installation.permissionIssues.push("metadata:read");
+          if (permissions.contents !== "read") installation.permissionIssues.push("contents:read");
+          if (typeof info.suspended_at === "string" && info.suspended_at) installation.suspended = true;
+        } catch (error) {
+          console.error("GitHub repositories: installation permission check failed:", error instanceof Error ? error.message : "unknown error");
+        }
+      }
+    }
+
+    const installationUrl = appSlug
+      ? `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new`
+      : (c.env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(c.env.GITHUB_APP_SLUG)}/installations/new` : null);
+    return c.json({
+      repositories,
+      installations,
+      installationErrors,
+      app: { slug: appSlug, installationUrl, clientConfigMismatch: clientConfigMismatch || undefined },
+      github: githubDetailPayload(lastDetail),
+      message: installationErrors.length > 0
+        ? "Some installations could not be listed. Their errors are reported in installationErrors."
+        : undefined,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    console.error("GitHub repositories: discovery failed:", detail);
+    return c.json({
+      error: "github_unreachable",
+      message: "GitHub could not be reached while listing repositories. Check network connectivity and try again.",
+      github: githubDetailPayload(lastDetail),
+    }, 502);
   }
 });
+
+// Maps a failed GitHub API response during installation/repository listing to
+// a specific, actionable API error. Request ids and rate-limit headers are
+// surfaced safely; tokens and authorization headers never leave the server.
+function githubListErrorResponse(c: { json: (body: unknown, status?: number) => Response }, detail: GithubApiDetail, action: string): Response {
+  const upstream = githubErrorMessage(detail.body);
+  const github = githubDetailPayload(detail);
+  if (detail.status === 401) {
+    return c.json({
+      error: "github_authorization_invalid",
+      message: `GitHub rejected the stored authorization with 401 while trying to ${action}. Reconnect the Nexora GitHub App to refresh it.`,
+      github,
+    }, 409);
+  }
+  if (detail.status === 403 && detail.rateLimitRemaining === 0) {
+    return c.json({
+      error: "github_rate_limited",
+      message: `GitHub API rate limit exceeded while trying to ${action}. Try again after the reset time.`,
+      retryAfterSeconds: detail.retryAfter ?? undefined,
+      github,
+    }, 429);
+  }
+  if (detail.status === 403) {
+    return c.json({
+      error: "github_forbidden",
+      message: `GitHub denied the request to ${action} (403)${upstream ? `: ${upstream}` : ""}. This usually means the OAuth authorization and the Nexora GitHub App are not the same App, or the user no longer has access to the installation. Reconnect the GitHub App and verify the installation.`,
+      github,
+    }, 403);
+  }
+  if (detail.status === 404) {
+    return c.json({
+      error: "github_not_found",
+      message: `GitHub could not find the resource needed to ${action} (404). The installation may have been removed. Reconnect the GitHub App and verify the installation.`,
+      github,
+    }, 409);
+  }
+  if (detail.status === 422) {
+    return c.json({
+      error: "github_unprocessable",
+      message: `GitHub could not process the request to ${action} (422)${upstream ? `: ${upstream}` : ""}.`,
+      github,
+    }, 502);
+  }
+  return c.json({
+    error: "github_upstream",
+    message: `GitHub returned ${detail.status} while trying to ${action}${upstream ? `: ${upstream}` : ""}.`,
+    github,
+  }, 502);
+}
+
+function envHasAppCredentials(env: Bindings): boolean {
+  return Boolean(env.GITHUB_APP_ID && /^\d+$/.test(env.GITHUB_APP_ID) && env.GITHUB_APP_PRIVATE_KEY);
+}
 
 app.post("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);

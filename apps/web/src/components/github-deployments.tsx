@@ -194,6 +194,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   const [projects, setProjects] = useState<Project[]>([]);
   const [deploymentsByProject, setDeploymentsByProject] = useState<Record<string, Deployment[]>>({});
   const [selectedRepository, setSelectedRepository] = useState("");
+  const [installationUrl, setInstallationUrl] = useState<string | null>(null);
   const [hostingAccountId, setHostingAccountId] = useState("");
   const [branch, setBranch] = useState("main");
   const [rootDirectory, setRootDirectory] = useState(".");
@@ -241,6 +242,9 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Unable to load repositories.");
       setRepositories(data.repositories ?? []);
+      setInstallationUrl(typeof data.app?.installationUrl === "string" ? data.app.installationUrl : null);
+      if (!data.repositories?.length && data.message) setNotice(data.message);
+      else if (!data.repositories?.length) setNotice("");
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load repositories."); }
     finally { setBusy(false); }
   }, [connected]);
@@ -288,7 +292,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       const response = await fetch("/api/control/github/connection", { method: "DELETE" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Unable to disconnect GitHub.");
-      setRepositories([]); setConnected(false); setConnection(null); setNotice("GitHub account disconnected."); await load();
+      setRepositories([]); setConnected(false); setConnection(null); setInstallationUrl(null); setNotice("GitHub account disconnected."); await load();
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to disconnect GitHub."); }
     finally { setBusy(false); }
   }
@@ -321,7 +325,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
             <label className="space-y-1.5 text-sm font-medium text-slate-700">Build output directory<input required value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" placeholder="dist"/></label>
             <div className="md:col-span-2"><button type="submit" disabled={busy || !selected || !hostingAccountId} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><Link2 size={16}/> Save repository configuration</button></div>
           </form>
-          {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
+          {!repositories.length && <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600"><p className="font-semibold text-slate-800">No repositories are visible yet.</p><p className="mt-1">Connecting the GitHub account authorizes OAuth sign-in; repositories only appear after the Nexora GitHub App is <span className="font-medium">installed</span> and granted repository access.{installationUrl && <> Install or update it at <a href={installationUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-blue-700 hover:underline">GitHub App installation <ExternalLink size={11}/></a>, then use “Refresh repositories”.</>}</p></div>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
           {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><div className="border-t border-slate-100 px-6 py-4">
