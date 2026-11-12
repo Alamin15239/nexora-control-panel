@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Activity, AlertTriangle, CheckCircle2, ChevronDown, Cloud,
-  FolderOpen, HardDrive, LockKeyhole, Mail, Network, Plus, RefreshCw,
-  Server, ShieldCheck, Trash2, Users, X,
+  Activity, AlertTriangle, CheckCircle2, Database, FolderOpen,
+  Globe2, HardDrive, LockKeyhole, Mail, Network, Plus, RefreshCw, Server,
+  ShieldCheck, Trash2, Users, Github, Boxes, CreditCard, LogOut,
 } from "lucide-react";
+import {
+  EmptyState, InlineAlert, Meter, Modal, NexoraMark, PageHeader,
+  SectionCard, StatCard, StatusBadge, statusTone,
+} from "@/components/ui";
 
 type HostingAccount = {
   id: string;
@@ -26,11 +30,14 @@ type AccountOverview = HostingAccount & { websites: number; databases: number };
 type CustomerDomain = { id: string; name: string; document_root: string; is_primary: number; job_status: string | null; created_at: string };
 type CustomerDatabase = { id: string; name: string; engine: string; status: string; active_users: number; created_at: string };
 
-const modules = [
-  { label: "File Manager", description: "Browse and manage website files", icon: FolderOpen },
-  { label: "Email Accounts", description: "Managed by your hosting administrator", icon: Mail },
-  { label: "DNS Zones", description: "Managed by your hosting administrator", icon: Network },
-  { label: "Backups", description: "Review and restore account backups", icon: HardDrive },
+// Service areas rendered as quick actions on the dashboard. File, mail, DNS and
+// backup services are operated by the hosting administrator in this release;
+// the tiles explain that honestly instead of pretending in-panel management.
+const managedModules = [
+  { label: "File Manager", description: "Website files and document roots", icon: FolderOpen, note: "File Manager" },
+  { label: "Email Accounts", description: "Mailboxes and delivery", icon: Mail, note: "Email accounts" },
+  { label: "DNS Zones", description: "Records and routing", icon: Network, note: "DNS zones" },
+  { label: "Backups", description: "Account archives and recovery", icon: HardDrive, note: "Backups" },
 ];
 
 function formatBytes(value: number | null): string {
@@ -64,6 +71,7 @@ export default function CustomerCpanelPage() {
   const [domains, setDomains] = useState<CustomerDomain[]>([]);
   const [databases, setDatabases] = useState<CustomerDatabase[]>([]);
   const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [lockedTool, setLockedTool] = useState("");
   // Dialog + mutation state
   const [addDomainOpen, setAddDomainOpen] = useState(false);
   const [domainName, setDomainName] = useState("");
@@ -247,135 +255,346 @@ export default function CustomerCpanelPage() {
   }
 
   if (loading) {
-    return <main className="grid min-h-screen place-items-center bg-slate-50"><div className="text-center"><div className="mx-auto h-9 w-9 animate-spin rounded-full border-2 border-slate-200 border-t-blue-700" /><p className="mt-4 text-sm text-slate-500">Loading your hosting workspace…</p></div></main>;
+    return (
+      <main className="grid min-h-screen place-items-center bg-canvas">
+        <div className="text-center">
+          <span className="mx-auto inline-block h-9 w-9 animate-spin rounded-full border-2 border-slate-200 border-t-brand-600" />
+          <p className="mt-4 text-sm text-slate-500">Loading your hosting workspace…</p>
+        </div>
+      </main>
+    );
   }
 
   const domainMutationAllowed = overview ? canManageDomains(overview.account_role) : false;
   const databaseMutationAllowed = overview ? canManageDatabases(overview.account_role) : false;
 
-  return <main className="min-h-screen bg-[#f5f7fb] text-slate-900">
-    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
-      <div className="mx-auto flex h-[72px] max-w-[1500px] items-center justify-between gap-4 px-5 sm:px-8">
-        <div className="flex items-center gap-3">
-          <span className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white shadow-sm"><Cloud size={21} /></span>
-          <div><p className="text-[15px] font-bold tracking-tight">Nexora <span className="text-blue-700">cPanel</span></p><p className="text-[10px] font-medium uppercase tracking-[.17em] text-slate-400">Customer hosting</p></div>
-        </div>
-        <div className="flex items-center gap-2 sm:gap-3">
-          {accounts.length > 0 && <label className="relative flex max-w-[220px] items-center">
-            <select aria-label="Select hosting account" value={selectedId} onChange={event => setSelectedId(event.target.value)} className="w-full appearance-none rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-3 pr-9 text-xs font-semibold text-slate-700 outline-none focus:border-blue-400">
-              {accounts.map(account => <option key={account.id} value={account.id}>{account.primary_domain || account.username}</option>)}
-            </select><ChevronDown size={14} className="pointer-events-none absolute right-3 text-slate-400" />
-          </label>}
-          <button onClick={() => router.push("/customer/deploy")} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Nexora Deploy</button>
-          <button onClick={() => router.push("/plans")} className="rounded-xl bg-blue-700 px-3 py-2.5 text-xs font-semibold text-white hover:bg-blue-800">Buy hosting</button>
-          <button onClick={() => void loadAccounts()} disabled={refreshing} className="rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-slate-50 disabled:opacity-50" aria-label="Refresh accounts"><RefreshCw size={16} className={refreshing ? "animate-spin" : ""} /></button>
-          <button onClick={() => void signOut()} className="rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-500 hover:bg-slate-100">Sign out</button>
-        </div>
-      </div>
-    </header>
-
-    <div className="mx-auto grid max-w-[1500px] gap-7 px-5 py-8 sm:px-8 lg:grid-cols-[230px_minmax(0,1fr)]">
-      <aside className="hidden lg:block">
-        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
-          <p className="px-3 pb-3 pt-2 text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Hosting</p>
-          <div className="flex items-center gap-3 rounded-xl bg-blue-50 px-3 py-3 text-sm font-semibold text-blue-800"><Activity size={17} /> Account Overview</div>
-          <div className="mt-4 border-t border-slate-100 px-3 pt-4"><p className="text-[10px] font-bold uppercase tracking-[.16em] text-slate-400">Account tools</p>
-            <div className="mt-3 space-y-3">{modules.map(module => <div key={module.label} className="flex items-center gap-3 text-xs text-slate-400"><module.icon size={16} /><span>{module.label}</span><LockKeyhole size={12} className="ml-auto" /></div>)}</div>
+  return (
+    <main className="min-h-screen bg-canvas text-slate-900">
+      <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-gradient-to-r from-navy-950 via-navy-950 to-navy-900">
+        <div className="mx-auto flex h-[72px] max-w-[1500px] items-center justify-between gap-4 px-5 sm:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            <NexoraMark size={38} />
+            <div className="min-w-0">
+              <p className="text-[15px] font-bold tracking-tight text-white">Nexora <span className="text-brand-300">Hosting</span></p>
+              <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">Customer workspace</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 sm:gap-2.5">
+            {accounts.length > 0 && (
+              <label className="relative flex max-w-[230px] items-center">
+                <select aria-label="Select hosting account" value={selectedId} onChange={event => setSelectedId(event.target.value)} className="nx-select border-white/10 bg-white/[0.07] text-xs font-semibold text-white shadow-none [&>option]:text-slate-900">
+                  {accounts.map(account => <option key={account.id} value={account.id}>{account.primary_domain || account.username}</option>)}
+                </select>
+              </label>
+            )}
+            <button onClick={() => router.push("/customer/deploy")} className="hidden items-center gap-2 rounded-xl border border-white/10 bg-white/[0.07] px-3.5 py-2.5 text-xs font-semibold text-slate-100 transition hover:bg-white/[0.12] sm:inline-flex">
+              <Github size={14} /> Nexora Deploy
+            </button>
+            <button onClick={() => router.push("/plans")} className="nx-btn nx-btn-sm bg-brand-600 px-3.5 py-2.5 text-xs font-semibold text-white shadow-sm hover:bg-brand-700">
+              <CreditCard size={14} /> Buy hosting
+            </button>
+            <button onClick={() => void loadAccounts()} disabled={refreshing} className="rounded-xl border border-white/10 p-2.5 text-slate-400 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-50" aria-label="Refresh accounts">
+              <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
+            </button>
+            <button onClick={() => void signOut()} className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2.5 text-xs font-semibold text-slate-400 transition hover:bg-white/[0.08] hover:text-white" aria-label="Sign out">
+              <LogOut size={14} /> <span className="hidden sm:inline">Sign out</span>
+            </button>
           </div>
         </div>
-        <div className="mt-4 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><div className="flex items-center gap-2 text-xs font-semibold text-emerald-800"><ShieldCheck size={15} /> Account-scoped access</div><p className="mt-2 text-[11px] leading-5 text-emerald-700">Your account list, overview, and resource actions are restricted to active assignments for your login.</p></div>
-      </aside>
+      </header>
 
-      <section className="min-w-0">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div><p className="text-xs font-semibold uppercase tracking-[.18em] text-blue-700">Customer control panel</p><h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-950">Hosting dashboard</h1><p className="mt-2 text-sm text-slate-500">Manage the hosting accounts assigned to your Nexora login.</p></div>
-          {overview && <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800"><CheckCircle2 size={14} /> {roleLabel(overview.account_role)} access</span>}
-        </div>
+      <div className="mx-auto max-w-[1500px] px-5 py-8 sm:px-8">
+        <PageHeader
+          eyebrow="Customer control panel"
+          title="Hosting dashboard"
+          description="Manage the hosting accounts assigned to your Nexora login."
+          actions={overview && <StatusBadge tone="success" dot>{roleLabel(overview.account_role)} access</StatusBadge>}
+        />
 
-        {error && <div role="alert" className="mt-6 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"><span className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" />{error}</span><button onClick={() => setError("")} aria-label="Dismiss error" className="text-rose-400 hover:text-rose-600"><X size={15} /></button></div>}
-        {notice && <div role="status" className="mt-6 flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"><span className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 shrink-0" />{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss message" className="text-emerald-400 hover:text-emerald-600"><X size={15} /></button></div>}
+        {error && <InlineAlert tone="error" onDismiss={() => setError("")} className="mt-6">{error}</InlineAlert>}
+        {notice && <InlineAlert tone="success" onDismiss={() => setNotice("")} className="mt-6">{notice}</InlineAlert>}
+        {lockedTool && (
+          <InlineAlert tone="info" onDismiss={() => setLockedTool("")} className="mt-6">
+            <span className="font-semibold">{lockedTool}</span> is operated by your hosting administrator in the current release. Your account data for this service stays protected on the platform; ask your administrator to provision or restore it for you.
+          </InlineAlert>
+        )}
 
-        {!accounts.length ? <div className="mt-7 rounded-3xl border border-dashed border-slate-300 bg-white px-6 py-16 text-center">
-          <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-blue-50 text-blue-700"><Server size={25} /></span>
-          <h2 className="mt-5 text-lg font-semibold text-slate-900">No hosting accounts assigned</h2>
-          <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">Your Nexora login is active, but no hosting account has been assigned to it yet. Ask your hosting administrator to grant access to an account.</p>
-        </div> : !overview ? <div className="mt-7 rounded-2xl border border-slate-200 bg-white p-8 text-sm text-slate-500">Loading account details…</div> : <>
-          <div className="mt-7 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs text-slate-500">Websites</p><p className="mt-2 text-2xl font-bold tabular-nums">{overview.websites}<span className="ml-1 text-sm font-medium text-slate-400">/ {overview.website_limit}</span></p><p className="mt-1 text-[11px] text-slate-400">Configured domains</p></div>
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs text-slate-500">Databases</p><p className="mt-2 text-2xl font-bold tabular-nums">{overview.databases}<span className="ml-1 text-sm font-medium text-slate-400">/ {overview.database_limit}</span></p><p className="mt-1 text-[11px] text-slate-400">Provisioned databases</p></div>
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs text-slate-500">Disk allowance</p><p className="mt-2 text-2xl font-bold">{formatBytes(overview.disk_limit_bytes)}</p><p className="mt-1 text-[11px] text-slate-400">Plan quota · usage not yet reported</p></div>
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-xs text-slate-500">Bandwidth allowance</p><p className="mt-2 text-2xl font-bold">{formatBytes(overview.bandwidth_limit_bytes)}</p><p className="mt-1 text-[11px] text-slate-400">Plan quota</p></div>
+        {!accounts.length ? (
+          <div className="nx-card mt-8 px-6 py-16 text-center">
+            <span className="mx-auto grid h-16 w-16 place-items-center rounded-2xl border border-slate-200 bg-gradient-to-br from-brand-50 to-white text-brand-600 shadow-sm">
+              <Server size={28} />
+            </span>
+            <h2 className="mt-6 text-lg font-bold tracking-tight text-slate-950">No hosting accounts assigned</h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">
+              Your Nexora login is active, but no hosting account has been assigned to it yet. Hosting accounts are created by your hosting administrator and appear here the moment one is granted to your login.
+            </p>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
+              <button onClick={() => void loadAccounts()} disabled={refreshing} className="nx-btn-secondary"><RefreshCw size={15} className={refreshing ? "animate-spin" : ""} /> Check again</button>
+              <button onClick={() => router.push("/plans")} className="nx-btn-primary">Browse hosting plans</button>
+            </div>
+            <p className="mx-auto mt-6 max-w-sm text-xs leading-5 text-slate-400">
+              Need hosting right away? Choose a plan and your account will be provisioned after payment confirmation.
+            </p>
           </div>
-
-          <div className="mt-6 grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <div className="flex items-center justify-between"><div><h2 className="font-semibold text-slate-900">Account details</h2><p className="mt-1 text-xs text-slate-500">Current hosting subscription</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700">{overview.status}</span></div>
-              <div className="mt-5 grid gap-5 sm:grid-cols-2">
-                <div><p className="text-[11px] uppercase tracking-wide text-slate-400">Primary domain</p><p className="mt-1 break-all text-sm font-semibold text-slate-800">{overview.primary_domain || "Not configured"}</p></div>
-                <div><p className="text-[11px] uppercase tracking-wide text-slate-400">System username</p><p className="mt-1 text-sm font-semibold text-slate-800">{overview.username}</p></div>
-                <div><p className="text-[11px] uppercase tracking-wide text-slate-400">Hosting plan</p><p className="mt-1 text-sm font-semibold text-slate-800">{overview.plan_name}</p></div>
-                <div><p className="text-[11px] uppercase tracking-wide text-slate-400">Email mailbox limit</p><p className="mt-1 text-sm font-semibold text-slate-800">{overview.mailbox_limit}</p></div>
+        ) : !overview ? (
+          <div className="nx-card mt-8 p-8 text-sm text-slate-500">Loading account details…</div>
+        ) : <>
+          {/* Selected account summary band */}
+          <div className="nx-card mt-7 overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-brand-50/70 via-white to-white px-6 py-5">
+              <div className="flex min-w-0 items-center gap-4">
+                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-brand-500 to-navy-900 text-white shadow-card"><Globe2 size={22} /></span>
+                <div className="min-w-0">
+                  <p className="truncate text-[15px] font-bold tracking-tight text-slate-950">{overview.primary_domain || overview.username}</p>
+                  <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span className="inline-flex items-center gap-1"><Boxes size={12} /> {overview.plan_name}</span>
+                    <span className="text-slate-300">·</span>
+                    <span className="inline-flex items-center gap-1"><Users size={12} /> {overview.username}</span>
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <StatusBadge tone={statusTone(overview.status)} dot>{overview.status}</StatusBadge>
+                <StatusBadge tone="brand">{roleLabel(overview.account_role)}</StatusBadge>
               </div>
             </div>
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <h2 className="font-semibold text-slate-900">Account tools</h2><p className="mt-1 text-xs leading-5 text-slate-500">Domains and databases are managed below. Other service areas remain managed by your hosting administrator.</p>
-              <div className="mt-4 space-y-3">{modules.map(module => <div key={module.label} className="flex items-center gap-3 rounded-xl border border-slate-100 px-3 py-3"><span className="grid h-8 w-8 place-items-center rounded-lg bg-slate-50 text-slate-500"><module.icon size={16} /></span><div className="min-w-0 flex-1"><p className="text-xs font-semibold text-slate-700">{module.label}</p><p className="mt-0.5 text-[10px] text-slate-400">{module.description}</p></div><LockKeyhole size={14} className="text-slate-300" /></div>)}</div>
+            <div className="grid gap-x-8 gap-y-5 px-6 py-5 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Hosting plan</p>
+                <p className="mt-1.5 text-sm font-semibold text-slate-800">{overview.plan_name}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Primary domain</p>
+                <p className="mt-1.5 break-all text-sm font-semibold text-slate-800">{overview.primary_domain || "Not configured"}</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Mailbox allowance</p>
+                <p className="mt-1.5 text-sm font-semibold text-slate-800">{overview.mailbox_limit.toLocaleString()} mailboxes</p>
+              </div>
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">Account since</p>
+                <p className="mt-1.5 text-sm font-semibold text-slate-800">{new Date(overview.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}</p>
+              </div>
             </div>
           </div>
 
+          {/* Resource meters */}
+          <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard icon={Globe2} label="Websites" value={overview.websites} unit={`/ ${overview.website_limit}`} hint="Configured domains on this account">
+              <Meter value={(overview.websites / Math.max(1, overview.website_limit)) * 100} className="mt-3" />
+              <p className="mt-1.5 text-[11px] text-slate-400">{Math.round((overview.websites / Math.max(1, overview.website_limit)) * 100)}% of the plan website quota used.</p>
+            </StatCard>
+            <StatCard icon={Database} label="Databases" value={overview.databases} unit={`/ ${overview.database_limit}`} hint="Provisioned MariaDB databases">
+              <Meter value={(overview.databases / Math.max(1, overview.database_limit)) * 100} className="mt-3" />
+              <p className="mt-1.5 text-[11px] text-slate-400">{Math.round((overview.databases / Math.max(1, overview.database_limit)) * 100)}% of the plan database quota used.</p>
+            </StatCard>
+            <StatCard icon={HardDrive} label="Disk allowance" value={formatBytes(overview.disk_limit_bytes)} hint="Plan storage quota">
+              <Meter value={0} className="mt-3" />
+              <p className="mt-1.5 text-[11px] text-slate-400">Per-account disk usage is not metered yet; the figure shown is your plan limit.</p>
+            </StatCard>
+            <StatCard icon={Activity} label="Bandwidth allowance" value={formatBytes(overview.bandwidth_limit_bytes)} hint="Monthly transfer quota">
+              <Meter value={0} className="mt-3" />
+              <p className="mt-1.5 text-[11px] text-slate-400">Per-account bandwidth metering is not reported yet; the figure shown is your plan limit.</p>
+            </StatCard>
+          </div>
+
+          {/* Quick actions */}
+          <SectionCard className="mt-6" title="Quick actions" description="Common tasks for this hosting account">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {domainMutationAllowed && (
+                <button onClick={() => { setAddDomainOpen(true); setError(""); }} className="group flex items-start gap-3.5 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lift">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-600 transition group-hover:bg-brand-600 group-hover:text-white"><Plus size={18} /></span>
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-slate-900">Add a website</span><span className="mt-1 block text-xs leading-5 text-slate-500">Register a new domain on this account</span></span>
+                </button>
+              )}
+              {databaseMutationAllowed && (
+                <button onClick={() => { setAddDatabaseOpen(true); setError(""); }} className="group flex items-start gap-3.5 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lift">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-600 transition group-hover:bg-brand-600 group-hover:text-white"><Database size={18} /></span>
+                  <span className="min-w-0"><span className="block text-sm font-semibold text-slate-900">Create a database</span><span className="mt-1 block text-xs leading-5 text-slate-500">Provision a new MariaDB database</span></span>
+                </button>
+              )}
+              <button onClick={() => router.push("/customer/deploy")} className="group flex items-start gap-3.5 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-lift">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-navy-950 text-white transition group-hover:bg-navy-900"><Github size={18} /></span>
+                <span className="min-w-0"><span className="block text-sm font-semibold text-slate-900">Nexora Deploy</span><span className="mt-1 block text-xs leading-5 text-slate-500">Ship a website straight from GitHub</span></span>
+              </button>
+              {managedModules.map(module => (
+                <button key={module.label} onClick={() => setLockedTool(module.note)} className="group flex items-start gap-3.5 rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-lift">
+                  <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 transition group-hover:bg-slate-200"><module.icon size={18} /></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-semibold text-slate-900">{module.label}</span>
+                    <span className="mt-1 block text-xs leading-5 text-slate-500">{module.description}</span>
+                  </span>
+                  <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500"><LockKeyhole size={10} /> Admin</span>
+                </button>
+              ))}
+            </div>
+          </SectionCard>
+
+          {/* Account cards */}
+          {accounts.length > 1 && (
+            <SectionCard className="mt-6" title="Your hosting accounts" description="Select an account to load its details and resources">
+              <div className="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-3">
+                {accounts.map(account => {
+                  const selected = account.id === selectedId;
+                  return (
+                    <button key={account.id} onClick={() => setSelectedId(account.id)} aria-pressed={selected}
+                      className={"rounded-2xl border p-4 text-left transition " + (selected ? "border-brand-300 bg-brand-50/50 ring-2 ring-brand-500/15" : "border-slate-200 bg-white shadow-sm hover:border-slate-300 hover:shadow-card")}>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="min-w-0 truncate text-sm font-bold text-slate-950">{account.primary_domain || account.username}</p>
+                        <StatusBadge tone={statusTone(account.status)} dot>{account.status}</StatusBadge>
+                      </div>
+                      <p className="mt-1.5 text-xs text-slate-500">{account.plan_name} · {roleLabel(account.account_role)}</p>
+                      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                        <span>Websites {overview && selected ? overview.websites : "–"}/{account.website_limit}</span>
+                        <span>Databases {overview && selected ? overview.databases : "–"}/{account.database_limit}</span>
+                        <span>Disk {formatBytes(account.disk_limit_bytes)}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </SectionCard>
+          )}
+
+          {/* Inventory */}
           <div className="mt-6 grid gap-5 xl:grid-cols-2">
-            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold text-slate-900">Websites & domains</h2><p className="mt-1 text-xs text-slate-500">{domains.length} of {overview.website_limit} plan websites</p></div>
-                {domainMutationAllowed && <button onClick={() => { setAddDomainOpen(true); setError(""); }} className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800"><Plus size={14} /> Add domain</button>}
-              </div>
-              {resourcesLoading ? <p className="p-5 text-xs text-slate-400">Loading websites…</p> : domains.length === 0 ? <p className="p-5 text-xs text-slate-400">No domains are registered to this account yet.{domainMutationAllowed ? " Use “Add domain” to register the first one." : ""}</p> : <div className="divide-y divide-slate-100">{domains.map(domain => <div key={domain.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5"><div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{domain.name}{domain.is_primary ? <span className="ml-2 rounded-full bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">Primary</span> : null}</p><p className="mt-1 break-all text-[11px] text-slate-400">{domain.document_root}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-medium text-slate-600">{domain.job_status || "Registered"}</span>{domainMutationAllowed && !domain.is_primary && <button onClick={() => setDeleteDomain(domain)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2 py-1 text-[10px] font-semibold text-rose-600 hover:bg-rose-50" aria-label={`Remove ${domain.name}`}><Trash2 size={12} /> Remove</button>}</div></div>)}</div>}
-              {!domainMutationAllowed && <p className="border-t border-slate-100 px-5 py-3 text-[11px] text-slate-400">Your account role is read-only for domains. Ask an account owner or admin to make changes.</p>}
-            </section>
-            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="font-semibold text-slate-900">Databases</h2><p className="mt-1 text-xs text-slate-500">{databases.length} of {overview.database_limit} plan databases · credentials are not displayed</p></div>
-                {databaseMutationAllowed && <button onClick={() => { setAddDatabaseOpen(true); setError(""); }} className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800"><Plus size={14} /> Create database</button>}
-              </div>
-              {resourcesLoading ? <p className="p-5 text-xs text-slate-400">Loading databases…</p> : databases.length === 0 ? <p className="p-5 text-xs text-slate-400">No databases are registered to this account yet.{databaseMutationAllowed ? " Use “Create database” to add the first one." : ""}</p> : <div className="divide-y divide-slate-100">{databases.map(database => <div key={database.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5"><div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{database.name}</p><p className="mt-1 text-[11px] text-slate-400">{database.engine} · {database.active_users} active users</p></div><div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold "+(database.status==="ACTIVE"?"bg-emerald-50 text-emerald-700":database.status==="DELETING"?"bg-rose-50 text-rose-700":"bg-amber-50 text-amber-700")}>{database.status}</span>{databaseMutationAllowed && database.status !== "DELETING" && <button onClick={() => setDeleteDatabase(database)} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2 py-1 text-[10px] font-semibold text-rose-600 hover:bg-rose-50" aria-label={`Delete ${database.name}`}><Trash2 size={12} /> Delete</button>}</div></div>)}</div>}
-              {!databaseMutationAllowed && <p className="border-t border-slate-100 px-5 py-3 text-[11px] text-slate-400">Your account role is read-only for databases. Ask an account owner, admin, or developer to make changes.</p>}
-            </section>
+            <SectionCard
+              title="Websites & domains"
+              description={`${domains.length} of ${overview.website_limit} plan websites`}
+              flush
+              actions={domainMutationAllowed && <button onClick={() => { setAddDomainOpen(true); setError(""); }} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> Add domain</button>}
+            >
+              {resourcesLoading ? (
+                <p className="px-5 py-6 text-xs text-slate-400">Loading websites…</p>
+              ) : domains.length === 0 ? (
+                <EmptyState icon={Globe2} title="No domains yet" description={domainMutationAllowed ? "Register the first domain for this account to publish a website." : "Domains are registered by an account owner or administrator."}>
+                  {domainMutationAllowed && <button onClick={() => { setAddDomainOpen(true); setError(""); }} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> Add domain</button>}
+                </EmptyState>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {domains.map(domain => (
+                    <div key={domain.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
+                      <div className="min-w-0">
+                        <p className="break-all text-sm font-semibold text-slate-800">
+                          {domain.name}
+                          {domain.is_primary ? <span className="ml-2 rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold text-brand-700 ring-1 ring-inset ring-brand-500/20">Primary</span> : null}
+                        </p>
+                        <p className="mt-1 break-all text-[11px] text-slate-400">{domain.document_root}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <StatusBadge tone={statusTone(domain.job_status)}>{domain.job_status || "Registered"}</StatusBadge>
+                        {domainMutationAllowed && !domain.is_primary && (
+                          <button onClick={() => setDeleteDomain(domain)} className="nx-btn-danger nx-btn-sm" aria-label={`Remove ${domain.name}`}><Trash2 size={12} /> Remove</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!domainMutationAllowed && <p className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 text-[11px] text-slate-400 sm:px-6">Your account role is read-only for domains. Ask an account owner or admin to make changes.</p>}
+            </SectionCard>
+
+            <SectionCard
+              title="Databases"
+              description={`${databases.length} of ${overview.database_limit} plan databases · credentials are not displayed`}
+              flush
+              actions={databaseMutationAllowed && <button onClick={() => { setAddDatabaseOpen(true); setError(""); }} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> Create database</button>}
+            >
+              {resourcesLoading ? (
+                <p className="px-5 py-6 text-xs text-slate-400">Loading databases…</p>
+              ) : databases.length === 0 ? (
+                <EmptyState icon={Database} title="No databases yet" description={databaseMutationAllowed ? "Create the first MariaDB database for this account." : "Databases are created by an account owner, admin, or developer."}>
+                  {databaseMutationAllowed && <button onClick={() => { setAddDatabaseOpen(true); setError(""); }} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> Create database</button>}
+                </EmptyState>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {databases.map(database => (
+                    <div key={database.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
+                      <div className="min-w-0">
+                        <p className="break-all text-sm font-semibold text-slate-800">{database.name}</p>
+                        <p className="mt-1 text-[11px] text-slate-400">{database.engine} · {database.active_users} active users</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <StatusBadge tone={statusTone(database.status)} dot>{database.status}</StatusBadge>
+                        {databaseMutationAllowed && database.status !== "DELETING" && (
+                          <button onClick={() => setDeleteDatabase(database)} className="nx-btn-danger nx-btn-sm" aria-label={`Delete ${database.name}`}><Trash2 size={12} /> Delete</button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!databaseMutationAllowed && <p className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 text-[11px] text-slate-400 sm:px-6">Your account role is read-only for databases. Ask an account owner, admin, or developer to make changes.</p>}
+            </SectionCard>
           </div>
-          <p className="mt-5 flex items-start gap-2 text-[11px] leading-5 text-slate-400"><Users size={14} className="mt-0.5 shrink-0" /> Domain and database changes are queued as provisioning jobs for the hosting server. Primary domains cannot be removed, and plan quotas are enforced by the API.</p>
+
+          <p className="mt-5 flex items-start gap-2 text-[11px] leading-5 text-slate-400">
+            <ShieldCheck size={14} className="mt-0.5 shrink-0" /> Domain and database changes are queued as provisioning jobs for the hosting server. Primary domains cannot be removed, and plan quotas are enforced by the API.
+          </p>
         </>}
-      </section>
-    </div>
-
-    {addDomainOpen && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Add domain">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-lg font-semibold text-slate-900">Add a domain</h3><p className="mt-1 text-xs leading-5 text-slate-500">The domain is registered to this account and Nginx configuration is queued for the hosting server. Plan limit: {overview?.website_limit} websites.</p></div><button onClick={() => setAddDomainOpen(false)} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={17} /></button></div>
-        <label className="mt-5 block"><span className="text-xs font-semibold text-slate-700">Domain name</span>
-          <input value={domainName} onChange={event => setDomainName(event.target.value)} placeholder="example.com" autoFocus className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setAddDomainOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitDomainAdd()} disabled={submitting || !domainName.trim()} className="rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{submitting ? "Saving…" : "Add domain"}</button></div>
       </div>
-    </div>}
 
-    {deleteDomain && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Remove domain">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-rose-50 text-rose-600"><AlertTriangle size={18} /></span><div><h3 className="text-lg font-semibold text-slate-900">Remove {deleteDomain.name}?</h3><p className="mt-1 text-xs leading-5 text-slate-500">The domain is marked deleted and its server configuration removal is queued. This cannot be undone from the dashboard.</p></div></div>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setDeleteDomain(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitDomainDelete()} disabled={submitting} className="rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50">{submitting ? "Removing…" : "Remove domain"}</button></div>
-      </div>
-    </div>}
+      {addDomainOpen && (
+        <Modal title="Add a domain" description={`The domain is registered to this account and Nginx configuration is queued for the hosting server. Plan limit: ${overview?.website_limit} websites.`} onClose={() => setAddDomainOpen(false)}>
+          <label className="mt-5 block">
+            <span className="nx-label">Domain name</span>
+            <input value={domainName} onChange={event => setDomainName(event.target.value)} placeholder="example.com" autoFocus className="nx-input mt-2" />
+          </label>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setAddDomainOpen(false)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitDomainAdd()} disabled={submitting || !domainName.trim()} className="nx-btn-primary">{submitting ? "Saving…" : "Add domain"}</button>
+          </div>
+        </Modal>
+      )}
 
-    {addDatabaseOpen && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Create database">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-lg font-semibold text-slate-900">Create a MariaDB database</h3><p className="mt-1 text-xs leading-5 text-slate-500">The name is prefixed with your account username (<span className="font-mono">{overview?.username}_</span>). Plan limit: {overview?.database_limit} databases.</p></div><button onClick={() => setAddDatabaseOpen(false)} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={17} /></button></div>
-        <label className="mt-5 block"><span className="text-xs font-semibold text-slate-700">Database name</span>
-          <div className="mt-1.5 flex items-center overflow-hidden rounded-xl border border-slate-200 focus-within:border-blue-400"><span className="border-r border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-xs text-slate-500">{overview?.username}_</span><input value={databaseName} onChange={event => setDatabaseName(event.target.value)} placeholder="wordpress" autoFocus className="w-full px-3 py-2.5 text-sm outline-none" /></div>
-        </label>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setAddDatabaseOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitDatabaseAdd()} disabled={submitting || !databaseName.trim()} className="rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{submitting ? "Creating…" : "Create database"}</button></div>
-      </div>
-    </div>}
+      {deleteDomain && (
+        <Modal title={`Remove ${deleteDomain.name}?`} description="The domain is marked deleted and its server configuration removal is queued. This cannot be undone from the dashboard." onClose={() => setDeleteDomain(null)}>
+          <div className="mt-5 flex items-start gap-3 rounded-xl border border-rose-100 bg-rose-50/70 p-3.5">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-rose-600" />
+            <p className="text-xs leading-5 text-rose-700">Websites served by this domain will stop once the hosting server applies the removal.</p>
+          </div>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setDeleteDomain(null)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitDomainDelete()} disabled={submitting} className="nx-btn nx-btn-sm rounded-xl bg-rose-600 px-4 py-2.5 text-white shadow-sm hover:bg-rose-700">{submitting ? "Removing…" : "Remove domain"}</button>
+          </div>
+        </Modal>
+      )}
 
-    {deleteDatabase && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Delete database">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-rose-50 text-rose-600"><AlertTriangle size={18} /></span><div><h3 className="text-lg font-semibold text-slate-900">Delete {deleteDatabase.name}?</h3><p className="mt-1 text-xs leading-5 text-slate-500">The database and its users are removed on the server. The database stays listed until the server confirms deletion. This cannot be undone.</p></div></div>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setDeleteDatabase(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitDatabaseDelete()} disabled={submitting} className="rounded-xl bg-rose-600 px-4 py-2.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50">{submitting ? "Deleting…" : "Delete database"}</button></div>
-      </div>
-    </div>}
-  </main>;
+      {addDatabaseOpen && (
+        <Modal title="Create a MariaDB database" description={<span>The name is prefixed with your account username (<span className="font-mono">{overview?.username}_</span>). Plan limit: {overview?.database_limit} databases.</span>} onClose={() => setAddDatabaseOpen(false)}>
+          <label className="mt-5 block">
+            <span className="nx-label">Database name</span>
+            <div className="mt-2 flex items-center overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-brand-400 focus-within:ring-4 focus-within:ring-brand-500/10">
+              <span className="border-r border-slate-200 bg-slate-50 px-3.5 py-2.5 font-mono text-xs text-slate-500">{overview?.username}_</span>
+              <input value={databaseName} onChange={event => setDatabaseName(event.target.value)} placeholder="wordpress" autoFocus className="w-full border-0 bg-transparent px-3.5 py-2.5 text-sm outline-none" />
+            </div>
+          </label>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setAddDatabaseOpen(false)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitDatabaseAdd()} disabled={submitting || !databaseName.trim()} className="nx-btn-primary">{submitting ? "Creating…" : "Create database"}</button>
+          </div>
+        </Modal>
+      )}
+
+      {deleteDatabase && (
+        <Modal title={`Delete ${deleteDatabase.name}?`} description="The database and its users are removed on the server. The database stays listed until the server confirms deletion. This cannot be undone." onClose={() => setDeleteDatabase(null)}>
+          <div className="mt-5 flex items-start gap-3 rounded-xl border border-rose-100 bg-rose-50/70 p-3.5">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-rose-600" />
+            <p className="text-xs leading-5 text-rose-700">Applications using this database will lose their data connection immediately.</p>
+          </div>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setDeleteDatabase(null)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitDatabaseDelete()} disabled={submitting} className="nx-btn nx-btn-sm rounded-xl bg-rose-600 px-4 py-2.5 text-white shadow-sm hover:bg-rose-700">{submitting ? "Deleting…" : "Delete database"}</button>
+          </div>
+        </Modal>
+      )}
+
+      <footer className="border-t border-slate-200/70 py-6">
+        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-2 px-5 text-xs text-slate-400 sm:px-8">
+          <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={13} className="text-emerald-500" /> Account-scoped access — you only ever see the accounts assigned to your login.</span>
+          <span>Nexora Hosting · Customer workspace</span>
+        </div>
+      </footer>
+    </main>
+  );
 }

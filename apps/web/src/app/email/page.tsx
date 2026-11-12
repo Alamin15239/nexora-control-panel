@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, Info, Mail, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { Info, Mail, Plus, RefreshCw, Trash2 } from "lucide-react";
+import {
+  EmptyState, InlineAlert, Modal, PageHeader, SectionCard, Spinner,
+  StatusBadge,
+} from "@/components/ui";
 
 type EmailDomain = {
   id: string; domain: string; status: string; providerStatus: string;
@@ -17,12 +21,12 @@ type MailStatus = {
   };
 };
 
-function providerStyle(status: string): string {
+function providerTone(status: string): "success" | "info" | "danger" | "warning" {
   switch (status) {
-    case "provisioned": return "bg-emerald-50 text-emerald-700";
-    case "provisioning": return "bg-blue-50 text-blue-700";
-    case "failed": return "bg-rose-50 text-rose-700";
-    default: return "bg-amber-50 text-amber-700";
+    case "provisioned": return "success";
+    case "provisioning": return "info";
+    case "failed": return "danger";
+    default: return "warning";
   }
 }
 
@@ -213,119 +217,187 @@ export default function EmailHostingPage() {
   }
 
   if (loading) {
-    return <main className="grid min-h-screen place-items-center"><div className="h-9 w-9 animate-spin rounded-full border-2 border-slate-200 border-t-blue-700" /></main>;
+    return <main className="grid min-h-screen place-items-center"><Spinner className="h-8 w-8" /></main>;
   }
 
   const providerAvailable = status?.mailboxHosting.available ?? false;
+  const selectedDomain = domains.find(item => item.id === selectedDomainId) ?? null;
 
-  return <main className="mx-auto max-w-[1300px] px-5 py-8 sm:px-8">
-    <div className="flex flex-wrap items-end justify-between gap-4">
-      <div><p className="text-xs font-semibold uppercase tracking-[.18em] text-blue-700">Hosting services</p><h1 className="mt-2 text-3xl font-bold tracking-tight">Email hosting</h1><p className="mt-2 text-sm text-slate-500">Mail domains, mailbox plans, quotas, and forwarding rules for your organization.</p></div>
-      <div className="flex items-center gap-2">
-        <button onClick={() => void loadStatusAndDomains(true)} disabled={refreshing} className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-500 hover:bg-slate-50 disabled:opacity-50" aria-label="Refresh"><RefreshCw size={16} className={refreshing ? "animate-spin" : ""} /></button>
-        <button onClick={() => setAddDomainOpen(true)} className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800"><Plus size={14} /> Add mail domain</button>
-      </div>
-    </div>
+  return (
+    <main className="mx-auto max-w-[1400px] px-5 py-8 lg:px-9">
+      <PageHeader
+        eyebrow="Hosting services · Email"
+        title="Email accounts"
+        description="Mail domains, mailbox plans, quotas, and forwarding rules for your organization."
+        actions={
+          <>
+            <button onClick={() => void loadStatusAndDomains(true)} disabled={refreshing} className="nx-btn-secondary" aria-label="Refresh"><RefreshCw size={16} className={refreshing ? "animate-spin" : ""} /> Refresh</button>
+            <button onClick={() => setAddDomainOpen(true)} className="nx-btn-primary"><Plus size={15} /> Add mail domain</button>
+          </>
+        }
+      />
 
-    {!providerAvailable && status && <div className="mt-6 rounded-2xl border border-amber-200 bg-amber-50 p-5">
-      <div className="flex items-start gap-3">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700"><Info size={17} /></span>
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-amber-900">Mailbox hosting is not active — inventory mode</h2>
-          <p className="mt-1 text-xs leading-5 text-amber-800">Outbound notification email (password resets, alerts) is {status.outboundNotification.configured ? "configured" : "not configured"} separately. Hosted IMAP/SMTP mailboxes require a mail server, which is not connected: every record below is a <strong>plan</strong> and is NOT provisioned on any mail server. Nothing is marked delivered or active until a provider confirms.</p>
-          <ul className="mt-3 space-y-1 text-xs text-amber-800">{status.mailboxHosting.requirements.map((requirement, index) => <li key={index}>• {requirement}</li>)}</ul>
+      {!providerAvailable && status && (
+        <div className="mt-6 flex items-start gap-3.5 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700"><Info size={17} /></span>
+          <div className="min-w-0">
+            <h2 className="text-sm font-bold text-amber-900">Mailbox hosting is not active — inventory mode</h2>
+            <p className="mt-1 text-xs leading-5 text-amber-800">
+              Outbound notification email (password resets, alerts) is {status.outboundNotification.configured ? "configured" : "not configured"} separately. Hosted IMAP/SMTP mailboxes require a mail server, which is not connected: every record below is a <strong>plan</strong> and is NOT provisioned on any mail server. Nothing is marked delivered or active until a provider confirms.
+            </p>
+            <ul className="mt-3 space-y-1 text-xs text-amber-800">{status.mailboxHosting.requirements.map((requirement, index) => <li key={index}>• {requirement}</li>)}</ul>
+          </div>
+        </div>
+      )}
+
+      {error && <InlineAlert tone="error" onDismiss={() => setError("")} className="mt-6">{error}</InlineAlert>}
+      {notice && <InlineAlert tone="success" onDismiss={() => setNotice("")} className="mt-6">{notice}</InlineAlert>}
+
+      <div className="mt-6 grid gap-5 xl:grid-cols-[1fr_1.6fr]">
+        <SectionCard title="Mail domains" description={`${domains.length} registered`} flush>
+          {domains.length === 0 ? (
+            <EmptyState icon={Mail} title="No mail domains yet" description="Register a mail domain to plan its mailboxes and forwarding rules." >
+              <button onClick={() => setAddDomainOpen(true)} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> Add mail domain</button>
+            </EmptyState>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {domains.map(emailDomain => (
+                <button key={emailDomain.id} onClick={() => setSelectedDomainId(emailDomain.id)}
+                  aria-pressed={selectedDomainId === emailDomain.id}
+                  className={"flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition sm:px-6 " + (selectedDomainId === emailDomain.id ? "bg-brand-50/70" : "hover:bg-slate-50")}>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-800">{emailDomain.domain}</p>
+                    <p className="mt-0.5 text-[11px] text-slate-400">{emailDomain.mailboxCount} mailbox(es) · {emailDomain.forwardCount} forward(s)</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <StatusBadge tone={providerTone(emailDomain.providerStatus)}>{emailDomain.providerStatus.replace(/_/g, " ")}</StatusBadge>
+                    <span role="button" tabIndex={0} onClick={event => { event.stopPropagation(); void deleteDomain(emailDomain); }} onKeyDown={event => { if (event.key === "Enter") { event.stopPropagation(); void deleteDomain(emailDomain); } }} aria-label={`Remove ${emailDomain.domain}`} className="rounded-lg border border-rose-200 p-1.5 text-rose-500 transition hover:bg-rose-50"><Trash2 size={12} /></span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+
+        <div className="space-y-5">
+          <SectionCard
+            title="Mailboxes"
+            description={selectedDomain ? (mailboxLimit !== null ? `${mailboxes.length} planned · plan limit ${mailboxLimit}` : "Plan limit unavailable") : "Select a mail domain"}
+            flush
+            actions={selectedDomainId && <button onClick={() => setAddMailboxOpen(true)} className="nx-btn-primary nx-btn-sm"><Plus size={13} /> New mailbox</button>}
+          >
+            {!selectedDomainId ? (
+              <p className="px-5 py-5 text-xs text-slate-400 sm:px-6">Select a mail domain to manage its mailboxes.</p>
+            ) : mailboxes.length === 0 ? (
+              <EmptyState icon={Mail} title="No mailboxes planned" description={selectedDomain ? `Plan the first mailbox for ${selectedDomain.domain}.` : "Plan the first mailbox for this domain."} >
+                <button onClick={() => setAddMailboxOpen(true)} className="nx-btn-primary nx-btn-sm"><Plus size={14} /> New mailbox</button>
+              </EmptyState>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {mailboxes.map(mailbox => (
+                  <div key={mailbox.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 sm:px-6">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-800">{mailbox.address}</p>
+                      <p className="mt-0.5 text-[11px] text-slate-400">Quota {mailbox.quotaMb.toLocaleString()} MB</p>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <StatusBadge tone={providerTone(mailbox.providerStatus)}>{mailbox.providerStatus.replace(/_/g, " ")}</StatusBadge>
+                      <button onClick={() => void updateQuota(mailbox)} disabled={submitting} className="nx-btn-secondary nx-btn-sm">Quota</button>
+                      <button onClick={() => void deleteMailbox(mailbox)} disabled={submitting} className="nx-btn-danger nx-btn-sm"><Trash2 size={12} /> Remove</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          <SectionCard
+            title="Forwarding rules"
+            description="source@domain → destination; also usable as simple aliases"
+            flush
+            actions={selectedDomainId && <button onClick={() => setAddForwardOpen(true)} className="nx-btn-secondary nx-btn-sm"><Plus size={13} /> Add forward</button>}
+          >
+            {!selectedDomainId ? (
+              <p className="px-5 py-5 text-xs text-slate-400 sm:px-6">Select a mail domain to manage forwarding rules.</p>
+            ) : forwards.length === 0 ? (
+              <EmptyState icon={Mail} title="No forwarding rules" description="Deliver mail for a local address on the selected domain to any external mailbox." />
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {forwards.map(forward => (
+                  <div key={forward.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 sm:px-6">
+                    <p className="min-w-0 truncate font-mono text-xs font-semibold text-slate-800">{forward.source} → {forward.destination}</p>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <StatusBadge tone={providerTone(forward.providerStatus)}>{forward.providerStatus.replace(/_/g, " ")}</StatusBadge>
+                      <button onClick={() => void deleteForward(forward)} disabled={submitting} aria-label="Remove forward" className="rounded-lg border border-rose-200 p-1.5 text-rose-500 transition hover:bg-rose-50 disabled:opacity-50"><Trash2 size={12} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          {status && (
+            <SectionCard title="DNS records required for mail" description="Publish these before expecting reliable delivery">
+              <ul className="space-y-2.5 text-xs leading-5 text-slate-600">
+                {status.mailboxHosting.dnsRecordsRequired.map(record => (
+                  <li key={record.record} className="flex flex-wrap items-baseline gap-2">
+                    <span className="rounded-md bg-slate-100 px-2 py-1 font-mono text-[10px] font-bold text-slate-800">{record.record}</span>
+                    <span className="min-w-0 flex-1">{record.guidance}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-4 text-[11px] leading-5 text-slate-400">SPF authorizes the mail server to send for the domain, DKIM signs the messages, and DMARC tells receivers what to do when checks fail.</p>
+            </SectionCard>
+          )}
         </div>
       </div>
-    </div>}
 
-    {error && <div role="alert" className="mt-6 flex items-start justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"><span className="flex items-start gap-2"><AlertTriangle size={16} className="mt-0.5 shrink-0" />{error}</span><button onClick={() => setError("")} aria-label="Dismiss error" className="text-rose-400 hover:text-rose-600"><X size={15} /></button></div>}
-    {notice && <div role="status" className="mt-6 flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700"><span className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 shrink-0" />{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss message" className="text-emerald-400 hover:text-emerald-600"><X size={15} /></button></div>}
-
-    <div className="mt-6 grid gap-5 xl:grid-cols-[1fr_1.6fr]">
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">Mail domains</h2><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{domains.length}</span></div>
-        {domains.length === 0 ? <p className="p-5 text-xs text-slate-400">No mail domains registered yet.</p> : <div className="divide-y divide-slate-100">
-          {domains.map(emailDomain => <button key={emailDomain.id} onClick={() => setSelectedDomainId(emailDomain.id)}
-            className={"flex w-full items-center justify-between gap-3 px-5 py-3.5 text-left transition-colors " + (selectedDomainId === emailDomain.id ? "bg-blue-50/60" : "hover:bg-slate-50")}>
-            <div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-800">{emailDomain.domain}</p><p className="mt-0.5 text-[11px] text-slate-400">{emailDomain.mailboxCount} mailbox(es) · {emailDomain.forwardCount} forward(s)</p></div>
-            <div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold " + providerStyle(emailDomain.providerStatus)}>{emailDomain.providerStatus.replace(/_/g, " ")}</span>
-              <span role="button" tabIndex={0} onClick={event => { event.stopPropagation(); void deleteDomain(emailDomain); }} onKeyDown={event => { if (event.key === "Enter") { event.stopPropagation(); void deleteDomain(emailDomain); } }} aria-label={`Remove ${emailDomain.domain}`} className="rounded-lg border border-rose-200 p-1.5 text-rose-500 hover:bg-rose-50"><Trash2 size={12} /></span></div>
-          </button>)}
-        </div>}
-      </section>
-
-      <div className="space-y-5">
-        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-            <div><h2 className="font-semibold">Mailboxes</h2><p className="mt-1 text-xs text-slate-500">{mailboxLimit !== null ? `${mailboxes.length} planned · plan limit ${mailboxLimit}` : "Select a mail domain"}</p></div>
-            {selectedDomainId && <button onClick={() => setAddMailboxOpen(true)} className="inline-flex items-center gap-1.5 rounded-xl bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800"><Plus size={13} /> New mailbox</button>}
+      {addDomainOpen && (
+        <Modal title="Add a mail domain" description={providerAvailable ? "The domain is registered in the email inventory and the configured mail provider will be asked to provision it." : "Mailbox hosting is not configured, so the domain is recorded as a plan only."} onClose={() => setAddDomainOpen(false)}>
+          <label className="mt-5 block">
+            <span className="nx-label">Domain name</span>
+            <input value={domainName} onChange={event => setDomainName(event.target.value)} placeholder="mail.example.test" autoFocus className="nx-input mt-2" />
+          </label>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setAddDomainOpen(false)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitAddDomain()} disabled={submitting || !domainName.trim()} className="nx-btn-primary">{submitting ? "Saving…" : "Add domain"}</button>
           </div>
-          {!selectedDomainId ? <p className="p-5 text-xs text-slate-400">Select a mail domain to manage its mailboxes.</p> : mailboxes.length === 0 ? <p className="p-5 text-xs text-slate-400">No mailboxes planned for this domain yet.</p> : <div className="divide-y divide-slate-100">
-            {mailboxes.map(mailbox => <div key={mailbox.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5">
-              <div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-800">{mailbox.address}</p><p className="mt-0.5 text-[11px] text-slate-400">Quota {mailbox.quotaMb.toLocaleString()} MB</p></div>
-              <div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold " + providerStyle(mailbox.providerStatus)}>{mailbox.providerStatus.replace(/_/g, " ")}</span>
-                <button onClick={() => void updateQuota(mailbox)} disabled={submitting} className="rounded-lg border border-slate-200 px-2 py-1.5 text-[10px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">Quota</button>
-                <button onClick={() => void deleteMailbox(mailbox)} disabled={submitting} className="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2 py-1.5 text-[10px] font-semibold text-rose-600 hover:bg-rose-50 disabled:opacity-50"><Trash2 size={12} /> Remove</button></div>
-            </div>)}
-          </div>}
-        </section>
+        </Modal>
+      )}
 
-        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-            <div><h2 className="font-semibold">Forwarding rules</h2><p className="mt-1 text-xs text-slate-500">source@domain → destination; also usable as simple aliases</p></div>
-            {selectedDomainId && <button onClick={() => setAddForwardOpen(true)} className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"><Plus size={13} /> Add forward</button>}
+      {addMailboxOpen && (
+        <Modal title="Plan a mailbox" description={providerAvailable ? "The mailbox is created on the configured mail server." : "Mailbox hosting is not configured: this records the intended mailbox only — no IMAP/SMTP mailbox will exist."} onClose={() => setAddMailboxOpen(false)}>
+          <label className="mt-5 block">
+            <span className="nx-label">Mailbox name</span>
+            <input value={mailboxLocalPart} onChange={event => setMailboxLocalPart(event.target.value)} placeholder="hello" autoFocus className="nx-input mt-2" />
+          </label>
+          <label className="mt-4 block">
+            <span className="nx-label">Quota (MB, 128–51200)</span>
+            <input type="number" min={128} max={51200} value={mailboxQuotaMb} onChange={event => setMailboxQuotaMb(event.target.value)} className="nx-input mt-2" />
+          </label>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setAddMailboxOpen(false)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitAddMailbox()} disabled={submitting || !mailboxLocalPart.trim()} className="nx-btn-primary">{submitting ? "Saving…" : "Create mailbox"}</button>
           </div>
-          {!selectedDomainId ? <p className="p-5 text-xs text-slate-400">Select a mail domain to manage forwarding rules.</p> : forwards.length === 0 ? <p className="p-5 text-xs text-slate-400">No forwarding rules for this domain yet.</p> : <div className="divide-y divide-slate-100">
-            {forwards.map(forward => <div key={forward.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
-              <div className="min-w-0"><p className="truncate text-xs font-semibold text-slate-800">{forward.source} → {forward.destination}</p></div>
-              <div className="flex items-center gap-2"><span className={"rounded-full px-2.5 py-1 text-[10px] font-semibold " + providerStyle(forward.providerStatus)}>{forward.providerStatus.replace(/_/g, " ")}</span>
-                <button onClick={() => void deleteForward(forward)} disabled={submitting} className="rounded-lg border border-rose-200 p-1.5 text-rose-500 hover:bg-rose-50 disabled:opacity-50" aria-label="Remove forward"><Trash2 size={12} /></button></div>
-            </div>)}
-          </div>}
-        </section>
+        </Modal>
+      )}
 
-        {status && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center gap-2 text-sm font-semibold"><Mail size={15} className="text-blue-700" /> DNS records required for mail</div>
-          <ul className="mt-3 space-y-2 text-xs leading-5 text-slate-600">{status.mailboxHosting.dnsRecordsRequired.map(record => <li key={record.record}><span className="font-mono text-[10px] font-bold text-slate-800">{record.record}</span> — {record.guidance}</li>)}</ul>
-          <p className="mt-3 text-[11px] leading-5 text-slate-400">SPF authorizes the mail server to send for the domain, DKIM signs the messages, and DMARC tells receivers what to do when checks fail. Publish all three before expecting reliable delivery.</p>
-        </section>}
-      </div>
-    </div>
-
-    {addDomainOpen && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Add mail domain">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-lg font-semibold">Add a mail domain</h3><p className="mt-1 text-xs leading-5 text-slate-500">The domain is registered in the email inventory. {providerAvailable ? "The configured mail provider will be asked to provision it." : "Mailbox hosting is not configured, so the domain is recorded as a plan only."}</p></div><button onClick={() => setAddDomainOpen(false)} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={17} /></button></div>
-        <label className="mt-5 block"><span className="text-xs font-semibold text-slate-700">Domain name</span>
-          <input value={domainName} onChange={event => setDomainName(event.target.value)} placeholder="mail.example.test" autoFocus className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setAddDomainOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitAddDomain()} disabled={submitting || !domainName.trim()} className="rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{submitting ? "Saving…" : "Add domain"}</button></div>
-      </div>
-    </div>}
-
-    {addMailboxOpen && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="New mailbox">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-lg font-semibold">Plan a mailbox</h3><p className="mt-1 text-xs leading-5 text-slate-500">{providerAvailable ? "The mailbox is created on the configured mail server." : "Mailbox hosting is not configured: this records the intended mailbox only — no IMAP/SMTP mailbox will exist."}</p></div><button onClick={() => setAddMailboxOpen(false)} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={17} /></button></div>
-        <label className="mt-5 block"><span className="text-xs font-semibold text-slate-700">Mailbox name</span>
-          <input value={mailboxLocalPart} onChange={event => setMailboxLocalPart(event.target.value)} placeholder="hello" autoFocus className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <label className="mt-4 block"><span className="text-xs font-semibold text-slate-700">Quota (MB, 128–51200)</span>
-          <input type="number" min={128} max={51200} value={mailboxQuotaMb} onChange={event => setMailboxQuotaMb(event.target.value)} className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setAddMailboxOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitAddMailbox()} disabled={submitting || !mailboxLocalPart.trim()} className="rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{submitting ? "Saving…" : "Create mailbox"}</button></div>
-      </div>
-    </div>}
-
-    {addForwardOpen && <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label="Add forward">
-      <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-        <div className="flex items-start justify-between"><div><h3 className="text-lg font-semibold">Add a forwarding rule</h3><p className="mt-1 text-xs leading-5 text-slate-500">Deliver mail for a local address on the selected domain to any external mailbox.</p></div><button onClick={() => setAddForwardOpen(false)} aria-label="Close" className="text-slate-400 hover:text-slate-600"><X size={17} /></button></div>
-        <label className="mt-5 block"><span className="text-xs font-semibold text-slate-700">Local source (on the domain)</span>
-          <input value={forwardSource} onChange={event => setForwardSource(event.target.value)} placeholder="support" autoFocus className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <label className="mt-4 block"><span className="text-xs font-semibold text-slate-700">Destination address</span>
-          <input value={forwardDestination} onChange={event => setForwardDestination(event.target.value)} placeholder="owner@example.test" className="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-blue-400" />
-        </label>
-        <div className="mt-6 flex justify-end gap-2"><button onClick={() => setAddForwardOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button onClick={() => void submitAddForward()} disabled={submitting || !forwardSource.trim() || !forwardDestination.trim()} className="rounded-xl bg-blue-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{submitting ? "Saving…" : "Add forward"}</button></div>
-      </div>
-    </div>}
-  </main>;
+      {addForwardOpen && (
+        <Modal title="Add a forwarding rule" description="Deliver mail for a local address on the selected domain to any external mailbox." onClose={() => setAddForwardOpen(false)}>
+          <label className="mt-5 block">
+            <span className="nx-label">Local source (on the domain)</span>
+            <input value={forwardSource} onChange={event => setForwardSource(event.target.value)} placeholder="support" autoFocus className="nx-input mt-2" />
+          </label>
+          <label className="mt-4 block">
+            <span className="nx-label">Destination address</span>
+            <input value={forwardDestination} onChange={event => setForwardDestination(event.target.value)} placeholder="owner@example.test" className="nx-input mt-2" />
+          </label>
+          <div className="mt-6 flex justify-end gap-2">
+            <button onClick={() => setAddForwardOpen(false)} className="nx-btn-secondary">Cancel</button>
+            <button onClick={() => void submitAddForward()} disabled={submitting || !forwardSource.trim() || !forwardDestination.trim()} className="nx-btn-primary">{submitting ? "Saving…" : "Add forward"}</button>
+          </div>
+        </Modal>
+      )}
+    </main>
+  );
 }

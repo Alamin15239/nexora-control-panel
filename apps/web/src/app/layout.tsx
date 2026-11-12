@@ -3,8 +3,8 @@ import "./globals.css";
 import AppShell from "@/components/app-shell";
 
 export const metadata: Metadata = {
-  title: "Nexora Control — Hosting Infrastructure",
-  description: "A secure, independent hosting control plane.",
+  title: "Nexora Control — Premium Hosting Platform",
+  description: "A secure, independent hosting control plane for websites, domains, email, DNS and Git deployments.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

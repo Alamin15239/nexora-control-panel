@@ -2,7 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CheckCircle2, ExternalLink, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
+import { ExternalLink, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug, Rocket } from "lucide-react";
+import {
+  EmptyState, InlineAlert, Meter, NexoraMark, PageHeader, SectionCard,
+  StatusBadge, statusTone,
+} from "@/components/ui";
 
 type Connection = { login: string; scopes: string; connectedAt: string } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
@@ -106,84 +110,90 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
     finally { setSaving(false); }
   }
 
-  return <div className="border-t border-slate-100 px-6 py-3">
-    <button type="button" onClick={openSettings} className="text-xs font-semibold text-blue-700 hover:underline">
-      {expanded ? "Hide runtime settings" : "Configure application runtime"}
-    </button>
-    {expanded && <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
-      {error && <p role="alert" className="mb-3 text-xs text-rose-700">{error}</p>}
-      {notice && <p role="status" className="mb-3 text-xs text-emerald-700">{notice}</p>}
-      {usage && <div className="mb-3 rounded-lg border border-slate-200 bg-white p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs font-semibold text-slate-700">Monthly build allowance · {usage.periodStart}</p>
-          <span className="text-[11px] text-slate-500">{usage.buildMinutesUsed.toLocaleString()} / {usage.buildMinutesLimit.toLocaleString()} minutes</span>
+  return (
+    <div className="border-t border-slate-100 px-6 py-3">
+      <button type="button" onClick={openSettings} className="text-xs font-semibold text-brand-600 transition hover:text-brand-700 hover:underline">
+        {expanded ? "Hide runtime settings" : "Configure application runtime"}
+      </button>
+      {expanded && (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/80 p-4">
+          {error && <p role="alert" className="mb-3 text-xs text-rose-700">{error}</p>}
+          {notice && <p role="status" className="mb-3 text-xs text-emerald-700">{notice}</p>}
+          {usage && (
+            <div className="mb-3 rounded-lg border border-slate-200 bg-white p-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-slate-700">Monthly build allowance · {usage.periodStart}</p>
+                <span className="text-[11px] tabular-nums text-slate-500">{usage.buildMinutesUsed.toLocaleString()} / {usage.buildMinutesLimit.toLocaleString()} minutes</span>
+              </div>
+              <Meter className="mt-2" value={usage.buildMinutesLimit > 0 ? Math.min(100, (usage.buildMinutesUsed / usage.buildMinutesLimit) * 100) : usage.quotaExhausted ? 100 : 0} />
+              <p className="mt-2 text-[11px] leading-4 text-amber-700">{usage.meteringStatus !== "active" ? "Builder metering has not reported usage yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted. Dispatch enforcement is not enabled." : "Usage has been reported by the authenticated builder. Dispatch quota enforcement remains disabled."}</p>
+            </div>
+          )}
+          {loading ? <p className="text-xs text-slate-500">Loading runtime catalog…</p> : (
+            <form onSubmit={save} className="grid gap-3 md:grid-cols-2">
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600 md:col-span-2">Runtime profile
+                <select required value={runtimeProfileId} onChange={event => {
+                  const profile = profiles.find(item => item.id === event.target.value);
+                  setRuntimeProfileId(event.target.value);
+                  if (profile?.runtimeFamily === "static") { setBuildMethod("static"); setOutputDirectory("dist"); }
+                  else if (profile?.runtimeFamily === "container") setBuildMethod("dockerfile");
+                  else setBuildMethod("managed");
+                }} className="nx-select">
+                  <option value="">Choose runtime profile</option>
+                  {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.displayName} · {profile.enabled ? "Enabled" : "Catalog only"}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Build method
+                <select value={buildMethod} onChange={event => setBuildMethod(event.target.value)} className="nx-select">
+                  <option value="managed">Managed build</option><option value="static">Static output</option><option value="dockerfile">Dockerfile / OCI</option>
+                </select>
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Build context
+                <input value={buildContext} onChange={event => setBuildContext(event.target.value)} className="nx-input" />
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Build command (stored, not executed)
+                <input value={buildCommand} onChange={event => setBuildCommand(event.target.value)} maxLength={1000} className="nx-input" placeholder="npm run build" />
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Output directory
+                <input value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} maxLength={240} className="nx-input" placeholder="dist" />
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Start command (stored, not executed)
+                <input value={startCommand} onChange={event => setStartCommand(event.target.value)} maxLength={1000} className="nx-input" placeholder="npm start" />
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Application port
+                <input type="number" min="1" max="65535" value={listenPort} onChange={event => setListenPort(event.target.value)} className="nx-input" placeholder="3000" />
+              </label>
+              <label className="space-y-1.5 text-xs font-semibold text-slate-600">Health check path
+                <input value={healthCheckPath} onChange={event => setHealthCheckPath(event.target.value)} maxLength={200} className="nx-input" placeholder="/health" />
+              </label>
+              <div className="md:col-span-2 rounded-lg border border-slate-200 bg-white p-3.5">
+                <p className="mb-3 text-xs font-semibold text-slate-700">Requested runtime resources</p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <label className="space-y-1.5 text-xs text-slate-600">CPU (millicores)
+                    <input type="number" min="100" max={planLimits?.cpuMillis ?? 8000} value={cpuMillis} onChange={event => setCpuMillis(event.target.value)} className="nx-input" />
+                  </label>
+                  <label className="space-y-1.5 text-xs text-slate-600">Memory (MiB)
+                    <input type="number" min="128" max={planLimits?.memoryMiB ?? 16384} value={memoryMiB} onChange={event => setMemoryMiB(event.target.value)} className="nx-input" />
+                  </label>
+                  <label className="space-y-1.5 text-xs text-slate-600">Storage (MiB)
+                    <input type="number" min="128" max={planLimits?.diskMiB ?? 65536} value={diskMiB} onChange={event => setDiskMiB(event.target.value)} className="nx-input" />
+                  </label>
+                  <label className="space-y-1.5 text-xs text-slate-600">Process limit
+                    <input type="number" min="16" max={planLimits?.processLimit ?? 512} value={processLimit} onChange={event => setProcessLimit(event.target.value)} className="nx-input" />
+                  </label>
+                </div>
+                {planLimits && <p className="mt-2.5 text-[11px] text-slate-500">Hosting plan ceilings: {planLimits.cpuMillis} mCPU · {planLimits.memoryMiB} MiB RAM · {planLimits.diskMiB} MiB storage · {planLimits.processLimit} processes.</p>}
+              </div>
+              <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-amber-700">{selectedProfile?.enabled ? "Runtime profile enabled; deployment still gated." : "Catalog only: execution is disabled. Settings are saved as metadata."}</p>
+                <button type="submit" disabled={saving || !runtimeProfileId} className="nx-btn-primary nx-btn-sm">{saving ? "Saving…" : "Save runtime settings"}</button>
+              </div>
+            </form>
+          )}
         </div>
-        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-          <div className="h-full rounded-full bg-blue-600" style={{ width: `${usage.buildMinutesLimit > 0 ? Math.min(100, (usage.buildMinutesUsed / usage.buildMinutesLimit) * 100) : usage.quotaExhausted ? 100 : 0}%` }}/>
-        </div>
-        <p className="mt-2 text-[11px] text-amber-700">{usage.meteringStatus !== "active" ? "Builder metering has not reported usage yet. This is an allowance preview, not measured usage; build dispatch and quota enforcement remain disabled." : usage.quotaExhausted ? "Monthly build allowance exhausted. Dispatch enforcement is not enabled." : "Usage has been reported by the authenticated builder. Dispatch quota enforcement remains disabled."}</p>
-      </div>}
-      {loading ? <p className="text-xs text-slate-500">Loading runtime catalog…</p> : <form onSubmit={save} className="grid gap-3 md:grid-cols-2">
-        <label className="space-y-1 text-xs font-medium text-slate-700 md:col-span-2">Runtime profile
-          <select required value={runtimeProfileId} onChange={event => {
-            const profile = profiles.find(item => item.id === event.target.value);
-            setRuntimeProfileId(event.target.value);
-            if (profile?.runtimeFamily === "static") { setBuildMethod("static"); setOutputDirectory("dist"); }
-            else if (profile?.runtimeFamily === "container") setBuildMethod("dockerfile");
-            else setBuildMethod("managed");
-          }} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-            <option value="">Choose runtime profile</option>
-            {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.displayName} · {profile.enabled ? "Enabled" : "Catalog only"}</option>)}
-          </select>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Build method
-          <select value={buildMethod} onChange={event => setBuildMethod(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
-            <option value="managed">Managed build</option><option value="static">Static output</option><option value="dockerfile">Dockerfile / OCI</option>
-          </select>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Build context
-          <input value={buildContext} onChange={event => setBuildContext(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"/>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Build command (stored, not executed)
-          <input value={buildCommand} onChange={event => setBuildCommand(event.target.value)} maxLength={1000} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="npm run build"/>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Output directory
-          <input value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} maxLength={240} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="dist"/>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Start command (stored, not executed)
-          <input value={startCommand} onChange={event => setStartCommand(event.target.value)} maxLength={1000} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="npm start"/>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Application port
-          <input type="number" min="1" max="65535" value={listenPort} onChange={event => setListenPort(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="3000"/>
-        </label>
-        <label className="space-y-1 text-xs font-medium text-slate-700">Health check path
-          <input value={healthCheckPath} onChange={event => setHealthCheckPath(event.target.value)} maxLength={200} className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm" placeholder="/health"/>
-        </label>
-        <div className="md:col-span-2 rounded-lg border border-slate-200 bg-white p-3">
-          <p className="mb-3 text-xs font-semibold text-slate-700">Requested runtime resources</p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <label className="space-y-1 text-xs text-slate-600">CPU (millicores)
-              <input type="number" min="100" max={planLimits?.cpuMillis ?? 8000} value={cpuMillis} onChange={event => setCpuMillis(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
-            </label>
-            <label className="space-y-1 text-xs text-slate-600">Memory (MiB)
-              <input type="number" min="128" max={planLimits?.memoryMiB ?? 16384} value={memoryMiB} onChange={event => setMemoryMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
-            </label>
-            <label className="space-y-1 text-xs text-slate-600">Storage (MiB)
-              <input type="number" min="128" max={planLimits?.diskMiB ?? 65536} value={diskMiB} onChange={event => setDiskMiB(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
-            </label>
-            <label className="space-y-1 text-xs text-slate-600">Process limit
-              <input type="number" min="16" max={planLimits?.processLimit ?? 512} value={processLimit} onChange={event => setProcessLimit(event.target.value)} className="w-full rounded-lg border border-slate-200 px-2 py-2 text-sm"/>
-            </label>
-          </div>
-          {planLimits && <p className="mt-2 text-[11px] text-slate-500">Hosting plan ceilings: {planLimits.cpuMillis} mCPU · {planLimits.memoryMiB} MiB RAM · {planLimits.diskMiB} MiB storage · {planLimits.processLimit} processes.</p>}
-        </div>
-        <div className="md:col-span-2 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-amber-700">{selectedProfile?.enabled ? "Runtime profile enabled; deployment still gated." : "Catalog only: execution is disabled. Settings are saved as metadata."}</p>
-          <button type="submit" disabled={saving || !runtimeProfileId} className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50">{saving ? "Saving…" : "Save runtime settings"}</button>
-        </div>
-      </form>}
-    </div>}
-  </div>;
+      )}
+    </div>
+  );
 }
 
 export default function GithubDeployments({ customerMode = false }: { customerMode?: boolean } = {}) {
@@ -297,51 +307,181 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
     finally { setBusy(false); }
   }
 
-  return <main className="min-h-screen bg-[#f4f6fb]">
-    <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-[1500px] items-center gap-3 px-5 py-5">
-      <Link href={customerMode ? "/customer" : "/"} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
-      <span className="grid h-10 w-10 place-items-center rounded-xl bg-slate-950 text-white"><Github size={20}/></span>
-      <div><p className="font-semibold text-slate-950">{customerMode ? "Nexora Deploy" : "GitHub deployments"}</p><p className="text-xs text-slate-500">{customerMode ? "Projects and Git-based website setup" : "Connect repositories and configure website builds"}</p></div>
-    </div></header>
-    <section className="mx-auto max-w-[1100px] space-y-6 px-5 py-8">
-      <div><p className="text-sm font-medium text-blue-700">{customerMode ? "Nexora Deploy · Projects" : "Developer workflow"}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">{customerMode ? "Deploy your website" : "Deploy from GitHub"}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Link a repository to an active Nexora hosting account. Choose the production branch and static build output. Builds will become available after the GitHub-hosted workflow and isolated static publisher pass platform acceptance.</p></div>
-      {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
-      {notice && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</div>}
-      {loading ? <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white p-8 text-sm text-slate-500"><Loader2 className="animate-spin" size={18}/> Loading GitHub settings…</div> : <>
-        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-3"><span className="rounded-xl bg-slate-100 p-3 text-slate-800"><Github size={22}/></span><div><h2 className="font-semibold text-slate-950">GitHub account</h2><p className="mt-1 text-sm text-slate-500">Authorize the Nexora GitHub App to access repositories you select.</p></div></div>
-            {connected ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700"><CheckCircle2 size={14}/> Connected</span> : <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">Not connected</span>}</div>
-          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div><button onClick={disconnectGithub} disabled={busy} title="Disconnect this GitHub account from Nexora" className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button></div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
-          <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-slate-500"><ShieldCheck size={15} className="mt-0.5 shrink-0"/> GitHub App permissions are configured by Nexora. Tokens are encrypted before storage and are never sent to the browser.</p>
-        </div>
-        {connected && <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-slate-950">Link a repository</h2><p className="mt-1 text-sm text-slate-500">Select an installed repository and the hosting account that will serve its built files.</p></div><button onClick={loadRepositories} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"><RefreshCw size={14}/> Refresh repositories</button></div>
-          <form onSubmit={linkRepository} className="mt-5 grid gap-4 md:grid-cols-2">
-            <label className="space-y-1.5 text-sm font-medium text-slate-700 md:col-span-2">GitHub repository<select required value={selectedRepository} onChange={event => { const repo = repositories.find(item => String(item.id) === event.target.value); setSelectedRepository(event.target.value); if (repo) setBranch(repo.defaultBranch); }} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="">Choose a repository</option>{repositories.map(repo => <option key={`${repo.installationId}-${repo.id}`} value={repo.id}>{repo.fullName}{repo.private ? " · Private" : " · Public"}</option>)}</select></label>
-            <label className="space-y-1.5 text-sm font-medium text-slate-700 md:col-span-2">Nexora hosting account<select required value={hostingAccountId} onChange={event => setHostingAccountId(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="">Choose an active hosting account</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.username}{account.primary_domain ? ` · ${account.primary_domain}` : ""}</option>)}</select></label>
-            <label className="space-y-1.5 text-sm font-medium text-slate-700">Production branch<input required value={branch} onChange={event => setBranch(event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" placeholder="main"/></label>
-            <label className="space-y-1.5 text-sm font-medium text-slate-700">Framework<select value={framework} onChange={event => setFramework(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="auto">Auto detect</option><option value="static">Static HTML</option><option value="vite">Vite</option><option value="react">React</option><option value="vue">Vue</option><option value="astro">Astro (static)</option><option value="next-static">Next.js static export</option></select></label>
-            <label className="space-y-1.5 text-sm font-medium text-slate-700">Repository root<input required value={rootDirectory} onChange={event => setRootDirectory(event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" placeholder="."/></label>
-            <label className="space-y-1.5 text-sm font-medium text-slate-700">Build output directory<input required value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" placeholder="dist"/></label>
-            <div className="md:col-span-2"><button type="submit" disabled={busy || !selected || !hostingAccountId} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><Link2 size={16}/> Save repository configuration</button></div>
-          </form>
-          {!repositories.length && <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600"><p className="font-semibold text-slate-800">No repositories are visible yet.</p><p className="mt-1">Connecting the GitHub account authorizes OAuth sign-in; repositories only appear after the Nexora GitHub App is <span className="font-medium">installed</span> and granted repository access.{installationUrl && <> Install or update it at <a href={installationUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-blue-700 hover:underline">GitHub App installation <ExternalLink size={11}/></a>, then use “Refresh repositories”.</>}</p></div>}
-        </div>}
-        <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
-          {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><div className="border-t border-slate-100 px-6 py-4">
-              <div className="mb-3 flex items-center justify-between gap-3"><p className="text-xs font-semibold text-slate-700">Deployment history</p><span className="text-[11px] text-slate-400">{(deploymentsByProject[project.id] ?? []).length} records</span></div>
-              {(deploymentsByProject[project.id] ?? []).length ? <div className="space-y-3">{(deploymentsByProject[project.id] ?? []).map(deployment => <div key={deployment.id} className="rounded-lg border border-slate-200 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-semibold text-slate-800">{deployment.status.replaceAll("_", " ")}</span><span className="text-[11px] text-slate-500">{deployment.requestedAt ? new Date(deployment.requestedAt).toLocaleString() : "Time unavailable"}</span></div>
-                <p className="mt-1 text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType}</p>
-                {deployment.commitMessage && <p className="mt-1 text-xs text-slate-500">{deployment.commitMessage}</p>}
-                {deployment.deploymentUrl && <a href={deployment.deploymentUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex text-xs font-medium text-blue-700 hover:underline">Open deployment URL</a>}
-                {deployment.logExcerpt && <details className="mt-2"><summary className="cursor-pointer text-xs font-medium text-slate-600">View latest log excerpt</summary><pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-3 text-[11px] text-slate-100">{deployment.logExcerpt}</pre></details>}
-              </div>)}</div> : <p className="text-xs text-slate-500">No deployment records yet.</p>}
-            </div>{!customerMode && <RuntimeProjectSettings projectId={project.id}/ >}</div>)}</div> : <div className="px-6 py-8 text-center text-sm text-slate-500">No repositories linked yet.</div>}
-        </div>
-      </>}
-      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><p className="text-sm font-semibold text-amber-900">Deployment execution is not enabled yet</p><p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback remain disabled until the GitHub-hosted build workflow and a separately enrolled, isolated static publisher pass end-to-end acceptance tests.</p></div>
-      <p className="text-xs text-slate-400">Repository links are saved to the current workspace. <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-700 hover:underline">Manage GitHub App installations <ExternalLink size={11}/></a></p>
-    </section>
-  </main>;
+  return (
+    <main className="min-h-screen bg-canvas">
+      {customerMode && (
+        <header className="sticky top-0 z-30 border-b border-white/[0.06] bg-gradient-to-r from-navy-950 via-navy-950 to-navy-900">
+          <div className="mx-auto flex h-[72px] max-w-[1500px] items-center justify-between gap-4 px-5 sm:px-8">
+            <div className="flex min-w-0 items-center gap-3">
+              <NexoraMark size={38} />
+              <div className="min-w-0">
+                <p className="text-[15px] font-bold tracking-tight text-white">Nexora <span className="text-brand-300">Deploy</span></p>
+                <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-slate-500">Git-based deployments</p>
+              </div>
+            </div>
+            <Link href="/customer" className="rounded-xl border border-white/10 bg-white/[0.07] px-3.5 py-2.5 text-xs font-semibold text-slate-100 transition hover:bg-white/[0.12]">Back to hosting</Link>
+          </div>
+        </header>
+      )}
+      <section className="mx-auto max-w-[1150px] space-y-6 px-5 py-8 lg:px-9">
+        {!customerMode && (
+          <PageHeader
+            eyebrow="Hosting services · Git deployments"
+            title="Nexora Deploy"
+            description="Connect repositories to hosting accounts and configure website builds. Builds run in isolated GitHub-hosted runners and publish through the static release pipeline."
+            actions={
+              <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm"><Rocket size={13} className="text-brand-600" /> Deployment platform</span>
+            }
+          />
+        )}
+        {customerMode && (
+          <PageHeader
+            eyebrow="Nexora Deploy · Projects"
+            title="Deploy your website"
+            description="Link a repository to an active Nexora hosting account. Choose the production branch and static build output. Builds become available after the GitHub-hosted workflow and isolated static publisher pass platform acceptance."
+          />
+        )}
+        {error && <InlineAlert tone="error">{error}</InlineAlert>}
+        {notice && <InlineAlert tone="success">{notice}</InlineAlert>}
+        {loading ? (
+          <div className="nx-card flex items-center gap-2.5 p-8 text-sm text-slate-500"><Loader2 className="animate-spin" size={18} /> Loading GitHub settings…</div>
+        ) : <>
+          <SectionCard
+            title="GitHub account"
+            description="Authorize the Nexora GitHub App to access repositories you select."
+            actions={connected
+              ? <StatusBadge tone="success" dot>Connected</StatusBadge>
+              : <StatusBadge tone="neutral">Not connected</StatusBadge>}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="flex items-start gap-3.5">
+                <span className="grid h-11 w-11 place-items-center rounded-xl bg-navy-950 text-white"><Github size={21} /></span>
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">GitHub App authorization</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">Tokens are encrypted before storage and are never sent to the browser.</p>
+                </div>
+              </div>
+              {connected ? (
+                <button onClick={disconnectGithub} disabled={busy} title="Disconnect this GitHub account from Nexora" className="nx-btn-secondary"><Unplug size={15} /> Disconnect</button>
+              ) : (
+                <button onClick={connectGithub} disabled={busy} className="nx-btn bg-navy-950 text-white shadow-sm hover:bg-navy-900"><Github size={16} /> Connect GitHub</button>
+              )}
+            </div>
+            {connected && (
+              <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+                <div>
+                  <p className="text-sm font-bold text-slate-900">@{connection?.login}</p>
+                  <p className="mt-0.5 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p>
+                </div>
+                <ShieldCheck size={16} className="text-emerald-600" />
+              </div>
+            )}
+          </SectionCard>
+
+          {connected && (
+            <SectionCard
+              title="Link a repository"
+              description="Select an installed repository and the hosting account that will serve its built files."
+              actions={<button onClick={loadRepositories} disabled={busy} className="nx-btn-secondary nx-btn-sm"><RefreshCw size={14} /> Refresh repositories</button>}
+            >
+              <form onSubmit={linkRepository} className="grid gap-4 md:grid-cols-2">
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600 md:col-span-2">GitHub repository
+                  <select required value={selectedRepository} onChange={event => { const repo = repositories.find(item => String(item.id) === event.target.value); setSelectedRepository(event.target.value); if (repo) setBranch(repo.defaultBranch); }} className="nx-select">
+                    <option value="">Choose a repository</option>
+                    {repositories.map(repo => <option key={`${repo.installationId}-${repo.id}`} value={repo.id}>{repo.fullName}{repo.private ? " · Private" : " · Public"}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600 md:col-span-2">Nexora hosting account
+                  <select required value={hostingAccountId} onChange={event => setHostingAccountId(event.target.value)} className="nx-select">
+                    <option value="">Choose an active hosting account</option>
+                    {accounts.map(account => <option key={account.id} value={account.id}>{account.username}{account.primary_domain ? ` · ${account.primary_domain}` : ""}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600">Production branch
+                  <input required value={branch} onChange={event => setBranch(event.target.value)} className="nx-input" placeholder="main" />
+                </label>
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600">Framework
+                  <select value={framework} onChange={event => setFramework(event.target.value)} className="nx-select">
+                    <option value="auto">Auto detect</option><option value="static">Static HTML</option><option value="vite">Vite</option><option value="react">React</option><option value="vue">Vue</option><option value="astro">Astro (static)</option><option value="next-static">Next.js static export</option>
+                  </select>
+                </label>
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600">Repository root
+                  <input required value={rootDirectory} onChange={event => setRootDirectory(event.target.value)} className="nx-input" placeholder="." />
+                </label>
+                <label className="space-y-1.5 text-xs font-semibold text-slate-600">Build output directory
+                  <input required value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} className="nx-input" placeholder="dist" />
+                </label>
+                <div className="md:col-span-2">
+                  <button type="submit" disabled={busy || !selected || !hostingAccountId} className="nx-btn-primary"><Link2 size={16} /> Save repository configuration</button>
+                </div>
+              </form>
+              {!repositories.length && (
+                <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-xs leading-5 text-slate-600">
+                  <p className="font-semibold text-slate-800">No repositories are visible yet.</p>
+                  <p className="mt-1">Connecting the GitHub account authorizes OAuth sign-in; repositories only appear after the Nexora GitHub App is <span className="font-semibold">installed</span> and granted repository access.{installationUrl && <> Install or update it at <a href={installationUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline">GitHub App installation <ExternalLink size={11} /></a>, then use “Refresh repositories”.</>}</p>
+                </div>
+              )}
+            </SectionCard>
+          )}
+
+          <SectionCard title="Linked projects" description="Repository-to-hosting-account configurations." flush>
+            {projects.length ? (
+              <div className="divide-y divide-slate-100">
+                {projects.map(project => (
+                  <div key={project.id}>
+                    <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold text-slate-900">{project.repositoryFullName}</p>
+                        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13} className="text-slate-400" />{project.productionBranch}<span className="text-slate-300">·</span>{project.framework}<span className="text-slate-300">·</span>Output: {project.outputDirectory}</p>
+                      </div>
+                      <StatusBadge tone={statusTone(project.status)} dot>{project.status === "configured" ? "Configured · build worker pending" : project.status}</StatusBadge>
+                    </div>
+                    <div className="border-t border-slate-100 bg-slate-50/50 px-6 py-4">
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <p className="text-xs font-semibold text-slate-700">Deployment history</p>
+                        <span className="text-[11px] text-slate-400">{(deploymentsByProject[project.id] ?? []).length} records</span>
+                      </div>
+                      {(deploymentsByProject[project.id] ?? []).length ? (
+                        <div className="space-y-2.5">
+                          {(deploymentsByProject[project.id] ?? []).map(deployment => (
+                            <div key={deployment.id} className="rounded-xl border border-slate-200 bg-white p-3.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <StatusBadge tone={statusTone(deployment.status)} dot>{deployment.status.replaceAll("_", " ")}</StatusBadge>
+                                <span className="text-[11px] text-slate-500">{deployment.requestedAt ? new Date(deployment.requestedAt).toLocaleString() : "Time unavailable"}</span>
+                              </div>
+                              <p className="mt-2 font-mono text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType}</p>
+                              {deployment.commitMessage && <p className="mt-1 text-xs leading-5 text-slate-500">{deployment.commitMessage}</p>}
+                              {deployment.deploymentUrl && <a href={deployment.deploymentUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:underline">Open deployment URL <ExternalLink size={11} /></a>}
+                              {deployment.logExcerpt && (
+                                <details className="mt-2">
+                                  <summary className="cursor-pointer text-xs font-semibold text-slate-600 hover:text-slate-900">View latest log excerpt</summary>
+                                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-navy-950 p-3 font-mono text-[11px] leading-5 text-slate-100">{deployment.logExcerpt}</pre>
+                                </details>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : <p className="text-xs text-slate-500">No deployment records yet.</p>}
+                    </div>
+                    {!customerMode && <RuntimeProjectSettings projectId={project.id} />}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState icon={Github} title="No repositories linked yet" description="Connect the GitHub account above, then link a repository to an active hosting account to create the first project." />
+            )}
+          </SectionCard>
+
+          <div className="flex items-start gap-3.5 rounded-2xl border border-amber-200 bg-amber-50 p-5">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700"><Rocket size={17} /></span>
+            <div>
+              <p className="text-sm font-bold text-amber-900">Deployment execution is not enabled yet</p>
+              <p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback remain disabled until the GitHub-hosted build workflow and a separately enrolled, isolated static publisher pass end-to-end acceptance tests.</p>
+            </div>
+          </div>
+          <p className="text-xs text-slate-400">Repository links are saved to the current workspace. <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline">Manage GitHub App installations <ExternalLink size={11} /></a></p>
+        </>}
+      </section>
+    </main>
+  );
 }

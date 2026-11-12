@@ -1,8 +1,11 @@
 "use client";
 
 import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { ArrowLeft, ChevronRight, Download, File, FilePlus2, Folder, FolderPlus, RefreshCw, Save, Trash2, Upload, X } from "lucide-react";
+import { ChevronRight, Download, File, FilePlus2, Folder, FolderPlus, RefreshCw, Save, Trash2, Upload, X, Pencil } from "lucide-react";
+import {
+  EmptyState, InlineAlert, PageHeader, SectionCard, Spinner, StatusBadge,
+  TableFrame, Th,
+} from "@/components/ui";
 
 type Account = { id: string; username: string; status: string; server_hostname: string };
 type FileEntry = { name: string; isDir: boolean; size: number; modifiedAt: string };
@@ -224,82 +227,130 @@ export default function FileManagerPage() {
     finally { setBusy(false); }
   }
 
-  return <main className="min-h-full bg-transparent text-slate-900">
-    <header className="border-b border-slate-200/70 bg-white/85 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-5 py-4">
-        <div className="flex items-center gap-3">
-          <Link href="/" aria-label="Back to overview" className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
-          <span className="grid h-10 w-10 place-items-center rounded-xl bg-blue-700 text-white"><Folder size={20}/></span>
-          <div><p className="font-semibold">File Manager</p><p className="text-xs text-slate-500">Nexora Control / Websites</p></div>
-        </div>
-        <button onClick={() => void refresh()} disabled={!accountId || busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50 disabled:opacity-50"><RefreshCw size={15}/> Refresh</button>
-      </div>
-    </header>
+  return (
+    <main className="mx-auto max-w-[1400px] px-5 py-8 lg:px-9">
+      <PageHeader
+        eyebrow="Hosting services · Website files"
+        title="File Manager"
+        description="Browse, upload, edit and organize files inside a hosting account's public_html directory."
+        actions={
+          <>
+            <label className="text-xs font-semibold text-slate-500">
+              <span className="sr-only">Hosting account</span>
+              <select aria-label="Hosting account" value={accountId} onChange={e => setAccountId(e.target.value)} className="nx-select min-w-56">
+                {accounts.length === 0 && <option value="">No active accounts</option>}
+                {accounts.map(account => <option key={account.id} value={account.id}>{account.username} · {account.server_hostname}</option>)}
+              </select>
+            </label>
+            <button onClick={() => void refresh()} disabled={!accountId || busy} className="nx-btn-secondary"><RefreshCw size={15} /> Refresh</button>
+          </>
+        }
+      />
 
-    <section className="mx-auto max-w-7xl space-y-5 px-5 py-8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div><p className="text-sm font-medium text-blue-700">Website files</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">Manage website files</h1><p className="mt-2 max-w-2xl text-sm text-slate-500">Browse, upload, edit and organize files inside a hosting account&apos;s public_html directory.</p></div>
-        <label className="text-xs font-medium text-slate-600">Hosting account
-          <select value={accountId} onChange={e => setAccountId(e.target.value)} className="mt-1.5 block min-w-56 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm">
-            {accounts.map(account => <option key={account.id} value={account.id}>{account.username} · {account.server_hostname}</option>)}
-          </select>
-        </label>
-      </div>
+      {error && <InlineAlert tone="error" onDismiss={() => setError("")} className="mt-6">{error}</InlineAlert>}
+      {notice && <InlineAlert tone="success" onDismiss={() => setNotice("")} className="mt-6">{notice}</InlineAlert>}
 
-      {error && <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
-      {notice && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
-
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold">{selectedAccount ? selectedAccount.username + " / public_html" : "No active hosting account"}</p>
-            <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-slate-500">
-              <button onClick={() => void loadDirectory("")} className="hover:text-blue-700">public_html</button>
-              {segments.map((segment, index) => {
-                const target = segments.slice(0, index + 1).join("/");
-                return <span key={target} className="inline-flex items-center gap-1"><ChevronRight size={12}/><button onClick={() => void loadDirectory(target)} className="hover:text-blue-700">{segment}</button></span>;
-              })}
-            </div>
-          </div>
+      <SectionCard
+        className="mt-6"
+        flush
+        title={selectedAccount ? selectedAccount.username + " / public_html" : "No active hosting account"}
+        description={selectedAccount ? "Operations run as queued jobs on the connected Linux agent" : undefined}
+        actions={
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => void createEmptyFile()} disabled={!accountId || busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-50"><FilePlus2 size={14}/> New file</button>
-            <button onClick={() => void createFolder()} disabled={!accountId || busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 disabled:opacity-50"><FolderPlus size={14}/> New folder</button>
-            <label className={"inline-flex cursor-pointer items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white " + (!accountId || busy ? "pointer-events-none opacity-50" : "")}><Upload size={14}/> Upload<input type="file" className="hidden" onChange={uploadFile} disabled={!accountId || busy}/></label>
+            <button onClick={() => void createEmptyFile()} disabled={!accountId || busy} className="nx-btn-secondary nx-btn-sm"><FilePlus2 size={14} /> New file</button>
+            <button onClick={() => void createFolder()} disabled={!accountId || busy} className="nx-btn-secondary nx-btn-sm"><FolderPlus size={14} /> New folder</button>
+            <label className={"nx-btn-primary nx-btn-sm cursor-pointer " + (!accountId || busy ? "pointer-events-none opacity-50" : "")}>
+              <Upload size={14} /> Upload
+              <input type="file" className="hidden" onChange={uploadFile} disabled={!accountId || busy} aria-label="Upload file" />
+            </label>
           </div>
+        }
+      >
+        <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-3 sm:px-6">
+          <nav className="flex flex-wrap items-center gap-1 text-xs text-slate-500" aria-label="Directory path">
+            <button onClick={() => void loadDirectory("")} className="rounded px-1.5 py-0.5 font-semibold text-slate-700 transition hover:bg-slate-200/60 hover:text-brand-700">public_html</button>
+            {segments.map((segment, index) => {
+              const target = segments.slice(0, index + 1).join("/");
+              return (
+                <span key={target} className="inline-flex items-center gap-1">
+                  <ChevronRight size={12} className="text-slate-300" />
+                  <button onClick={() => void loadDirectory(target)} className="rounded px-1.5 py-0.5 transition hover:bg-slate-200/60 hover:text-brand-700">{segment}</button>
+                </span>
+              );
+            })}
+          </nav>
         </div>
 
-        {showEditor && <div className="border-b border-slate-200 bg-slate-50 p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">Editing {editorPath}</p><p className="text-xs text-slate-500">Text editor · maximum 256 KiB</p></div><div className="flex gap-2"><button onClick={() => void saveFile()} disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"><Save size={14}/> Save</button><button onClick={() => setShowEditor(false)} className="rounded-lg border border-slate-200 p-2 text-slate-600"><X size={14}/></button></div></div>
-          <textarea value={editorContent} onChange={e => setEditorContent(e.target.value)} spellCheck={false} className="min-h-72 w-full rounded-xl border border-slate-200 bg-white p-4 font-mono text-xs leading-5 text-slate-800 outline-none focus:border-blue-500"/>
-        </div>}
+        {showEditor && (
+          <div className="border-b border-slate-200 bg-slate-900 p-4 sm:p-5">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate font-mono text-xs font-semibold text-slate-100">Editing {editorPath}</p>
+                <p className="mt-0.5 text-[11px] text-slate-400">Text editor · maximum 256 KiB per file</p>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => void saveFile()} disabled={busy} className="nx-btn-primary nx-btn-sm"><Save size={14} /> Save</button>
+                <button onClick={() => setShowEditor(false)} aria-label="Close editor" className="rounded-lg border border-white/15 p-2 text-slate-300 transition hover:bg-white/10"><X size={14} /></button>
+              </div>
+            </div>
+            <textarea value={editorContent} onChange={e => setEditorContent(e.target.value)} spellCheck={false} aria-label="File content editor"
+              className="min-h-72 w-full rounded-xl border border-white/10 bg-navy-950 p-4 font-mono text-xs leading-5 text-slate-100 outline-none focus:border-brand-400 focus:ring-4 focus:ring-brand-500/20" />
+          </div>
+        )}
 
-        {loading ? <div className="p-12 text-center text-sm text-slate-500">Connecting to the hosting server…</div> :
-          !selectedAccount ? <div className="p-12 text-center"><Folder size={32} className="mx-auto text-slate-300"/><h3 className="mt-3 font-medium">No active hosting accounts</h3><p className="mt-1 text-sm text-slate-500">Provision a hosting account before managing website files.</p></div> :
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[650px] text-left text-sm">
-              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-5 py-3 font-medium">Name</th><th className="px-5 py-3 font-medium">Size</th><th className="px-5 py-3 font-medium">Modified</th><th className="px-5 py-3 text-right font-medium">Actions</th></tr></thead>
-              <tbody className="divide-y divide-slate-100">
-                {path && <tr><td colSpan={4} className="px-5 py-3"><button onClick={() => void loadDirectory(parentPath)} className="text-xs font-medium text-blue-700 hover:underline">.. Parent directory</button></td></tr>}
-                {entries.map(entry => {
-                  const itemPath = path ? path + "/" + entry.name : entry.name;
-                  return <tr key={itemPath} className="hover:bg-slate-50/70">
-                    <td className="px-5 py-3"><button onClick={() => entry.isDir ? void loadDirectory(itemPath) : void openFile(itemPath)} className="inline-flex items-center gap-2 font-medium text-slate-800 hover:text-blue-700">{entry.isDir ? <Folder size={16} className="text-amber-500"/> : <File size={16} className="text-slate-400"/>}{entry.name}</button></td>
-                    <td className="px-5 py-3 text-xs text-slate-500">{entry.isDir ? "—" : bytesLabel(entry.size)}</td>
-                    <td className="px-5 py-3 text-xs text-slate-500">{new Date(entry.modifiedAt).toLocaleString()}</td>
-                    <td className="px-5 py-3"><div className="flex justify-end gap-1">
-                      {!entry.isDir && <button title="Download" onClick={() => void downloadFile(itemPath)} disabled={busy} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><Download size={15}/></button>}
-                      <button title="Rename" onClick={() => void renameEntry(entry)} disabled={busy} className="rounded-lg px-2 py-1 text-xs text-slate-600 hover:bg-slate-100">Rename</button>
-                      <button title="Delete" onClick={() => void deleteEntry(entry)} disabled={busy} className="rounded-lg p-2 text-slate-500 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>
-                    </div></td>
-                  </tr>;
-                })}
-                {!entries.length && <tr><td colSpan={4} className="px-5 py-12 text-center text-sm text-slate-500">This directory is empty.</td></tr>}
-              </tbody>
-            </table>
-          </div>}
-        {busy && <div className="border-t border-slate-100 px-5 py-3 text-xs text-blue-700">Waiting for the connected Linux agent…</div>}
-      </section>
-      <p className="text-xs leading-5 text-slate-400">Security boundary: operations are restricted to the selected account&apos;s public_html directory. Symlinks are excluded, and individual file transfers are limited to 256 KiB in this initial version.</p>
-    </section>
-  </main>;
+        {loading ? (
+          <div className="flex items-center justify-center gap-3 py-14 text-sm text-slate-500"><Spinner /> Connecting to the hosting server…</div>
+        ) : !selectedAccount ? (
+          <EmptyState icon={Folder} title="No active hosting accounts" description="Provision a hosting account before managing website files." />
+        ) : (
+          <TableFrame minWidth={640} head={<tr><Th>Name</Th><Th>Size</Th><Th>Modified</Th><Th right>Actions</Th></tr>}>
+            {path && (
+              <tr className="hover:bg-slate-50/70">
+                <td colSpan={4} className="px-5 py-2.5">
+                  <button onClick={() => void loadDirectory(parentPath)} className="text-xs font-semibold text-brand-600 hover:underline">.. Parent directory</button>
+                </td>
+              </tr>
+            )}
+            {entries.map(entry => {
+              const itemPath = path ? path + "/" + entry.name : entry.name;
+              return (
+                <tr key={itemPath} className="transition hover:bg-slate-50/70">
+                  <td className="px-5 py-3">
+                    <button onClick={() => entry.isDir ? void loadDirectory(itemPath) : void openFile(itemPath)} className="inline-flex items-center gap-2.5 font-medium text-slate-800 transition hover:text-brand-700">
+                      {entry.isDir
+                        ? <Folder size={16} className="shrink-0 text-amber-500" />
+                        : <File size={16} className="shrink-0 text-slate-400" />}
+                      {entry.name}
+                    </button>
+                  </td>
+                  <td className="px-5 py-3 text-xs tabular-nums text-slate-500">{entry.isDir ? "—" : bytesLabel(entry.size)}</td>
+                  <td className="px-5 py-3 text-xs text-slate-500">{new Date(entry.modifiedAt).toLocaleString()}</td>
+                  <td className="px-5 py-3">
+                    <div className="flex justify-end gap-1.5">
+                      {!entry.isDir && <button title="Download" aria-label={`Download ${entry.name}`} onClick={() => void downloadFile(itemPath)} disabled={busy} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"><Download size={15} /></button>}
+                      <button title="Rename" aria-label={`Rename ${entry.name}`} onClick={() => void renameEntry(entry)} disabled={busy} className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"><Pencil size={14} /></button>
+                      <button title="Delete" aria-label={`Delete ${entry.name}`} onClick={() => void deleteEntry(entry)} disabled={busy} className="rounded-lg p-2 text-slate-500 transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"><Trash2 size={15} /></button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {!entries.length && (
+              <tr><td colSpan={4}><EmptyState icon={Folder} title="This directory is empty" description="Upload a file or create a new folder to get started." /></td></tr>
+            )}
+          </TableFrame>
+        )}
+        {busy && (
+          <div className="flex items-center gap-2.5 border-t border-slate-100 px-5 py-3 text-xs text-slate-500 sm:px-6">
+            <Spinner className="h-3.5 w-3.5" /> Waiting for the connected Linux agent…
+          </div>
+        )}
+      </SectionCard>
+
+      <p className="mt-5 flex items-start gap-2 text-xs leading-5 text-slate-400">
+        <StatusBadge tone="neutral">Security boundary</StatusBadge>
+        <span>Operations are restricted to the selected account&apos;s public_html directory. Symlinks are excluded, and individual file transfers are limited to 256 KiB in this initial version.</span>
+      </p>
+    </main>
+  );
 }
