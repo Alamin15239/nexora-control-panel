@@ -1,18 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ExternalLink, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug, Rocket } from "lucide-react";
+import { ArrowUpRight, ExternalLink, Github, GitBranch, KeyRound, Link2, Loader2, RefreshCw, ScrollText, ShieldCheck, Unplug, Rocket } from "lucide-react";
 import {
-  EmptyState, InlineAlert, Meter, NexoraMark, PageHeader, SectionCard,
-  StatusBadge, statusTone,
+  EmptyState, InlineAlert, Meter, Modal, NexoraMark, PageHeader, SectionCard,
+  Spinner, StatusBadge, statusTone,
 } from "@/components/ui";
 
 type Connection = { login: string; scopes: string; connectedAt: string } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
-type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
-type Deployment = { id: string; commitSha: string; branch: string; triggerType: string; status: string; commitMessage: string | null; deploymentUrl: string | null; logExcerpt: string | null; requestedAt: string; startedAt: string | null; finishedAt: string | null };
+type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string; previewEnabled?: number; autoDeploy?: number; ignoredBuildPaths?: string[] };
+type Deployment = { id: string; commitSha: string; branch: string; triggerType: string; status: string; deploymentKind?: string; commitMessage: string | null; deploymentUrl: string | null; logExcerpt: string | null; requestedAt: string; startedAt: string | null; finishedAt: string | null };
 
 type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; displayName: string; enabled: boolean; selectable: boolean };
 type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
@@ -212,6 +212,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   const [framework, setFramework] = useState("auto");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [detection, setDetection] = useState<{ framework: string; outputDirectory: string; detectedFrom: string } | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -243,6 +244,29 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load GitHub deployment settings."); }
     finally { setLoading(false); }
   }, [customerMode]);
+
+  // Framework detection is best-effort: it prefills the build contract from
+  // the repository's actual contents and never blocks manual selection.
+  const onRepositorySelected = async (id: string) => {
+    const repo = repositories.find(item => String(item.id) === id);
+    setSelectedRepository(id);
+    setDetection(null);
+    if (!repo) return;
+    setBranch(repo.defaultBranch);
+    try {
+      const response = await fetch("/api/control/github/projects/detect-framework", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryId: repo.id, installationId: repo.installationId, repositoryFullName: repo.fullName, branch: repo.defaultBranch }),
+      });
+      const data = await response.json() as { framework?: string; outputDirectory?: string; detectedFrom?: string };
+      if (response.ok && typeof data.framework === "string") {
+        const known = ["static", "vite", "react", "vue", "astro", "next-static"];
+        if (known.includes(data.framework)) setFramework(data.framework);
+        if (typeof data.outputDirectory === "string" && data.outputDirectory) setOutputDirectory(data.outputDirectory);
+        setDetection({ framework: data.framework, outputDirectory: String(data.outputDirectory ?? ""), detectedFrom: String(data.detectedFrom ?? "") });
+      }
+    } catch { /* detection is best-effort; manual selection still works */ }
+  };
 
   const loadRepositories = useCallback(async () => {
     if (!connected) return;
@@ -386,7 +410,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
             >
               <form onSubmit={linkRepository} className="grid gap-4 md:grid-cols-2">
                 <label className="space-y-1.5 text-xs font-semibold text-slate-600 md:col-span-2">GitHub repository
-                  <select required value={selectedRepository} onChange={event => { const repo = repositories.find(item => String(item.id) === event.target.value); setSelectedRepository(event.target.value); if (repo) setBranch(repo.defaultBranch); }} className="nx-select">
+                  <select required value={selectedRepository} onChange={event => onRepositorySelected(event.target.value)} className="nx-select">
                     <option value="">Choose a repository</option>
                     {repositories.map(repo => <option key={`${repo.installationId}-${repo.id}`} value={repo.id}>{repo.fullName}{repo.private ? " · Private" : " · Public"}</option>)}
                   </select>
@@ -411,6 +435,11 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                 <label className="space-y-1.5 text-xs font-semibold text-slate-600">Build output directory
                   <input required value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} className="nx-input" placeholder="dist" />
                 </label>
+                {detection && (
+                  <p className="md:col-span-2 text-xs text-slate-500">
+                    Detected <span className="font-semibold text-slate-700">{detection.framework}</span> from {detection.detectedFrom || "repository contents"} — build output prefilled to {detection.outputDirectory}.
+                  </p>
+                )}
                 <div className="md:col-span-2">
                   <button type="submit" disabled={busy || !selected || !hostingAccountId} className="nx-btn-primary"><Link2 size={16} /> Save repository configuration</button>
                 </div>
@@ -436,6 +465,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                       </div>
                       <StatusBadge tone={statusTone(project.status)} dot>{project.status === "configured" ? "Configured · build worker pending" : project.status}</StatusBadge>
                     </div>
+                    <ProjectDeployTools project={project} onChanged={() => { void load(); }} />
                     <div className="border-t border-slate-100 bg-slate-50/50 px-6 py-4">
                       <div className="mb-3 flex items-center justify-between gap-3">
                         <p className="text-xs font-semibold text-slate-700">Deployment history</p>
@@ -447,9 +477,9 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                             <div key={deployment.id} className="rounded-xl border border-slate-200 bg-white p-3.5">
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <StatusBadge tone={statusTone(deployment.status)} dot>{deployment.status.replaceAll("_", " ")}</StatusBadge>
-                                <span className="text-[11px] text-slate-500">{deployment.requestedAt ? new Date(deployment.requestedAt).toLocaleString() : "Time unavailable"}</span>
+                                <DeploymentActions projectId={project.id} deployment={deployment} onChanged={() => { void load(); }} />
                               </div>
-                              <p className="mt-2 font-mono text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType}</p>
+                              <p className="mt-2 font-mono text-xs text-slate-600">{deployment.branch} · {deployment.commitSha.slice(0, 12)} · {deployment.triggerType} · {deployment.deploymentKind === "preview" ? "preview" : "production"}</p>
                               {deployment.commitMessage && <p className="mt-1 text-xs leading-5 text-slate-500">{deployment.commitMessage}</p>}
                               {deployment.deploymentUrl && <a href={deployment.deploymentUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:underline">Open deployment URL <ExternalLink size={11} /></a>}
                               {deployment.logExcerpt && (
@@ -475,13 +505,294 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
           <div className="flex items-start gap-3.5 rounded-2xl border border-amber-200 bg-amber-50 p-5">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700"><Rocket size={17} /></span>
             <div>
-              <p className="text-sm font-bold text-amber-900">Deployment execution is not enabled yet</p>
-              <p className="mt-1 text-sm leading-6 text-amber-800">Repository connection and project configuration are available in this milestone. Actual builds, automatic push deployments, deployment logs and rollback remain disabled until the GitHub-hosted build workflow and a separately enrolled, isolated static publisher pass end-to-end acceptance tests.</p>
+              <p className="text-sm font-bold text-amber-900">Public serving and rollback are still in acceptance</p>
+              <p className="mt-1 text-sm leading-6 text-amber-800">Repository configuration, manual dispatch, push/PR webhooks with preview deployments, environment variables, webhook secrets, and build logs are wired end to end. Public serving of deployment hostnames and one-click rollback remain gated until the isolated static publisher passes end-to-end acceptance on the production runtime.</p>
             </div>
           </div>
           <p className="text-xs text-slate-400">Repository links are saved to the current workspace. <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline">Manage GitHub App installations <ExternalLink size={11} /></a></p>
         </>}
       </section>
     </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Nexora Deploy batch-6 wiring: environment variables, deploy settings,
+// webhook secret rotation, deployment logs, and preview promotion. All calls
+// go through the /api/control proxy (session + route allowlist); the control
+// plane enforces role, tenant, and encryption boundaries.
+// ---------------------------------------------------------------------------
+
+type EnvVar = { id: string; keyName: string; environment: string; target: string; isSecret: boolean; createdAt: string; updatedAt: string };
+type LogLine = { seq: number; source: string; message: string; emittedAt: string };
+
+function EnvVarsPanel({ projectId }: { projectId: string }) {
+  const [variables, setVariables] = useState<EnvVar[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [keyName, setKeyName] = useState("");
+  const [value, setValue] = useState("");
+  const [environment, setEnvironment] = useState("production");
+  const [target, setTarget] = useState("runtime");
+  const [isSecret, setIsSecret] = useState(true);
+
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/control/github/projects/${projectId}/env-vars`, { cache: "no-store" });
+      const data = await response.json();
+      if (response.ok) setVariables(data.variables ?? []);
+      else setError(data.message ?? "Unable to load environment variables.");
+    } catch { setError("Unable to load environment variables."); }
+    finally { setLoading(false); }
+  }, [projectId]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const add = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`/api/control/github/projects/${projectId}/env-vars`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: keyName, value, environment, target, isSecret }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? "Unable to save the variable.");
+      setKeyName(""); setValue("");
+      await load();
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to save the variable."); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (id: string) => {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`/api/control/github/projects/${projectId}/env-vars/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.message ?? "Unable to delete the variable.");
+      }
+      await load();
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to delete the variable."); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-bold text-slate-800">Environment variables</p>
+        <span className="text-[11px] text-slate-400">{variables.length} · values never leave the control plane</span>
+      </div>
+      {error && <div className="mt-2"><InlineAlert tone="error">{error}</InlineAlert></div>}
+      {loading ? (
+        <p className="mt-3 flex items-center gap-2 text-xs text-slate-500"><Spinner className="h-3.5 w-3.5" /> Loading…</p>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          {variables.length ? variables.map(variable => (
+            <div key={variable.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50/70 px-3 py-2">
+              <div className="min-w-0 font-mono text-xs text-slate-700">
+                {variable.keyName}
+                <span className="ml-2 inline-flex items-center gap-1 font-sans text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                  {variable.environment} · {variable.target}{variable.isSecret ? " · secret" : ""}
+                </span>
+              </div>
+              <button onClick={() => remove(variable.id)} disabled={busy} className="text-[11px] font-semibold text-rose-600 hover:underline disabled:opacity-50">Remove</button>
+            </div>
+          )) : <p className="text-xs text-slate-500">No variables yet. Build-target values for the selected environment are injected into the builder at deploy time and redacted from logs.</p>}
+        </div>
+      )}
+      <form onSubmit={add} className="mt-3 grid gap-2 md:grid-cols-12">
+        <input required value={keyName} onChange={event => setKeyName(event.target.value)} maxLength={128} placeholder="KEY_NAME" className="nx-input md:col-span-3 font-mono text-xs" aria-label="Variable key" />
+        <input required type="password" value={value} onChange={event => setValue(event.target.value)} maxLength={32768} placeholder="Value" className="nx-input md:col-span-4 text-xs" aria-label="Variable value" />
+        <select value={environment} onChange={event => setEnvironment(event.target.value)} className="nx-select md:col-span-2 text-xs" aria-label="Environment">
+          <option value="production">Production</option><option value="preview">Preview</option><option value="development">Development</option>
+        </select>
+        <select value={target} onChange={event => setTarget(event.target.value)} className="nx-select md:col-span-2 text-xs" aria-label="Target">
+          <option value="build">Build</option><option value="runtime">Runtime</option><option value="both">Both</option>
+        </select>
+        <button type="submit" disabled={busy} className="nx-btn-secondary nx-btn-sm md:col-span-1 justify-center">Add</button>
+        <label className="flex items-center gap-1.5 text-[11px] text-slate-500 md:col-span-12">
+          <input type="checkbox" checked={isSecret} onChange={event => setIsSecret(event.target.checked)} className="h-3.5 w-3.5 rounded border-slate-300" />
+          Mask as secret in the dashboard (values are never returned by the API regardless).
+        </label>
+      </form>
+    </div>
+  );
+}
+
+function DeploySettingsPanel({ project, onChanged }: { project: Project; onChanged: () => void }) {
+  const [previewEnabled, setPreviewEnabled] = useState(project.previewEnabled === 1);
+  const [autoDeploy, setAutoDeploy] = useState(project.autoDeploy !== 0);
+  const [ignoredPaths, setIgnoredPaths] = useState((project.ignoredBuildPaths ?? []).join(", "));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const save = async (next: { previewEnabled: boolean; autoDeploy: boolean; ignoredBuildPaths: string[] }) => {
+    setBusy(true); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/control/github/projects/${project.id}/deploy-settings`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? "Unable to save deploy settings.");
+      setPreviewEnabled(data.settings.previewEnabled);
+      setAutoDeploy(data.settings.autoDeploy);
+      setIgnoredPaths((data.settings.ignoredBuildPaths ?? []).join(", "));
+      setNotice("Deploy settings saved.");
+      onChanged();
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to save deploy settings."); }
+    finally { setBusy(false); }
+  };
+
+  const pathList = () => ignoredPaths.split(",").map(item => item.trim()).filter(Boolean);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <p className="text-xs font-bold text-slate-800">Deploy settings</p>
+      {error && <div className="mt-2"><InlineAlert tone="error">{error}</InlineAlert></div>}
+      {notice && <div className="mt-2"><InlineAlert tone="success">{notice}</InlineAlert></div>}
+      <div className="mt-3 space-y-2.5 text-xs text-slate-600">
+        <label className="flex items-center justify-between gap-3">
+          <span>Auto-deploy on push to the production branch</span>
+          <input type="checkbox" checked={autoDeploy} onChange={event => { setAutoDeploy(event.target.checked); void save({ previewEnabled, autoDeploy: event.target.checked, ignoredBuildPaths: pathList() }); }} disabled={busy} className="h-4 w-4 rounded border-slate-300" />
+        </label>
+        <label className="flex items-center justify-between gap-3">
+          <span>Preview deployments for pull requests</span>
+          <input type="checkbox" checked={previewEnabled} onChange={event => { setPreviewEnabled(event.target.checked); void save({ previewEnabled: event.target.checked, autoDeploy, ignoredBuildPaths: pathList() }); }} disabled={busy} className="h-4 w-4 rounded border-slate-300" />
+        </label>
+        <div>
+          <input value={ignoredPaths} onChange={event => setIgnoredPaths(event.target.value)} placeholder="docs/, README.md, .github/" className="nx-input text-xs" aria-label="Ignored build paths" />
+          <p className="mt-1 text-[11px] text-slate-400">Comma-separated path prefixes; pushes that only touch these paths skip the deploy.</p>
+        </div>
+        <button onClick={() => void save({ previewEnabled, autoDeploy, ignoredBuildPaths: pathList() })} disabled={busy} className="nx-btn-secondary nx-btn-sm">Save ignored paths</button>
+      </div>
+    </div>
+  );
+}
+
+function ProjectDeployTools({ project, onChanged }: { project: Project; onChanged: () => void }) {
+  const [rotating, setRotating] = useState(false);
+  const [rotatedSecret, setRotatedSecret] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  const rotateSecret = async () => {
+    if (!window.confirm("Rotate the webhook secret for this repository? The previous secret stops working immediately and GitHub rejects deliveries signed with it until you update the repository webhook settings.")) return;
+    setRotating(true); setError("");
+    try {
+      const response = await fetch(`/api/control/github/projects/${project.id}/webhook-secret`, { method: "PUT" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? "Unable to rotate the webhook secret.");
+      setRotatedSecret(String(data.webhookSecret ?? ""));
+      onChanged();
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to rotate the webhook secret."); }
+    finally { setRotating(false); }
+  };
+
+  return (
+    <div className="grid gap-3 border-t border-slate-100 bg-slate-50/70 px-6 py-4 md:grid-cols-2">
+      <div className="space-y-3">
+        <DeploySettingsPanel project={project} onChanged={onChanged} />
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs font-bold text-slate-800">Push & PR webhooks</p>
+            <button onClick={rotateSecret} disabled={rotating} className="nx-btn-secondary nx-btn-sm"><KeyRound size={13} /> {rotating ? "Rotating…" : "Rotate secret"}</button>
+          </div>
+          {error && <div className="mt-2"><InlineAlert tone="error">{error}</InlineAlert></div>}
+          {rotatedSecret && (
+            <div className="mt-2">
+              <InlineAlert tone="success">
+                <span className="block font-semibold">Copy this secret now</span>
+                <span className="mt-1 block break-all font-mono text-[11px]">{rotatedSecret}</span>
+                Store it in the repository&apos;s GitHub webhook settings. It is encrypted at rest and cannot be retrieved again.
+              </InlineAlert>
+            </div>
+          )}
+          <p className="mt-2 text-[11px] leading-5 text-slate-400">Deliveries are verified per-project with HMAC-SHA256; every push and pull-request decision is recorded with its outcome.</p>
+        </div>
+      </div>
+      <EnvVarsPanel projectId={project.id} />
+    </div>
+  );
+}
+
+function DeploymentActions({ projectId, deployment, onChanged }: { projectId: string; deployment: Deployment; onChanged: () => void }) {
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [error, setError] = useState("");
+  const promotable = deployment.deploymentKind === "preview" && deployment.status === "succeeded";
+
+  const promote = async () => {
+    if (!window.confirm("Promote this preview to production? Production traffic re-points to this build's artifact without rebuilding.")) return;
+    setPromoting(true); setError("");
+    try {
+      const response = await fetch(`/api/control/github/projects/${projectId}/deployments/${deployment.id}/promote`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message ?? "Promotion failed.");
+      onChanged();
+    } catch (err) { setError(err instanceof Error ? err.message : "Promotion failed."); }
+    finally { setPromoting(false); }
+  };
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {error && <span className="text-[11px] font-semibold text-rose-600">{error}</span>}
+      <button onClick={() => setLogsOpen(true)} className="nx-btn-secondary nx-btn-sm"><ScrollText size={13} /> Logs</button>
+      {promotable && (
+        <button onClick={promote} disabled={promoting} className="nx-btn-primary nx-btn-sm"><ArrowUpRight size={13} /> {promoting ? "Promoting…" : "Promote"}</button>
+      )}
+      {logsOpen && <DeploymentLogsModal projectId={projectId} deploymentId={deployment.id} initialStatus={deployment.status} onClose={() => setLogsOpen(false)} />}
+    </div>
+  );
+}
+
+function DeploymentLogsModal({ projectId, deploymentId, initialStatus, onClose }: { projectId: string; deploymentId: string; initialStatus: string; onClose: () => void }) {
+  const [lines, setLines] = useState<LogLine[]>([]);
+  const [status, setStatus] = useState(initialStatus);
+  const [cursor, setCursor] = useState<number | null>(-1);
+  const [error, setError] = useState("");
+  const tailRef = useRef<number>(-1);
+
+  useEffect(() => {
+    let cancelled = false;
+    const terminal = ["succeeded", "failed", "cancelled"];
+    const poll = async () => {
+      try {
+        const after = tailRef.current;
+        const response = await fetch(`/api/control/github/projects/${projectId}/deployments/${deploymentId}/logs?after=${after}&limit=200`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message ?? "Unable to load build logs.");
+        if (cancelled) return;
+        setStatus(String(data.status ?? initialStatus));
+        const incoming = (data.lines ?? []) as LogLine[];
+        if (incoming.length) {
+          tailRef.current = incoming[incoming.length - 1].seq;
+          setLines(previous => [...previous, ...incoming]);
+        }
+        setCursor(data.nextCursor === null ? null : Number(data.nextCursor));
+        if (terminal.includes(String(data.status ?? ""))) return; // stop polling on terminal state
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load build logs.");
+        return;
+      }
+      if (!cancelled) window.setTimeout(() => { void poll(); }, 4000);
+    };
+    void poll();
+    return () => { cancelled = true; };
+  }, [projectId, deploymentId, initialStatus]);
+
+  return (
+    <Modal title="Build logs" description={`Deployment ${deploymentId.slice(0, 8)} · ${status} · secrets are redacted before storage`} onClose={onClose} labelledBy="Build logs">
+      <pre className="mt-4 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-navy-950 p-3 font-mono text-[11px] leading-5 text-slate-100">
+        {lines.length ? lines.map(line => <span key={line.seq} className="block">{line.message}</span>) : (error ? String(error) : "No log lines have streamed yet.")}
+      </pre>
+      {cursor !== null && !["succeeded", "failed", "cancelled"].includes(status) && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-slate-500"><Spinner className="h-3 w-3" /> Streaming… new lines appear automatically.</p>
+      )}
+    </Modal>
   );
 }

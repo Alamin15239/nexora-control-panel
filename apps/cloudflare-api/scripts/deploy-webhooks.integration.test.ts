@@ -169,6 +169,17 @@ class WebhookD1 {
           }
           return null;
         }
+        if (query.startsWith("SELECT auto_deploy, preview_enabled, ignored_build_paths FROM github_projects")) {
+          const [projectId, orgId] = values as [string, string];
+          if (projectId === db.project.id && orgId === db.project.organization_id) {
+            return {
+              auto_deploy: db.project.auto_deploy,
+              preview_enabled: db.project.preview_enabled,
+              ignored_build_paths: db.project.ignored_build_paths,
+            } as T;
+          }
+          return null;
+        }
         if (query.startsWith("SELECT id FROM github_deployments WHERE project_id")) {
           const [projectId] = values as [string];
           for (const row of db.deployments.values()) {
@@ -239,6 +250,16 @@ class WebhookD1 {
           if (projectId === db.project.id && orgId === db.project.organization_id) {
             db.project.webhookSecretEncrypted = ciphertext;
             db.project.webhookSecretIv = iv;
+            return { success: true, meta: { changes: 1 } };
+          }
+          return { success: true, meta: { changes: 0 } };
+        }
+        if (query.startsWith("UPDATE github_projects SET auto_deploy")) {
+          const [autoDeploy, previewEnabled, ignoredPaths, projectId, orgId] = values as [number, number, string, string, string];
+          if (projectId === db.project.id && orgId === db.project.organization_id) {
+            db.project.auto_deploy = autoDeploy;
+            db.project.preview_enabled = previewEnabled;
+            db.project.ignored_build_paths = ignoredPaths;
             return { success: true, meta: { changes: 1 } };
           }
           return { success: true, meta: { changes: 0 } };
@@ -702,6 +723,46 @@ test("promotion refuses non-preview, unhealthy, or alias-less targets", async ()
   // Cross-tenant project id is 404.
   const crossTenant = await callPromotion(db, "b9999999-0000-4000-8000-000000000009", "d3000000-0000-4000-8000-000000000003");
   assert.equal(crossTenant.status, 404);
+});
+
+test("deploy settings update preview, auto-deploy, and ignored paths", async () => {
+  const db = new WebhookD1();
+  await db.seedWebhookSecret(WEBHOOK_SECRET);
+  db.identity = {
+    id: OWNER_A, email: "owner@acme.test", displayName: null,
+    organizationId: ORG_A, organizationName: "Acme Hosting", organizationSlug: "acme-hosting",
+    role: "OWNER", platformRole: "PLATFORM_ADMIN",
+  };
+  withFetchStub([]);
+  const call = (body: Record<string, unknown>) =>
+    new Request(`https://worker.test/v1/github/projects/${PROJECT_1}/deploy-settings`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${SESSION_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const env = { DB: db as unknown as D1Database, GITHUB_TOKEN_ENCRYPTION_KEY: TOKEN_KEY };
+  const first = await worker.fetch(call({ previewEnabled: false, autoDeploy: true, ignoredBuildPaths: ["docs/", "README.md"] }), env as never, { waitUntil: () => {} } as never);
+  assert.equal(first.status, 200);
+  const settings = (await first.json() as { settings: { previewEnabled: boolean; autoDeploy: boolean; ignoredBuildPaths: string[] } }).settings;
+  assert.equal(settings.previewEnabled, false);
+  assert.equal(settings.autoDeploy, true);
+  assert.deepEqual(settings.ignoredBuildPaths, ["docs/", "README.md"]);
+  // The persisted ignore list drives the webhook decision immediately.
+  const body = pushPayload({ commits: [{ added: ["docs/new.md"], modified: [], removed: [] }] });
+  const webhook = await callWebhook(db, { body, event: "push", deliveryId: "dpl-settings-ignored", signature: signPayload(WEBHOOK_SECRET, body) });
+  // Signature must match after settings change: seed the secret again is unnecessary (unchanged).
+  assert.equal(webhook.json.outcome, "skipped_ignored_paths");
+
+  // Invalid ignored paths are rejected without persisting.
+  const invalid = await worker.fetch(call({ ignoredBuildPaths: ["../escape"] }), env as never, { waitUntil: () => {} } as never);
+  assert.equal(invalid.status, 400);
+
+  // Unauthenticated is 401.
+  const anonymous = new Request(`https://worker.test/v1/github/projects/${PROJECT_1}/deploy-settings`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ previewEnabled: true }),
+  });
+  const anonymousResponse = await worker.fetch(anonymous, env as never, { waitUntil: () => {} } as never);
+  assert.equal(anonymousResponse.status, 401);
 });
 
 test("manual dispatch through the shared dispatcher honors prerequisites and returns 202", async () => {

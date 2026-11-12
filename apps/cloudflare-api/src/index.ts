@@ -412,6 +412,7 @@ app.use("/v1/*", async (c, next) => {
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/env-vars(\/[0-9a-fA-F-]{36})?$/.test(path) ||
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/promote$/.test(path) ||
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/logs$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deploy-settings$/.test(path) ||
     /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/webhook-secret$/.test(path) ||
     path === "/v1/github/projects/detect-framework" ||
     // Nexora Deploy helper catalog (framework presets); handlers authenticate
@@ -7076,10 +7077,10 @@ app.get("/v1/github/projects", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const result = identity.platformRole
     ? await c.env.DB.prepare(
-        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
+        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt, preview_enabled AS previewEnabled, ignored_build_paths AS ignoredBuildPaths FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
       ).bind(identity.organizationId).all()
     : await c.env.DB.prepare(
-        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
+        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt, p.preview_enabled AS previewEnabled, p.ignored_build_paths AS ignoredBuildPaths FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
       ).bind(identity.organizationId, identity.id).all();
   return c.json({ projects: result.results ?? [] });
 });
@@ -10758,12 +10759,64 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   const rows = await c.env.DB.prepare(
     `SELECT id, commit_sha AS commitSha, branch, trigger_type AS triggerType, status,
-            commit_message AS commitMessage, deployment_url AS deploymentUrl, log_excerpt AS logExcerpt,
-            requested_at AS requestedAt, started_at AS startedAt, finished_at AS finishedAt
+            deployment_kind AS deploymentKind, commit_message AS commitMessage, deployment_url AS deploymentUrl,
+            log_excerpt AS logExcerpt, requested_at AS requestedAt, started_at AS startedAt, finished_at AS finishedAt
      FROM github_deployments WHERE project_id = ? AND organization_id = ?
      ORDER BY requested_at DESC LIMIT 50`,
   ).bind(project.id, identity.organizationId).all();
   return c.json({ deployments: rows.results ?? [] });
+});
+
+// Deploy settings: preview deployments, auto-deploy on push, and the ignored
+// path list used by the push webhook. Same access model as env vars.
+app.patch("/v1/github/projects/:projectId/deploy-settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const current = await c.env.DB.prepare(
+    "SELECT auto_deploy, preview_enabled, ignored_build_paths FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(projectId, project.organization_id).first<{ auto_deploy: number; preview_enabled: number; ignored_build_paths: string }>();
+  if (!current) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const autoDeploy = typeof input.autoDeploy === "boolean" ? (input.autoDeploy ? 1 : 0) : current.auto_deploy;
+  const previewEnabled = typeof input.previewEnabled === "boolean" ? (input.previewEnabled ? 1 : 0) : current.preview_enabled;
+  let ignoredPaths: string[];
+  if (input.ignoredBuildPaths === undefined) {
+    try {
+      const parsed = JSON.parse(current.ignored_build_paths) as unknown;
+      ignoredPaths = Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+    } catch { ignoredPaths = []; }
+  } else {
+    if (!Array.isArray(input.ignoredBuildPaths) || input.ignoredBuildPaths.length > 32) {
+      return c.json({ message: "ignoredBuildPaths must be an array of at most 32 relative path prefixes." }, 400);
+    }
+    ignoredPaths = input.ignoredBuildPaths as string[];
+    for (const path of ignoredPaths) {
+      // The webhook matcher normalizes trailing slashes, so "docs/" is a
+      // valid directory prefix; only interior empty/./.. segments are bad.
+      const normalized = path.replace(/\/+$/, "");
+      if (typeof path !== "string" || path.length < 1 || path.length > 200 || path.startsWith("/") ||
+          normalized.length < 1 ||
+          normalized.split("/").some((part) => part === "." || part === ".." || part === "")) {
+        return c.json({ message: "Ignored paths must be relative path prefixes without '.', '..' or empty interior segments." }, 400);
+      }
+    }
+  }
+
+  const result = await c.env.DB.prepare(
+    "UPDATE github_projects SET auto_deploy = ?, preview_enabled = ?, ignored_build_paths = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?",
+  ).bind(autoDeploy, previewEnabled, JSON.stringify(ignoredPaths), projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Project not found in this workspace." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.deploy_settings_updated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId,
+      JSON.stringify({ autoDeploy: autoDeploy === 1, previewEnabled: previewEnabled === 1, ignoredPathsCount: ignoredPaths.length })).run();
+  return c.json({ settings: { autoDeploy: autoDeploy === 1, previewEnabled: previewEnabled === 1, ignoredBuildPaths: ignoredPaths } });
 });
 
 app.delete("/v1/github/connection", async (c) => {
