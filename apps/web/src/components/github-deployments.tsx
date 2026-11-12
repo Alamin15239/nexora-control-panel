@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, CheckCircle2, ExternalLink, FolderGit2, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
 
-type Connection = { login: string; scopes: string; connectedAt: string } | null;
+type Connection = { login: string; scopes: string; connectedAt: string; installed: boolean; installationAccount: string | null; installationAccountType: string | null } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string };
@@ -235,7 +235,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   }, [customerMode]);
 
   const loadRepositories = useCallback(async () => {
-    if (!connected) { setRepositoryStatus("idle"); return; }
+    if (!connected || !connection?.installed) { setRepositoryStatus("idle"); setRepositories([]); return; }
     setBusy(true); setError(""); setRepositoryStatus("loading");
     try {
       const response = await fetch("/api/control/github/repositories", { cache: "no-store" });
@@ -253,13 +253,14 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       setRepositories([]);
       setError(err instanceof Error ? err.message : "Unable to load repositories.");
     } finally { setBusy(false); }
-  }, [connected]);
+  }, [connected, connection?.installed]);
 
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (connected) void loadRepositories(); }, [connected, loadRepositories]);
+  useEffect(() => { if (connected && connection?.installed) void loadRepositories(); }, [connected, connection?.installed, loadRepositories]);
   useEffect(() => {
     const status = new URLSearchParams(window.location.search).get("github");
     if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
+    else if (status === "installed") { setNotice("Nexora GitHub App installed successfully. Loading repositories…"); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
     else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
     else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
   }, [load, customerMode]);
@@ -272,6 +273,15 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       if (!response.ok || !data.authorizationUrl) throw new Error(data.message ?? "Unable to start GitHub authorization.");
       window.location.assign(data.authorizationUrl);
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to connect GitHub."); setBusy(false); }
+  }
+  async function installGithubApp() {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/control/github/installations/start", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok || !data.installationUrl) throw new Error(data.message ?? "Unable to start GitHub App installation.");
+      window.location.assign(data.installationUrl);
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to install the Nexora GitHub App."); setBusy(false); }
   }
 
   async function linkRepository(event: React.FormEvent<HTMLFormElement>) {
@@ -317,10 +327,11 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-3"><span className="rounded-xl bg-slate-100 p-3 text-slate-800"><Github size={22}/></span><div><h2 className="font-semibold text-slate-950">GitHub account</h2><p className="mt-1 text-sm text-slate-500">Authorize the Nexora GitHub App to access repositories you select.</p></div></div>
             {connected ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700"><CheckCircle2 size={14}/> Connected</span> : <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">Not connected</span>}</div>
-          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div><button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button></div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
+          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p><p className="mt-1 text-xs font-medium">{connection?.installed ? "Nexora GitHub App installed · repository access enabled" : "GitHub authorized; Nexora GitHub App installation required."}</p></div><div className="flex flex-wrap items-center gap-2">{!connection?.installed && <button onClick={installGithubApp} disabled={busy} className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"><Github size={15}/> Install Nexora GitHub App</button>}<button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button></div></div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
           <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-slate-500"><ShieldCheck size={15} className="mt-0.5 shrink-0"/> GitHub App permissions are configured by Nexora. Tokens are encrypted before storage and are never sent to the browser.</p>
         </div>
-        {connected && <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        {connected && !connection?.installed && <div className="rounded-2xl border border-amber-200 bg-amber-50 p-5"><h2 className="font-semibold text-slate-950">Install the Nexora GitHub App</h2><p className="mt-1 text-sm leading-6 text-slate-600">OAuth authorization is complete. Install the GitHub App on your personal account or organization, then select the repositories Nexora may access.</p><button onClick={installGithubApp} disabled={busy} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"><Github size={16}/> Continue to GitHub App installation</button></div>}
+        {connected && connection?.installed && <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-slate-950">Link a repository</h2><p className="mt-1 text-sm text-slate-500">Select an installed repository and the hosting account that will serve its built files.</p></div><button onClick={loadRepositories} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"><RefreshCw size={14}/> Refresh repositories</button></div>
           <form onSubmit={linkRepository} className="mt-5 grid gap-4 md:grid-cols-2">
             <label className="space-y-1.5 text-sm font-medium text-slate-700 md:col-span-2">GitHub repository<select required value={selectedRepository} onChange={event => { const repo = repositories.find(item => String(item.id) === event.target.value); setSelectedRepository(event.target.value); if (repo) setBranch(repo.defaultBranch); }} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"><option value="">Choose a repository</option>{repositories.map(repo => <option key={`${repo.installationId}-${repo.id}`} value={repo.id}>{repo.fullName}{repo.private ? " · Private" : " · Public"}</option>)}</select></label>
