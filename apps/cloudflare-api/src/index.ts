@@ -6713,25 +6713,91 @@ app.get("/v1/github/repositories", async (c) => {
   if (!connection) return c.json({ message: "Connect a GitHub account first." }, 409);
   try {
     const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
-    const installationsResponse = await githubApi(token, "/user/installations?per_page=100");
-    if (!installationsResponse.ok) return c.json({ message: "Unable to list GitHub App installations. Reinstall the Nexora GitHub App with repository access." }, 502);
-    const installationsData = await installationsResponse.json() as { installations?: Array<{ id: number; account?: { login?: string } }> };
+    const githubFailure = async (response: Response, operation: string) => {
+      let providerMessage = "";
+      try {
+        const payload = await response.clone().json() as { message?: unknown };
+        if (typeof payload.message === "string") providerMessage = payload.message.replace(/[\\u0000-\\u001f\\u007f]/g, " ").slice(0, 240);
+      } catch { /* GitHub may return a non-JSON error body. */ }
+      const remaining = response.headers.get("x-ratelimit-remaining");
+      const reset = response.headers.get("x-ratelimit-reset");
+      const requestId = response.headers.get("x-github-request-id");
+      const rateLimited = response.status === 429 || (response.status === 403 && remaining === "0");
+      let message = rateLimited
+        ? "GitHub API rate limit reached. Wait for the reset time and refresh repositories."
+        : response.status === 401
+          ? "GitHub authorization is invalid or expired. Disconnect and reconnect the GitHub account."
+          : response.status === 403
+            ? "GitHub denied access to the App installation. Check that the Nexora GitHub App is installed on this account and has repository metadata and contents read access."
+            : response.status === 404
+              ? "GitHub could not find this App installation. Reinstall the Nexora GitHub App on the intended account."
+              : "GitHub could not complete the repository access request.";
+      if (providerMessage && !rateLimited && response.status !== 401) message += ` GitHub says: ${providerMessage}`;
+      return c.json({
+        message,
+        diagnostics: {
+          operation,
+          providerStatus: response.status,
+          requestId: requestId ?? null,
+          rateLimitRemaining: remaining,
+          rateLimitReset: reset,
+        },
+      }, 502);
+    };
+    const readPages = async <T,>(initialPath: string, collection: "installations" | "repositories", operation: string): Promise<T[] | Response> => {
+      let nextPath: string | null = initialPath;
+      const items: T[] = [];
+      let pages = 0;
+      while (nextPath && pages < 10) {
+        const response = await githubApi(token, nextPath);
+        if (!response.ok) return githubFailure(response, operation);
+        const payload = await response.json() as Record<string, unknown>;
+        const pageItems = payload[collection];
+        if (!Array.isArray(pageItems)) throw new Error(`GitHub returned an invalid ${collection} response`);
+        items.push(...pageItems as T[]);
+        const link = response.headers.get("link") ?? "";
+        const nextUrl = /<([^>]+)>;\\s*rel="next"/i.exec(link)?.[1];
+        if (nextUrl) {
+          const parsed = new URL(nextUrl);
+          if (parsed.origin !== "https://api.github.com" || !parsed.pathname.startsWith("/user/installations/")) {
+            throw new Error("GitHub returned an unexpected pagination URL");
+          }
+          nextPath = parsed.pathname + parsed.search;
+        } else {
+          nextPath = null;
+        }
+        pages++;
+      }
+      if (nextPath) throw new Error(`GitHub ${collection} pagination exceeded the safety limit`);
+      return items;
+    };
+    const installationsResult = await readPages<{ id: number; account?: { login?: string } }>("/user/installations?per_page=100", "installations", "list_installations");
+    if (installationsResult instanceof Response) return installationsResult;
+    if (installationsResult.length > 250) return c.json({ message: "This GitHub account has too many App installations to list safely. Contact Nexora support." }, 502);
     const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
-    for (const installation of (installationsData.installations ?? []).slice(0, 25)) {
+    for (const installation of installationsResult) {
       if (!Number.isSafeInteger(installation.id)) continue;
-      const response = await githubApi(token, `/user/installations/${installation.id}/repositories?per_page=100`);
-      if (!response.ok) continue;
-      const data = await response.json() as { repositories?: Array<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }> };
-      for (const repo of data.repositories ?? []) {
+      const repoResult = await readPages<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }>(
+        `/user/installations/${installation.id}/repositories?per_page=100`, "repositories", "list_installation_repositories",
+      );
+      if (repoResult instanceof Response) return repoResult;
+      for (const repo of repoResult) {
         if (Number.isSafeInteger(repo.id) && repo.full_name && repo.name && repo.default_branch) repositories.push({
           id: repo.id, name: repo.name, fullName: repo.full_name, private: Boolean(repo.private),
           defaultBranch: repo.default_branch, htmlUrl: repo.html_url, installationId: installation.id, owner: repo.owner?.login ?? installation.account?.login ?? "",
         });
       }
     }
-    return c.json({ repositories });
-  } catch {
-    return c.json({ message: "Unable to read GitHub repositories. Reconnect the GitHub App and try again." }, 502);
+    return c.json({ repositories, installationCount: installationsResult.length });
+  } catch (error) {
+    const safeMessage = error instanceof Error ? error.message.slice(0, 240) : "Unknown GitHub integration error";
+    console.warn("GitHub repository listing failed:", safeMessage);
+    return c.json({
+      message: /authorization expired|refresh/i.test(safeMessage)
+        ? "GitHub authorization expired. Disconnect and reconnect your GitHub account."
+        : "Unable to complete GitHub repository listing. Retry the request; if it continues, provide the diagnostic reference to Nexora support.",
+      diagnostics: { operation: "repository_listing", reason: safeMessage },
+    }, 502);
   }
 });
 
