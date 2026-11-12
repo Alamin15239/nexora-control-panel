@@ -2256,6 +2256,10 @@ app.post("/v1/platform/payment-orders/:id/review", async (c) => {
 
 const BILLING_PERIOD_MONTHS: Record<string, number> = { monthly: 1, yearly: 12 };
 const RETRYABLE_JOB_OPERATIONS = new Set([
+  // CREATE_HOSTING_ACCOUNT is safe to retry: provisionAccount verifies an
+  // existing account identity, preserves customer files, and refuses to
+  // overwrite conflicting PHP-FPM or account-registry state.
+  "CREATE_HOSTING_ACCOUNT",
   "ADD_DOMAIN", "REMOVE_DOMAIN", "CREATE_DATABASE", "CREATE_DATABASE_USER",
   "REVOKE_DATABASE_USER", "RESET_DATABASE_USER_PASSWORD", "UPDATE_PHP_POOL",
   "SUSPEND_HOSTING_ACCOUNT", "REACTIVATE_HOSTING_ACCOUNT",
