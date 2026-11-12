@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CheckCircle2, ExternalLink, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ExternalLink, FolderGit2, Github, GitBranch, Link2, Loader2, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
 
 type Connection = { login: string; scopes: string; connectedAt: string } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
@@ -35,7 +35,6 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [repositoryStatus, setRepositoryStatus] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
 
   async function openSettings() {
     const next = !expanded;
@@ -204,6 +203,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [repositoryStatus, setRepositoryStatus] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
 
   const selected = useMemo(() => repositories.find(repo => String(repo.id) === selectedRepository) ?? null, [repositories, selectedRepository]);
 
