@@ -6087,11 +6087,22 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
   if (completedJob?.operation === "CREATE_DATABASE_USER" && completedJob.idempotencyKey?.startsWith("create-database-user:")) {
     const databaseUserId = completedJob.idempotencyKey.slice("create-database-user:".length);
     if (input.success) {
+      const expectedUser = await c.env.DB.prepare(
+        `SELECT u.username
+         FROM hosting_database_users u
+         JOIN hosting_databases d ON d.id = u.database_id AND d.organization_id = u.organization_id
+         WHERE u.id = ? AND u.organization_id = ? AND u.status = 'PENDING'
+           AND d.hosting_account_id = ? AND d.status = 'ACTIVE'
+         LIMIT 1`,
+      ).bind(databaseUserId, auth.credential.organizationId, completedJob.hostingAccountId).first<{ username: string }>();
       const credential = incomingResult && typeof incomingResult.username === "string" && typeof incomingResult.password === "string"
         ? { username: incomingResult.username, password: incomingResult.password } : null;
-      if (!credential || credential.password.length < 32 || credential.password.length > 128 || !/^[a-z][a-z0-9_]{2,80}$/.test(credential.username)) {
-        await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'FAILED' WHERE id = ? AND organization_id = ?").bind(databaseUserId, auth.credential.organizationId).run();
-        return c.json({ message: "The agent returned an invalid database credential." }, 422);
+      if (!expectedUser || !credential || credential.username !== expectedUser.username ||
+          credential.password.length < 32 || credential.password.length > 128 ||
+          !/^[a-z][a-z0-9_]{2,80}$/.test(credential.username)) {
+        await c.env.DB.prepare("UPDATE hosting_database_users SET status = 'FAILED' WHERE id = ? AND organization_id = ? AND status = 'PENDING'")
+          .bind(databaseUserId, auth.credential.organizationId).run();
+        return c.json({ message: "The agent returned a database credential that does not match the pending user." }, 422);
       }
       try {
         const encrypted = await encryptDatabaseSecret(c.env, JSON.stringify(credential));
@@ -6120,8 +6131,15 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
         c.env.DB.prepare("DELETE FROM database_user_secrets WHERE organization_id = ? AND database_user_id IN (SELECT id FROM hosting_database_users WHERE database_id = ?)")
           .bind(auth.credential.organizationId, databaseId),
         c.env.DB.prepare("DELETE FROM database_usage WHERE database_id = ? AND organization_id = ?")
-          .bind(databaseId, auth.credential.organizationId),
+          .bind(auth.credential.organizationId, databaseId),
       ]);
+    } else {
+      // A failed DROP may have removed some users before MariaDB returned an
+      // error. FAILED is retryable by the delete endpoint, and the helper uses
+      // DROP USER/DATABASE IF EXISTS so the same request is safe to retry.
+      await c.env.DB.prepare(
+        "UPDATE hosting_databases SET status = 'FAILED', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'DELETING'",
+      ).bind(now, databaseId, auth.credential.organizationId).run();
     }
   }
   if (completedJob?.operation === "CREATE_DATABASE" && completedJob.idempotencyKey?.startsWith("create-database:")) {
