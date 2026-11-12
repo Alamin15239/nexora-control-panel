@@ -6131,7 +6131,7 @@ app.post("/v1/agent/jobs/:id/result", async (c) => {
         c.env.DB.prepare("DELETE FROM database_user_secrets WHERE organization_id = ? AND database_user_id IN (SELECT id FROM hosting_database_users WHERE database_id = ?)")
           .bind(auth.credential.organizationId, databaseId),
         c.env.DB.prepare("DELETE FROM database_usage WHERE database_id = ? AND organization_id = ?")
-          .bind(auth.credential.organizationId, databaseId),
+          .bind(databaseId, auth.credential.organizationId),
       ]);
     } else {
       // A failed DROP may have removed some users before MariaDB returned an
