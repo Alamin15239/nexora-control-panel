@@ -11004,7 +11004,8 @@ export async function runBackupSchedules(env: Bindings): Promise<void> {
     "WHERE frequency != 'disabled' AND (next_run_at IS NULL OR next_run_at <= ?) " +
     "AND (lease_expires_at IS NULL OR lease_expires_at < ?) " +
     "AND hosting_account_id IN (SELECT id FROM hosting_accounts WHERE status = 'ACTIVE') " +
-    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, organization_id AS organizationId, anchor_day_of_month AS anchorDayOfMonth, next_run_at AS nextRunAt, " +
+    "RETURNING hosting_account_id AS accountId, frequency, retention_count AS retentionCount, anchor_day_of_month AS anchorDayOfMonth, next_run_at AS nextRunAt, " +
+    "(SELECT organization_id FROM hosting_accounts WHERE id = backup_schedules.hosting_account_id) AS organizationId, " +
     "(SELECT server_id FROM hosting_accounts WHERE id = backup_schedules.hosting_account_id) AS serverId",
   ).bind(leaseExpiresAt, nowIso, nowIso).all<{ accountId: string; frequency: string; retentionCount: number; organizationId: string; anchorDayOfMonth: number | null; nextRunAt: string | null; serverId: string }>();
 
