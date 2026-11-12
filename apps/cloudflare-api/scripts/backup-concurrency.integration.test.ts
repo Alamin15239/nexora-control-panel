@@ -243,7 +243,7 @@ class SchedulerD1 {
   backups = new Map<string, { id: string; hosting_account_id: string; organization_id: string; server_id: string | null; status: string; created_at: string }>();
   jobs: Array<{ id: string; hosting_account_id: string; operation: string; status: string }> = [];
   auditLogs: Array<{ action: string; resource_id: string }> = [];
-  schedules = new Map<string, { hosting_account_id: string; frequency: string; retention_count: number; organization_id: string; next_run_at: string | null; last_run_at: string | null; lease_expires_at: string | null; anchor_day_of_month: number | null }>();
+  schedules = new Map<string, { hosting_account_id: string; frequency: string; retention_count: number; next_run_at: string | null; last_run_at: string | null; lease_expires_at: string | null; anchor_day_of_month: number | null }>();
   accounts = new Map<string, { id: string; organization_id: string; server_id: string; username: string; status: string }>();
   databases = new Map<string, { id: string; name: string; hosting_account_id: string; organization_id: string; status: string }>();
   // When set, the hosting_databases query throws (simulated outage).
@@ -289,7 +289,7 @@ class SchedulerD1 {
               accountId: s.hosting_account_id,
               frequency: s.frequency,
               retentionCount: s.retention_count,
-              organizationId: s.organization_id,
+              organizationId: account.organization_id,
               anchorDayOfMonth: s.anchor_day_of_month,
               nextRunAt: s.next_run_at,
               serverId: account.server_id,
@@ -360,7 +360,7 @@ function schedulerEnv() {
   db.accounts.set("acct-a", { id: "acct-a", organization_id: "org-a", server_id: "server-a", username: "client01", status: "ACTIVE" });
   db.databases.set("db-a", { id: "db-a", name: "client01_db", hosting_account_id: "acct-a", organization_id: "org-a", status: "ACTIVE" });
   db.schedules.set("acct-a", {
-    hosting_account_id: "acct-a", frequency: "daily", retention_count: 4, organization_id: "org-a",
+    hosting_account_id: "acct-a", frequency: "daily", retention_count: 4,
     next_run_at: new Date(Date.now() - 60 * 1000).toISOString(), // due 1 min ago
     last_run_at: null, lease_expires_at: null, anchor_day_of_month: null,
   });
