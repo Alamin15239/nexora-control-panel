@@ -1,20 +1,64 @@
 # Ubuntu Acceptance Checklist — Nexora Control Panel
 
 Status: **not executed**. No item below has been verified against the
-live `nexora-deploy-node`. This document separates automated CI
-verification (already green at the branch HEAD) from real server
-acceptance, which requires the operator to run these steps and record
-the evidence column. An item is only "passed" when the actual command
-output was captured on the server.
+original `nexora-server` VirtualBox VM. This document separates automated
+CI verification from real server acceptance. An item is only "passed"
+when actual command output or dashboard evidence has been captured.
 
-Target: Ubuntu 22.04/24.04 LTS host running the Nexora Linux agent,
-Nginx + PHP-FPM, MariaDB, and `cloudflared`. Run all commands as a
-sudo-capable operator unless stated otherwise.
+Target: the existing `nexora-server` VM running Ubuntu 26.04.1 LTS.
+Do not substitute the disposable `nexora-deploy-node` clone.
+
+**Safety gate:** this checklist is a test inventory, not an install
+script. Start with the read-only preflight below. Several later checks
+use illustrative service names and paths; confirm the actual installed
+unit names, account paths, PHP-FPM layout, and agent version before
+running those commands. Do not install or replace the agent, edit
+sudoers/systemd, restart production services, delete customer data,
+or enable runtime/static-publisher services as part of preflight.
+
+The current agent architecture requires the root-owned
+`nexora-provisiond` IPC daemon to be installed and verified before
+replacing the existing agent. The runtime-node execution loop is
+disabled, and the static publisher/vhost broker are not approved for
+installation on this development VM.
 
 Legend: `[ ]` pending · `[x]` passed (fill in date + evidence) ·
 `[!]` failed (fill in defect reference).
 
 ---
+
+## 0. Read-only host preflight (run before any other check)
+
+Run from the Ubuntu VM terminal. These commands only inspect state;
+they do not install packages, change configuration, or restart services.
+
+```sh
+printf '\n=== OS / kernel ===\n'
+cat /etc/os-release
+uname -a
+printf '\n=== Host / resources ===\n'
+hostnamectl
+df -hT /
+free -h
+printf '\n=== Relevant installed packages ===\n'
+dpkg-query -W -f='${binary:Package}\t${Version}\n' 2>/dev/null | grep -Ei 'nginx|php[0-9.]*-fpm|mariadb|mysql|cloudflared|nexora|golang' || true
+printf '\n=== Relevant systemd units ===\n'
+systemctl list-unit-files --type=service --no-legend | grep -Ei 'nexora|nginx|php.*fpm|mariadb|mysql|cloudflared' || true
+printf '\n=== Relevant active services ===\n'
+systemctl --no-pager --type=service --state=running | grep -Ei 'nexora|nginx|php.*fpm|mariadb|mysql|cloudflared' || true
+printf '\n=== Agent binaries (paths only) ===\n'
+command -v nexora-agent || true
+command -v nexora-provisiond || true
+command -v nexora-provision || true
+printf '\n=== Agent IPC socket (if present) ===\n'
+sudo stat /run/nexora/provision.sock 2>&1 || true
+printf '\n=== Nginx syntax check (read-only validation) ===\n'
+sudo nginx -t 2>&1 || true
+```
+
+Capture the complete output and review it before any write operation.
+Do not include private keys, enrollment tokens, API tokens, database
+passwords, or full secret-bearing configuration files in the evidence.
 
 ## 1. Agent service and identity
 
@@ -24,6 +68,11 @@ Legend: `[ ]` pending · `[x]` passed (fill in date + evidence) ·
 | 1.2 | Service active | `systemctl status nexora-agent --no-pager` | `active (running)`, no restart loops in the last hour | |
 | 1.3 | Enrollment intact | `ls -l /etc/nexora/agent/` and confirm key files are `root:`-owned, mode 0600 | Ed25519 identity + enrollment files exist, not world-readable | |
 | 1.4 | Agent log clean | `journalctl -u nexora-agent -n 100 --no-pager` | No repeated claim/auth failures, no signature rejections | |
+
+Before proceeding, map the actual unit name from section 0. Do not
+assume a unit named `nexora-agent.service` exists: the current source
+tree defines `nexora-provisiond.service`, while the agent run mode and
+installed unit must be identified from the existing host.
 
 ## 2. Heartbeat and control-plane connectivity
 
