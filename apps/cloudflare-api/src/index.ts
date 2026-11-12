@@ -6872,6 +6872,7 @@ app.post("/v1/github/installations/start", async (c) => {
     ]);
     const installationUrl = new URL(`https://github.com/apps/${appData.slug}/installations/new`);
     installationUrl.searchParams.set("state", state);
+    if (!c.env.GITHUB_OAUTH_CALLBACK_URL) return c.json({ message: "The GitHub OAuth callback URL must be configured before App installation." }, 503);
     const callbackUrl = new URL(c.env.GITHUB_OAUTH_CALLBACK_URL);
     callbackUrl.pathname = "/v1/github/installation-callback";
     callbackUrl.search = "";
