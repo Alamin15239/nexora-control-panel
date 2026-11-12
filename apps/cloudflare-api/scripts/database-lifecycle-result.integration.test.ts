@@ -118,6 +118,7 @@ async function signedResult(db: AgentResultD1, payload: Record<string, unknown>)
 
 test("agent CREATE_DATABASE_USER rejects a credential username that differs from the pending user", async () => {
   const db = new AgentResultD1("CREATE_DATABASE_USER", `create-database-user:${USER_ID}`);
+  db.databaseStatus = "ACTIVE";
   const response = await signedResult(db, {
     success: true,
     result: { username: "acme01_attacker", password: "x".repeat(48) },
