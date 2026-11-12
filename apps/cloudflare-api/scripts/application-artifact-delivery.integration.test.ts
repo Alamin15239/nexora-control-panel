@@ -705,6 +705,7 @@ test("signed failed health check records failure and returns the prior rollback 
   assert.equal(response.status, 200);
   const body = await response.json() as {
     releaseState: string; rollbackRequired: boolean; rollbackTargetDeploymentId: string | null;
+    rollbackTargetNodeIdentity: string | null;
   };
   assert.equal(body.releaseState, "failed");
   assert.equal(body.rollbackRequired, true);
