@@ -35,6 +35,7 @@ function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [repositoryStatus, setRepositoryStatus] = useState<"idle" | "loading" | "ready" | "empty" | "error">("idle");
 
   async function openSettings() {
     const next = !expanded;
@@ -234,15 +235,24 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   }, [customerMode]);
 
   const loadRepositories = useCallback(async () => {
-    if (!connected) return;
-    setBusy(true); setError("");
+    if (!connected) { setRepositoryStatus("idle"); return; }
+    setBusy(true); setError(""); setRepositoryStatus("loading");
     try {
       const response = await fetch("/api/control/github/repositories", { cache: "no-store" });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.message ?? "Unable to load repositories.");
-      setRepositories(data.repositories ?? []);
-    } catch (err) { setError(err instanceof Error ? err.message : "Unable to load repositories."); }
-    finally { setBusy(false); }
+      if (!response.ok) {
+        const diagnostic = data.diagnostics?.requestId ? ` Support reference: ${data.diagnostics.requestId}.` : "";
+        const status = data.diagnostics?.providerStatus ? ` (GitHub HTTP ${data.diagnostics.providerStatus})` : "";
+        throw new Error((data.message ?? "Unable to load repositories.") + status + diagnostic);
+      }
+      const nextRepositories: Repository[] = data.repositories ?? [];
+      setRepositories(nextRepositories);
+      setRepositoryStatus(nextRepositories.length ? "ready" : "empty");
+    } catch (err) {
+      setRepositoryStatus("error");
+      setRepositories([]);
+      setError(err instanceof Error ? err.message : "Unable to load repositories.");
+    } finally { setBusy(false); }
   }, [connected]);
 
   useEffect(() => { void load(); }, [load]);
@@ -293,13 +303,13 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
     finally { setBusy(false); }
   }
 
-  return <main className="min-h-screen bg-[#f4f6fb]">
+  return <main className="min-h-screen bg-[radial-gradient(ellipse_at_top,_#e8efff_0%,_#f7f9fc_42%,_#f4f6fb_100%)]">
     <header className="border-b border-slate-200 bg-white"><div className="mx-auto flex max-w-[1500px] items-center gap-3 px-5 py-5">
       <Link href={customerMode ? "/customer" : "/"} className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"><ArrowLeft size={17}/></Link>
       <span className="grid h-10 w-10 place-items-center rounded-xl bg-slate-950 text-white"><Github size={20}/></span>
       <div><p className="font-semibold text-slate-950">{customerMode ? "Nexora Deploy" : "GitHub deployments"}</p><p className="text-xs text-slate-500">{customerMode ? "Projects and Git-based website setup" : "Connect repositories and configure website builds"}</p></div>
     </div></header>
-    <section className="mx-auto max-w-[1100px] space-y-6 px-5 py-8">
+    <section className="mx-auto max-w-[1180px] space-y-6 px-5 py-9">
       <div><p className="text-sm font-medium text-blue-700">{customerMode ? "Nexora Deploy · Projects" : "Developer workflow"}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">{customerMode ? "Deploy your website" : "Deploy from GitHub"}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Link a repository to an active Nexora hosting account. Choose the production branch and static build output. Builds will become available after the GitHub-hosted workflow and isolated static publisher pass platform acceptance.</p></div>
       {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
       {notice && <div role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</div>}
@@ -307,7 +317,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
         <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-start gap-3"><span className="rounded-xl bg-slate-100 p-3 text-slate-800"><Github size={22}/></span><div><h2 className="font-semibold text-slate-950">GitHub account</h2><p className="mt-1 text-sm text-slate-500">Authorize the Nexora GitHub App to access repositories you select.</p></div></div>
             {connected ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700"><CheckCircle2 size={14}/> Connected</span> : <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">Not connected</span>}</div>
-          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div>{!customerMode && <button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button>}</div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
+          {connected ? <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-4"><div><p className="text-sm font-semibold text-slate-900">@{connection?.login}</p><p className="mt-1 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p></div><button onClick={disconnectGithub} disabled={busy} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"><Unplug size={15}/> Disconnect</button></div> : <button onClick={connectGithub} disabled={busy} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><Github size={17}/> Connect GitHub</button>}
           <p className="mt-4 flex items-start gap-2 text-xs leading-5 text-slate-500"><ShieldCheck size={15} className="mt-0.5 shrink-0"/> GitHub App permissions are configured by Nexora. Tokens are encrypted before storage and are never sent to the browser.</p>
         </div>
         {connected && <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -321,7 +331,11 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
             <label className="space-y-1.5 text-sm font-medium text-slate-700">Build output directory<input required value={outputDirectory} onChange={event => setOutputDirectory(event.target.value)} className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" placeholder="dist"/></label>
             <div className="md:col-span-2"><button type="submit" disabled={busy || !selected || !hostingAccountId} className="inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"><Link2 size={16}/> Save repository configuration</button></div>
           </form>
-          {!repositories.length && <p className="mt-4 text-xs text-slate-500">No repositories are visible yet. Install the Nexora GitHub App on an account or organization and grant access to at least one repository.</p>}
+          {!repositories.length && <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+            {repositoryStatus === "loading" ? <p className="text-sm text-slate-600">Checking GitHub App installations and repository access…</p>
+              : repositoryStatus === "error" ? <div><p className="text-sm font-semibold text-rose-700">Repository access needs attention</p><p className="mt-1 text-sm text-slate-600">Review the GitHub response details above, verify the Nexora App installation and repository permissions, then refresh.</p></div>
+              : <div><p className="text-sm font-semibold text-slate-800">No repositories available</p><p className="mt-1 text-sm text-slate-600">Install the Nexora GitHub App on your personal account or organization and grant it access to at least one repository. Then refresh this list.</p><a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-semibold text-blue-700 hover:underline">Review GitHub App installations <ExternalLink size={13}/></a></div>}
+          </div>}
         </div>}
         <div className="rounded-2xl border border-slate-200 bg-white shadow-sm"><div className="border-b border-slate-100 px-6 py-4"><h2 className="font-semibold text-slate-950">Linked projects</h2><p className="mt-1 text-xs text-slate-500">Repository-to-hosting-account configurations.</p></div>
           {projects.length ? <div className="divide-y divide-slate-100">{projects.map(project => <div key={project.id}><div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4"><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{project.repositoryFullName}</p><p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13}/>{project.productionBranch}<span>·</span>{project.framework}<span>·</span>Output: {project.outputDirectory}</p></div><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-800">Configured · build worker pending</span></div><div className="border-t border-slate-100 px-6 py-4">
