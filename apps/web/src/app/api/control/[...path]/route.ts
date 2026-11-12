@@ -51,6 +51,16 @@ function allowedRoute(parts: string[], method: "GET" | "POST" | "PATCH" | "DELET
   if (parts.length === 2 && parts[0] === "github" && parts[1] === "connection") return method === "GET" || method === "DELETE";
   if (parts.length === 2 && parts[0] === "github" && ["connect", "repositories", "projects"].includes(parts[1])) return method === "GET" || method === "POST";
   if (parts.length === 4 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "deployments") return method === "GET";
+  // Nexora Deploy project-scoped wiring (batch 6): env vars, deploy settings,
+  // webhook secret rotation, deployment logs, and preview promotion.
+  if (parts.length === 3 && parts[0] === "github" && parts[1] === "projects" && parts[2] === "detect-framework") return method === "POST";
+  if (parts.length === 2 && parts[0] === "deploy" && parts[1] === "framework-presets") return method === "GET";
+  if (parts.length === 4 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "env-vars") return method === "GET" || method === "POST";
+  if (parts.length === 5 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "env-vars" && /^[0-9a-f-]{36}$/i.test(parts[4])) return method === "PATCH" || method === "DELETE";
+  if (parts.length === 4 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "deploy-settings") return method === "PATCH";
+  if (parts.length === 4 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "webhook-secret") return method === "PUT";
+  if (parts.length === 6 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "deployments" && /^[0-9a-f-]{36}$/i.test(parts[4]) && parts[5] === "promote") return method === "POST";
+  if (parts.length === 6 && parts[0] === "github" && parts[1] === "projects" && /^[0-9a-f-]{36}$/i.test(parts[2]) && parts[3] === "deployments" && /^[0-9a-f-]{36}$/i.test(parts[4]) && parts[5] === "logs") return method === "GET";
   if (parts.length === 1 && parts[0] === "dns-records") return method === "GET" || method === "POST";
   if (parts.length === 2 && parts[0] === "dns-records" && /^[a-f0-9]{32}$/i.test(parts[1])) return method === "PATCH" || method === "DELETE";
   if (parts.length === 1 && parts[0] === "overview") return method === "GET";

@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import { Plus, RefreshCw, Pencil, Trash2, X, Globe2 } from "lucide-react";
+import { Pencil, Plus, RefreshCw, Trash2, X, Globe2 } from "lucide-react";
+import {
+  EmptyState, InlineAlert, PageHeader, SectionCard, StatusBadge, TableFrame, Th,
+} from "@/components/ui";
 
 type RecordType = "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "CAA";
 type DnsRecord = {
@@ -21,6 +24,16 @@ const emptyDraft: Draft = {
 function errorMessage(data: unknown, fallback: string): string {
   return data && typeof data === "object" && "message" in data && typeof data.message === "string"
     ? data.message : fallback;
+}
+
+function recordTypeTone(type: RecordType): "brand" | "info" | "success" | "warning" | "neutral" {
+  switch (type) {
+    case "A": case "AAAA": return "brand";
+    case "CNAME": return "info";
+    case "MX": return "success";
+    case "TXT": return "warning";
+    default: return "neutral";
+  }
 }
 
 export default function DnsManagement() {
@@ -59,6 +72,7 @@ export default function DnsManagement() {
     });
     setError("");
     setNotice("");
+    document.getElementById("dns-editor")?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   function resetForm() {
@@ -117,66 +131,126 @@ export default function DnsManagement() {
   }
 
   const showProxy = ["A", "AAAA", "CNAME"].includes(draft.type);
-  return <div className="space-y-5">
-    <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Globe2 size={18} className="text-blue-700"/>
-          <div><h2 className="font-semibold">Authoritative DNS zone</h2><p className="text-xs text-slate-500">Cloudflare · {data?.zone ?? "nexoraedge.digital"}</p></div>
+
+  return (
+    <main className="mx-auto max-w-[1400px] px-5 py-8 lg:px-9">
+      <PageHeader
+        eyebrow="Hosting services · DNS"
+        title="DNS zones"
+        description="Authoritative DNS records for the Nexora managed zone, published straight to Cloudflare."
+        actions={
+          <button type="button" onClick={() => void load()} disabled={loading} className="nx-btn-secondary">
+            <RefreshCw size={15} className={loading ? "animate-spin" : ""} /> Refresh
+          </button>
+        }
+      />
+
+      {error && <InlineAlert tone="error" onDismiss={() => setError("")} className="mt-6">{error}</InlineAlert>}
+      {notice && <InlineAlert tone="success" onDismiss={() => setNotice("")} className="mt-6">{notice}</InlineAlert>}
+
+      <div className="mt-6 grid gap-5 xl:grid-cols-[1.5fr_1fr]">
+        <SectionCard
+          title="DNS records"
+          description={`${data?.records.length ?? 0} records in the managed zone${data?.zone ? ` · ${data.zone}` : ""}`}
+          flush
+        >
+          {loading ? (
+            <p className="px-5 py-6 text-sm text-slate-500 sm:px-6">Loading DNS records…</p>
+          ) : !data?.records.length ? (
+            <EmptyState icon={Globe2} title="No DNS records were returned" description="Records you create publish directly to the authoritative Cloudflare zone." />
+          ) : (
+            <TableFrame minWidth={760} head={<tr><Th>Type</Th><Th>Name</Th><Th>Content</Th><Th>Proxy</Th><Th>TTL</Th><Th right>Actions</Th></tr>}>
+              {data.records.map(record => (
+                <tr key={record.id} className="align-top transition hover:bg-slate-50/70">
+                  <td className="px-4 py-3.5"><StatusBadge tone={recordTypeTone(record.type)}>{record.type}</StatusBadge></td>
+                  <td className="max-w-[220px] break-all px-4 py-3.5 font-medium text-slate-800">{record.name}</td>
+                  <td className="max-w-[300px] break-all px-4 py-3.5 text-slate-600">
+                    {record.content}
+                    {record.type === "MX" && <span className="ml-2 text-xs text-slate-400">Priority {record.priority}</span>}
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <StatusBadge tone={record.proxied ? "brand" : "neutral"}>{record.proxied ? "Proxied" : "DNS only"}</StatusBadge>
+                  </td>
+                  <td className="px-4 py-3.5 text-xs tabular-nums text-slate-500">{record.ttl === 1 ? "Auto" : `${record.ttl}s`}</td>
+                  <td className="px-4 py-3.5 text-right">
+                    {data.canManage ? (
+                      <div className="inline-flex gap-1.5">
+                        <button type="button" onClick={() => startEdit(record)} aria-label={`Edit ${record.name}`} className="rounded-lg border border-slate-200 p-2 text-slate-600 transition hover:bg-slate-50"><Pencil size={14} /></button>
+                        <button type="button" onClick={() => void remove(record)} disabled={deletingId === record.id} aria-label={`Delete ${record.name}`} className="rounded-lg border border-rose-200 p-2 text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"><Trash2 size={14} /></button>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-400">Read only</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </TableFrame>
+          )}
+        </SectionCard>
+
+        <div className="space-y-5">
+          <div className="nx-card p-5">
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-9 w-9 place-items-center rounded-xl bg-brand-50 text-brand-600"><Globe2 size={17} /></span>
+              <div>
+                <h2 className="text-[15px] font-semibold text-slate-900">Cloudflare zone</h2>
+                <p className="mt-0.5 text-xs text-slate-500">{data?.zone ?? "nexoraedge.digital"} · authoritative</p>
+              </div>
+            </div>
+            <p className="mt-3.5 text-xs leading-5 text-slate-500">Changes publish directly to the Cloudflare DNS zone. This is a zone-wide workspace integration, not a per-customer DNS zone. Verify record names and values before saving; deletions take effect at the authoritative provider.</p>
+          </div>
+
+          {data?.canManage ? (
+            <SectionCard
+              title={editingId ? "Edit DNS record" : "Add DNS record"}
+              description={editingId ? `Updating ${draft.type} ${draft.name}` : "Publish a new record to the managed zone"}
+              actions={editingId && (
+                <button type="button" onClick={resetForm} className="inline-flex items-center gap-1 text-xs font-semibold text-slate-500 transition hover:text-slate-900"><X size={14} /> Cancel edit</button>
+              )}
+            >
+              <form id="dns-editor" onSubmit={save} className="grid gap-4 sm:grid-cols-2">
+                <label className="block text-xs font-semibold text-slate-600"><span className="nx-label">Type</span>
+                  <select value={draft.type} onChange={e => setDraft(v => ({ ...v, type: e.target.value as RecordType, proxied: ["A", "AAAA", "CNAME"].includes(e.target.value) ? v.proxied : false }))} className="nx-select mt-2">
+                    {(["A", "AAAA", "CNAME", "MX", "TXT", "CAA"] as RecordType[]).map(type => <option key={type}>{type}</option>)}
+                  </select>
+                </label>
+                <label className="block text-xs font-semibold text-slate-600"><span className="nx-label">Name</span>
+                  <input required value={draft.name} onChange={e => setDraft(v => ({ ...v, name: e.target.value }))} placeholder="www.nexoraedge.digital" className="nx-input mt-2" />
+                </label>
+                <label className="block text-xs font-semibold text-slate-600 sm:col-span-2"><span className="nx-label">{draft.type === "A" ? "IPv4 address" : draft.type === "AAAA" ? "IPv6 address" : draft.type === "TXT" ? "Text value" : draft.type === "CAA" ? "CAA value (flags tag value)" : "Target / content"}</span>
+                  <input required value={draft.content} onChange={e => setDraft(v => ({ ...v, content: e.target.value }))} placeholder={draft.type === "A" ? "203.0.113.10" : draft.type === "CNAME" ? "target.example.com" : draft.type === "MX" ? "mail.example.com" : ""} className="nx-input mt-2" />
+                </label>
+                <label className="block text-xs font-semibold text-slate-600"><span className="nx-label">TTL</span>
+                  <select value={draft.ttl} onChange={e => setDraft(v => ({ ...v, ttl: Number(e.target.value) }))} className="nx-select mt-2">
+                    <option value={1}>Auto</option><option value={60}>1 minute</option><option value={300}>5 minutes</option><option value={600}>10 minutes</option><option value={1800}>30 minutes</option><option value={3600}>1 hour</option><option value={14400}>4 hours</option><option value={86400}>1 day</option>
+                  </select>
+                </label>
+                {draft.type === "MX" && (
+                  <label className="block text-xs font-semibold text-slate-600"><span className="nx-label">Priority</span>
+                    <input type="number" min="0" max="65535" required value={draft.priority} onChange={e => setDraft(v => ({ ...v, priority: e.target.value }))} className="nx-input mt-2" />
+                  </label>
+                )}
+                {showProxy && (
+                  <label className="flex items-center gap-2.5 self-end pb-1 text-sm text-slate-600 sm:col-span-2">
+                    <input type="checkbox" checked={draft.proxied} onChange={e => setDraft(v => ({ ...v, proxied: e.target.checked }))} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+                    Proxied through Cloudflare
+                  </label>
+                )}
+                <label className="block text-xs font-semibold text-slate-600 sm:col-span-2"><span className="nx-label">Comment (optional)</span>
+                  <input value={draft.comment} onChange={e => setDraft(v => ({ ...v, comment: e.target.value }))} maxLength={500} placeholder="Purpose of this record" className="nx-input mt-2" />
+                </label>
+                <div className="sm:col-span-2">
+                  <button disabled={saving} className="nx-btn-primary w-full sm:w-auto"><Plus size={15} />{saving ? "Saving…" : editingId ? "Save changes" : "Create record"}</button>
+                </div>
+              </form>
+            </SectionCard>
+          ) : (
+            <SectionCard title="Read-only zone" description="DNS changes require elevated permissions">
+              <p className="text-xs leading-5 text-slate-500">Only workspace owners and administrators can publish DNS changes. You can review the records on the left, but creating, editing, and deleting are disabled for your role.</p>
+            </SectionCard>
+          )}
         </div>
-        <button type="button" onClick={() => void load()} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50 disabled:opacity-50">
-          <RefreshCw size={14} className={loading ? "animate-spin" : ""}/> Refresh
-        </button>
       </div>
-      <p className="mt-3 text-xs leading-5 text-slate-500">Changes publish directly to the Cloudflare DNS zone. This is a zone-wide workspace integration, not a per-customer DNS zone.</p>
-    </section>
-
-    {data?.canManage && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h2 className="font-semibold">{editingId ? "Edit DNS record" : "Add DNS record"}</h2>
-        {editingId && <button type="button" onClick={resetForm} className="inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-900"><X size={15}/> Cancel edit</button>}
-      </div>
-      <form onSubmit={save} className="grid gap-4 sm:grid-cols-2">
-        <label className="block text-sm"><span className="font-medium">Type</span>
-          <select value={draft.type} onChange={e => setDraft(v => ({ ...v, type: e.target.value as RecordType, proxied: ["A", "AAAA", "CNAME"].includes(e.target.value) ? v.proxied : false }))} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5">
-            {(["A", "AAAA", "CNAME", "MX", "TXT", "CAA"] as RecordType[]).map(type => <option key={type}>{type}</option>)}
-          </select>
-        </label>
-        <label className="block text-sm"><span className="font-medium">Name</span>
-          <input required value={draft.name} onChange={e => setDraft(v => ({ ...v, name: e.target.value }))} placeholder="www.nexoraedge.digital" className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5"/>
-        </label>
-        <label className="block text-sm sm:col-span-2"><span className="font-medium">{draft.type === "A" ? "IPv4 address" : draft.type === "AAAA" ? "IPv6 address" : draft.type === "TXT" ? "Text value" : draft.type === "CAA" ? "CAA value (flags tag value)" : "Target / content"}</span>
-          <input required value={draft.content} onChange={e => setDraft(v => ({ ...v, content: e.target.value }))} placeholder={draft.type === "A" ? "203.0.113.10" : draft.type === "CNAME" ? "target.example.com" : draft.type === "MX" ? "mail.example.com" : ""} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5"/>
-        </label>
-        <label className="block text-sm"><span className="font-medium">TTL</span>
-          <select value={draft.ttl} onChange={e => setDraft(v => ({ ...v, ttl: Number(e.target.value) }))} className="mt-1.5 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5">
-            <option value={1}>Auto</option><option value={60}>1 minute</option><option value={300}>5 minutes</option><option value={600}>10 minutes</option><option value={1800}>30 minutes</option><option value={3600}>1 hour</option><option value={14400}>4 hours</option><option value={86400}>1 day</option>
-          </select>
-        </label>
-        {draft.type === "MX" && <label className="block text-sm"><span className="font-medium">Priority</span><input type="number" min="0" max="65535" required value={draft.priority} onChange={e => setDraft(v => ({ ...v, priority: e.target.value }))} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5"/></label>}
-        {showProxy && <label className="flex items-center gap-2 self-end pb-3 text-sm"><input type="checkbox" checked={draft.proxied} onChange={e => setDraft(v => ({ ...v, proxied: e.target.checked }))} className="h-4 w-4"/> Proxied through Cloudflare</label>}
-        <label className="block text-sm sm:col-span-2"><span className="font-medium">Comment (optional)</span><input value={draft.comment} onChange={e => setDraft(v => ({ ...v, comment: e.target.value }))} maxLength={500} placeholder="Purpose of this record" className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2.5"/></label>
-        <div className="flex flex-wrap items-center gap-3 sm:col-span-2">
-          <button disabled={saving} className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-800 disabled:opacity-50"><Plus size={15}/>{saving ? "Saving…" : editingId ? "Save changes" : "Create record"}</button>
-          {!data.canManage && <span className="text-xs text-slate-500">Only workspace owners and administrators can change DNS.</span>}
-        </div>
-      </form>
-    </section>}
-
-    {error && <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>}
-    {notice && <p role="status" className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{notice}</p>}
-
-    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-      <div className="border-b border-slate-100 px-5 py-4"><h2 className="font-semibold">DNS records</h2><p className="mt-1 text-xs text-slate-500">{data?.records.length ?? 0} records in the managed zone</p></div>
-      {loading ? <p className="p-5 text-sm text-slate-500">Loading DNS records…</p> : !data?.records.length ? <p className="p-5 text-sm text-slate-500">No DNS records were returned for this zone.</p> : <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Type</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Content</th><th className="px-4 py-3">Proxy</th><th className="px-4 py-3">TTL</th><th className="px-4 py-3 text-right">Actions</th></tr></thead>
-          <tbody className="divide-y divide-slate-100">{data.records.map(record => <tr key={record.id} className="align-top">
-            <td className="px-4 py-3 font-semibold">{record.type}</td><td className="px-4 py-3 font-medium">{record.name}</td><td className="max-w-[320px] break-all px-4 py-3 text-slate-600">{record.content}{record.type === "MX" && <span className="ml-2 text-xs text-slate-400">Priority {record.priority}</span>}</td><td className="px-4 py-3">{record.proxied ? "Proxied" : "DNS only"}</td><td className="px-4 py-3">{record.ttl === 1 ? "Auto" : `${record.ttl}s`}</td>
-            <td className="px-4 py-3 text-right">{data.canManage ? <div className="inline-flex gap-2"><button type="button" onClick={() => startEdit(record)} aria-label={`Edit ${record.name}`} className="rounded-md border border-slate-200 p-2 hover:bg-slate-50"><Pencil size={14}/></button><button type="button" onClick={() => void remove(record)} disabled={deletingId === record.id} aria-label={`Delete ${record.name}`} className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={14}/></button></div> : <span className="text-xs text-slate-400">Read only</span>}</td>
-          </tr>)}</tbody>
-        </table>
-      </div>}
-    </section>
-  </div>;
+    </main>
+  );
 }

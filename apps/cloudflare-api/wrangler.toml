@@ -15,6 +15,14 @@ EMAIL_FROM = "Nexora Alerts <alerts@nexoraedge.digital>"
 # the EMAIL_PROVIDER_API_URL and EMAIL_PROVIDER_API_TOKEN secrets and MX/
 # SPF/DKIM/DMARC records pointed at the mail server.
 EMAIL_PROVIDER = "none"
+
+# GitHub App public slug (the part after https://github.com/apps/). Optional:
+# when GITHUB_APP_ID/PRIVATE_KEY are configured, the repositories endpoint
+# discovers the slug live from GET /app. Set this only as a fallback so the
+# dashboard can still offer the "install the App" link if the App JWT call
+# is unavailable.
+# GITHUB_APP_SLUG = "nexora-deploy"
+
 [observability]
 enabled = true
 

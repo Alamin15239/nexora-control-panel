@@ -19,8 +19,11 @@ type Bindings = {
   GITHUB_APP_CLIENT_SECRET?: string;
   GITHUB_OAUTH_CALLBACK_URL?: string;
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
+  DEPLOY_ENV_ENCRYPTION_KEY?: string;
+  DEPLOY_DOMAIN?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_APP_SLUG?: string;
   GITHUB_OIDC_AUDIENCE?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_KEY_ID?: string;
@@ -399,7 +402,22 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/github/callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
-    path.startsWith("/v1/github/deployments/")
+    path.startsWith("/v1/github/deployments/") ||
+    // GitHub push/PR webhooks authenticate with the per-project HMAC secret,
+    // not a user session; the handler rejects unsigned or replayed deliveries.
+    path === "/v1/github/webhooks" ||
+    // Nexora Deploy project-scoped routes authenticate inside their handlers
+    // (organization role or active hosting-account membership, mirroring
+    // POST /v1/github/projects); they must not be gated to platform staff.
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/env-vars(\/[0-9a-fA-F-]{36})?$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/promote$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deployments\/[0-9a-fA-F-]{36}\/logs$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/deploy-settings$/.test(path) ||
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/webhook-secret$/.test(path) ||
+    path === "/v1/github/projects/detect-framework" ||
+    // Nexora Deploy helper catalog (framework presets); handlers authenticate
+    // with bearerIdentity and are safe for customer identities.
+    path.startsWith("/v1/deploy/")
   ) {
     await next();
     return;
@@ -427,7 +445,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders", "application_env_vars", "application_deployment_aliases", "github_webhook_deliveries", "github_deployment_logs"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -6737,6 +6755,64 @@ async function githubApi(token: string, path: string): Promise<Response> {
   });
 }
 
+type GithubApiDetail = {
+  status: number;
+  ok: boolean;
+  requestId: string | null;
+  rateLimitRemaining: number | null;
+  rateLimitReset: string | null;
+  retryAfter: number | null;
+  body: unknown | null;
+};
+
+// Performs a GitHub API call and captures safe diagnostics (request id, rate
+// limit headers, parsed JSON). The Authorization header and tokens are never
+// included in the returned detail, logs, or API responses.
+async function githubApiDetail(token: string, path: string): Promise<GithubApiDetail> {
+  const response = await githubApi(token, path);
+  const remainingRaw = response.headers.get("x-ratelimit-remaining");
+  const resetRaw = response.headers.get("x-ratelimit-reset");
+  const retryAfterRaw = response.headers.get("retry-after");
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  return {
+    status: response.status,
+    ok: response.ok,
+    requestId: response.headers.get("x-github-request-id"),
+    rateLimitRemaining: remainingRaw === null ? null : Number.parseInt(remainingRaw, 10),
+    rateLimitReset: resetRaw === null || Number.isNaN(Number.parseInt(resetRaw, 10))
+      ? null
+      : new Date(Number.parseInt(resetRaw, 10) * 1000).toISOString(),
+    retryAfter: retryAfterRaw === null || Number.isNaN(Number.parseInt(retryAfterRaw, 10))
+      ? null
+      : Number.parseInt(retryAfterRaw, 10),
+    body,
+  };
+}
+
+// Extracts GitHub's own (safe) error message from a JSON body when present.
+function githubErrorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const record = body as Record<string, unknown>;
+  if (typeof record.message === "string" && record.message.length > 0 && record.message.length <= 400) {
+    return record.message;
+  }
+  return null;
+}
+
+function githubDetailPayload(detail: GithubApiDetail | null): { requestId?: string; rateLimitRemaining?: number; rateLimitReset?: string } {
+  if (!detail) return {};
+  const payload: { requestId?: string; rateLimitRemaining?: number; rateLimitReset?: string } = {};
+  if (detail.requestId) payload.requestId = detail.requestId;
+  if (detail.rateLimitRemaining !== null && Number.isFinite(detail.rateLimitRemaining)) payload.rateLimitRemaining = detail.rateLimitRemaining;
+  if (detail.rateLimitReset) payload.rateLimitReset = detail.rateLimitReset;
+  return payload;
+}
+
 app.get("/v1/github/connection", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
@@ -6843,95 +6919,244 @@ app.get("/v1/github/repositories", async (c) => {
     "SELECT id FROM github_connections WHERE organization_id = ? LIMIT 1",
   ).bind(identity.organizationId).first<{ id: string }>();
   if (!connection) return c.json({ message: "Connect a GitHub account first." }, 409);
+
+  const CONFIG_REQUIREMENTS = "GITHUB_TOKEN_ENCRYPTION_KEY (64 hex chars) must be configured to read stored credentials.";
+
+  let token: string;
   try {
-    const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
-    const githubFailure = async (response: Response, operation: string) => {
-      let providerMessage = "";
-      try {
-        const payload = await response.clone().json() as { message?: unknown };
-        if (typeof payload.message === "string") providerMessage = payload.message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 240);
-      } catch { /* GitHub may return a non-JSON error body. */ }
-      const remaining = response.headers.get("x-ratelimit-remaining");
-      const reset = response.headers.get("x-ratelimit-reset");
-      const requestId = response.headers.get("x-github-request-id");
-      const rateLimited = response.status === 429 || (response.status === 403 && remaining === "0");
-      let message = rateLimited
-        ? "GitHub API rate limit reached. Wait for the reset time and refresh repositories."
-        : response.status === 401
-          ? "GitHub authorization is invalid or expired. Disconnect and reconnect the GitHub account."
-          : response.status === 403
-            ? "GitHub denied access to the App installation. Check that the Nexora GitHub App is installed on this account and has repository metadata and contents read access."
-            : response.status === 404
-              ? "GitHub could not find this App installation. Reinstall the Nexora GitHub App on the intended account."
-              : "GitHub could not complete the repository access request.";
-      if (providerMessage && !rateLimited && response.status !== 401) message += ` GitHub says: ${providerMessage}`;
+    token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    console.error("GitHub repositories: credential resolution failed:", detail);
+    // Never log tokens; the thrown messages describe the failure class only.
+    if (/GitHub authorization expired/i.test(detail)) {
       return c.json({
-        message,
-        diagnostics: {
-          operation,
-          providerStatus: response.status,
-          requestId: requestId ?? null,
-          rateLimitRemaining: remaining,
-          rateLimitReset: reset,
-        },
-      }, 502);
-    };
-    const readPages = async <T,>(initialPath: string, collection: "installations" | "repositories", operation: string): Promise<T[] | Response> => {
-      let nextPath: string | null = initialPath;
-      const items: T[] = [];
-      let pages = 0;
-      while (nextPath && pages < 10) {
-        const response = await githubApi(token, nextPath);
-        if (!response.ok) return githubFailure(response, operation);
-        const payload = await response.json() as Record<string, unknown>;
-        const pageItems = payload[collection];
-        if (!Array.isArray(pageItems)) throw new Error(`GitHub returned an invalid ${collection} response`);
-        items.push(...pageItems as T[]);
-        const link = response.headers.get("link") ?? "";
-        const nextUrl = /<([^>]+)>;\s*rel="next"/i.exec(link)?.[1];
-        if (nextUrl) {
-          const parsed = new URL(nextUrl);
-          if (parsed.origin !== "https://api.github.com" || !(parsed.pathname === "/user/installations" || parsed.pathname.startsWith("/user/installations/"))) {
-            throw new Error("GitHub returned an unexpected pagination URL");
+        error: "github_authorization_expired",
+        message: "GitHub authorization expired. Reconnect the Nexora GitHub App from this page and try again.",
+      }, 409);
+    }
+    return c.json({
+      error: "credential_resolution_failed",
+      message: `Unable to read the stored GitHub credentials. ${CONFIG_REQUIREMENTS}`,
+    }, 502);
+  }
+
+  type InstallationRow = { id: number; account: string | null; repositorySelection: string | null; suspended: boolean; permissionIssues: string[] };
+  const installations: InstallationRow[] = [];
+  const installationErrors: Array<{ installationId: number; account: string | null; status: number; message: string; requestId?: string }> = [];
+  const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
+  let lastDetail: GithubApiDetail | null = null;
+  let appSlug: string | null = null;
+  let clientConfigMismatch = false;
+
+  try {
+    // Verify the configured App identity directly with the GitHub API. GET /app
+    // authenticates with the App JWT, so this confirms GITHUB_APP_ID/PRIVATE_KEY
+    // describe a real, enabled app and returns its public slug for the
+    // installation link. If GitHub echoes client_id we can also detect a
+    // mismatch between the OAuth client and the App used for installations.
+    if (envHasAppCredentials(c.env)) {
+      try {
+        const appJwt = await githubAppJwt(c.env);
+        const appDetail = await githubApiDetail(`Bearer ${appJwt}`, "/app");
+        lastDetail = appDetail;
+        if (appDetail.ok && appDetail.body && typeof appDetail.body === "object") {
+          const appInfo = appDetail.body as { slug?: unknown; client_id?: unknown };
+          if (typeof appInfo.slug === "string" && appInfo.slug) appSlug = appInfo.slug;
+          if (typeof appInfo.client_id === "string" && appInfo.client_id &&
+              c.env.GITHUB_APP_CLIENT_ID && appInfo.client_id !== c.env.GITHUB_APP_CLIENT_ID) {
+            clientConfigMismatch = true;
           }
-          nextPath = parsed.pathname + parsed.search;
-        } else {
-          nextPath = null;
         }
-        pages++;
-      }
-      if (nextPath) throw new Error(`GitHub ${collection} pagination exceeded the safety limit`);
-      return items;
-    };
-    const installationsResult = await readPages<{ id: number; account?: { login?: string } }>("/user/installations?per_page=100", "installations", "list_installations");
-    if (installationsResult instanceof Response) return installationsResult;
-    if (installationsResult.length > 250) return c.json({ message: "This GitHub account has too many App installations to list safely. Contact Nexora support." }, 502);
-    const repositories: Array<{ id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string }> = [];
-    for (const installation of installationsResult) {
-      if (!Number.isSafeInteger(installation.id)) continue;
-      const repoResult = await readPages<{ id: number; name: string; full_name: string; private: boolean; default_branch: string; html_url: string; owner?: { login?: string } }>(
-        `/user/installations/${installation.id}/repositories?per_page=100`, "repositories", "list_installation_repositories",
-      );
-      if (repoResult instanceof Response) return repoResult;
-      for (const repo of repoResult) {
-        if (Number.isSafeInteger(repo.id) && repo.full_name && repo.name && repo.default_branch) repositories.push({
-          id: repo.id, name: repo.name, fullName: repo.full_name, private: Boolean(repo.private),
-          defaultBranch: repo.default_branch, htmlUrl: repo.html_url, installationId: installation.id, owner: repo.owner?.login ?? installation.account?.login ?? "",
-        });
+      } catch (error) {
+        console.error("GitHub repositories: app identity check failed:", error instanceof Error ? error.message : "unknown error");
       }
     }
-    return c.json({ repositories, installationCount: installationsResult.length });
-  } catch (error) {
-    const safeMessage = error instanceof Error ? error.message.slice(0, 240) : "Unknown GitHub integration error";
-    console.warn("GitHub repository listing failed:", safeMessage);
+
+    // GET /user/installations uses the user access token and lists only
+    // installations of the App that issued that token. Paginate honestly.
+    const MAX_INSTALLATION_PAGES = 10;
+    const MAX_INSTALLATIONS = 50;
+    for (let page = 1; page <= MAX_INSTALLATION_PAGES && installations.length < MAX_INSTALLATIONS; page++) {
+      const detail = await githubApiDetail(token, `/user/installations?per_page=100&page=${page}`);
+      lastDetail = detail;
+      if (!detail.ok) return githubListErrorResponse(c, detail, "list GitHub App installations");
+      const data = detail.body as { installations?: Array<{ id?: unknown; account?: { login?: unknown }; repository_selection?: unknown; suspended_at?: unknown }> } | null;
+      const rows = data?.installations ?? [];
+      for (const row of rows) {
+        if (installations.length >= MAX_INSTALLATIONS) break;
+        if (!Number.isSafeInteger(row.id)) continue;
+        installations.push({
+          id: row.id as number,
+          account: typeof row.account?.login === "string" ? row.account.login : null,
+          repositorySelection: typeof row.repository_selection === "string" ? row.repository_selection : null,
+          suspended: typeof row.suspended_at === "string" && row.suspended_at.length > 0,
+          permissionIssues: [],
+        });
+      }
+      if (rows.length < 100) break;
+    }
+
+    if (installations.length === 0) {
+      const installationUrl = appSlug
+        ? `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new`
+        : (c.env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(c.env.GITHUB_APP_SLUG)}/installations/new` : null);
+      const mismatchNotice = clientConfigMismatch
+        ? " Additionally, the configured GITHUB_APP_CLIENT_ID does not match the GitHub App identified by GITHUB_APP_ID; fix this configuration before reconnecting."
+        : "";
+      return c.json({
+        repositories,
+        installations,
+        installationErrors,
+        app: { slug: appSlug, installationUrl, clientConfigMismatch: clientConfigMismatch || undefined },
+        github: githubDetailPayload(lastDetail),
+        message: `The connected GitHub account has no Nexora GitHub App installations. OAuth authorization alone does not grant repository access: install the GitHub App${installationUrl ? ` at ${installationUrl}` : ""} and grant it access to the repositories you want to deploy.${mismatchNotice}`,
+      });
+    }
+
+    // Per-installation repository discovery with pagination. Errors are
+    // surfaced per installation instead of silently skipped.
+    const MAX_REPO_PAGES = 10;
+    for (const installation of installations) {
+      let pagesFetched = 0;
+      let page = 1;
+      while (pagesFetched < MAX_REPO_PAGES) {
+        const detail = await githubApiDetail(token, `/user/installations/${installation.id}/repositories?per_page=100&page=${page}`);
+        lastDetail = detail;
+        if (!detail.ok) {
+          const upstream = githubErrorMessage(detail.body);
+          const rateLimited = detail.status === 403 && detail.rateLimitRemaining === 0;
+          installationErrors.push({
+            installationId: installation.id,
+            account: installation.account,
+            status: detail.status,
+            message: rateLimited
+              ? "GitHub API rate limit exceeded while listing repositories."
+              : detail.status === 401
+                ? "GitHub rejected the stored authorization for this installation."
+                : detail.status === 403 && upstream && /not accessible/i.test(upstream)
+                  ? "The stored authorization cannot list this installation's repositories. Reconnect the Nexora GitHub App so the user token is issued by the same App."
+                  : upstream ?? `GitHub returned ${detail.status} while listing repositories.`,
+            requestId: detail.requestId ?? undefined,
+          });
+          break;
+        }
+        const data = detail.body as { repositories?: Array<{ id?: unknown; name?: unknown; full_name?: unknown; private?: unknown; default_branch?: unknown; html_url?: unknown; owner?: { login?: unknown } }> } | null;
+        const rows = data?.repositories ?? [];
+        for (const repo of rows) {
+          if (!Number.isSafeInteger(repo.id) || typeof repo.full_name !== "string" ||
+              typeof repo.name !== "string" || typeof repo.default_branch !== "string") continue;
+          repositories.push({
+            id: repo.id as number, name: repo.name, fullName: repo.full_name,
+            private: Boolean(repo.private), defaultBranch: repo.default_branch,
+            htmlUrl: typeof repo.html_url === "string" ? repo.html_url : `https://github.com/${repo.full_name}`,
+            installationId: installation.id,
+            owner: typeof repo.owner?.login === "string" ? repo.owner.login : installation.account ?? "",
+          });
+        }
+        if (rows.length < 100) break;
+        page++;
+        pagesFetched++;
+      }
+    }
+
+    // Verify App-level installation permissions with the App JWT so missing
+    // Metadata/Contents access is reported precisely instead of surfacing as
+    // a generic repository-list failure.
+    if (envHasAppCredentials(c.env)) {
+      for (const installation of installations.slice(0, 25)) {
+        try {
+          const appJwt = await githubAppJwt(c.env);
+          const detail = await githubApiDetail(`Bearer ${appJwt}`, `/app/installations/${installation.id}`);
+          lastDetail = detail;
+          if (!detail.ok || !detail.body || typeof detail.body !== "object") continue;
+          const info = detail.body as { permissions?: Record<string, unknown>; suspended_at?: unknown };
+          const permissions = info.permissions ?? {};
+          if (permissions.metadata !== "read") installation.permissionIssues.push("metadata:read");
+          if (permissions.contents !== "read") installation.permissionIssues.push("contents:read");
+          if (typeof info.suspended_at === "string" && info.suspended_at) installation.suspended = true;
+        } catch (error) {
+          console.error("GitHub repositories: installation permission check failed:", error instanceof Error ? error.message : "unknown error");
+        }
+      }
+    }
+
+    const installationUrl = appSlug
+      ? `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new`
+      : (c.env.GITHUB_APP_SLUG ? `https://github.com/apps/${encodeURIComponent(c.env.GITHUB_APP_SLUG)}/installations/new` : null);
     return c.json({
-      message: /authorization expired|refresh/i.test(safeMessage)
-        ? "GitHub authorization expired. Disconnect and reconnect your GitHub account."
-        : "Unable to complete GitHub repository listing. Retry the request; if it continues, provide the diagnostic reference to Nexora support.",
-      diagnostics: { operation: "repository_listing", reason: safeMessage },
+      repositories,
+      installations,
+      installationErrors,
+      app: { slug: appSlug, installationUrl, clientConfigMismatch: clientConfigMismatch || undefined },
+      github: githubDetailPayload(lastDetail),
+      message: installationErrors.length > 0
+        ? "Some installations could not be listed. Their errors are reported in installationErrors."
+        : undefined,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    console.error("GitHub repositories: discovery failed:", detail);
+    return c.json({
+      error: "github_unreachable",
+      message: "GitHub could not be reached while listing repositories. Check network connectivity and try again.",
+      github: githubDetailPayload(lastDetail),
     }, 502);
   }
 });
+
+// Maps a failed GitHub API response during installation/repository listing to
+// a specific, actionable API error. Request ids and rate-limit headers are
+// surfaced safely; tokens and authorization headers never leave the server.
+function githubListErrorResponse(c: { json: (body: unknown, status?: number) => Response }, detail: GithubApiDetail, action: string): Response {
+  const upstream = githubErrorMessage(detail.body);
+  const github = githubDetailPayload(detail);
+  if (detail.status === 401) {
+    return c.json({
+      error: "github_authorization_invalid",
+      message: `GitHub rejected the stored authorization with 401 while trying to ${action}. Reconnect the Nexora GitHub App to refresh it.`,
+      github,
+    }, 409);
+  }
+  if (detail.status === 403 && detail.rateLimitRemaining === 0) {
+    return c.json({
+      error: "github_rate_limited",
+      message: `GitHub API rate limit exceeded while trying to ${action}. Try again after the reset time.`,
+      retryAfterSeconds: detail.retryAfter ?? undefined,
+      github,
+    }, 429);
+  }
+  if (detail.status === 403) {
+    return c.json({
+      error: "github_forbidden",
+      message: `GitHub denied the request to ${action} (403)${upstream ? `: ${upstream}` : ""}. This usually means the OAuth authorization and the Nexora GitHub App are not the same App, or the user no longer has access to the installation. Reconnect the GitHub App and verify the installation.`,
+      github,
+    }, 403);
+  }
+  if (detail.status === 404) {
+    return c.json({
+      error: "github_not_found",
+      message: `GitHub could not find the resource needed to ${action} (404). The installation may have been removed. Reconnect the GitHub App and verify the installation.`,
+      github,
+    }, 409);
+  }
+  if (detail.status === 422) {
+    return c.json({
+      error: "github_unprocessable",
+      message: `GitHub could not process the request to ${action} (422)${upstream ? `: ${upstream}` : ""}.`,
+      github,
+    }, 502);
+  }
+  return c.json({
+    error: "github_upstream",
+    message: `GitHub returned ${detail.status} while trying to ${action}${upstream ? `: ${upstream}` : ""}.`,
+    github,
+  }, 502);
+}
+
+function envHasAppCredentials(env: Bindings): boolean {
+  return Boolean(env.GITHUB_APP_ID && /^\d+$/.test(env.GITHUB_APP_ID) && env.GITHUB_APP_PRIVATE_KEY);
+}
 
 app.post("/v1/github/projects", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
@@ -6984,12 +7209,414 @@ app.get("/v1/github/projects", async (c) => {
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
   const result = identity.platformRole
     ? await c.env.DB.prepare(
-        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
+        `SELECT id, hosting_account_id AS hostingAccountId, repository_full_name AS repositoryFullName, production_branch AS productionBranch, root_directory AS rootDirectory, output_directory AS outputDirectory, framework, auto_deploy AS autoDeploy, status, created_at AS createdAt, preview_enabled AS previewEnabled, ignored_build_paths AS ignoredBuildPaths FROM github_projects WHERE organization_id = ? ORDER BY created_at DESC`,
       ).bind(identity.organizationId).all()
     : await c.env.DB.prepare(
-        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
+        `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt, p.preview_enabled AS previewEnabled, p.ignored_build_paths AS ignoredBuildPaths FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
       ).bind(identity.organizationId, identity.id).all();
   return c.json({ projects: result.results ?? [] });
+});
+
+// ---------------------------------------------------------------------------
+// Nexora Deploy: framework presets, detection, and environment variables.
+//
+// Framework presets are the single source of truth for build commands and
+// output directories; detection inspects a repository's git tree and
+// package.json to suggest one. Environment variables are encrypted at rest
+// with AES-GCM under DEPLOY_ENV_ENCRYPTION_KEY (independent from the GitHub
+// token key so credentials rotate separately) and are never returned in API
+// responses — only metadata is exposed.
+// ---------------------------------------------------------------------------
+
+type FrameworkPreset = {
+  slug: "static" | "vite" | "react" | "vue" | "astro" | "next-static";
+  label: string;
+  description: string;
+  requiresBuild: boolean;
+  installCommand: string | null;
+  buildCommand: string | null;
+  outputDirectory: string;
+};
+
+const FRAMEWORK_PRESETS: FrameworkPreset[] = [
+  {
+    slug: "static",
+    label: "Static site",
+    description: "Plain HTML/CSS/JS served as uploaded. No build step.",
+    requiresBuild: false,
+    installCommand: null,
+    buildCommand: null,
+    outputDirectory: ".",
+  },
+  {
+    slug: "vite",
+    label: "Vite",
+    description: "Vite or Vue + Vite single-page application.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "react",
+    label: "React (Create React App)",
+    description: "React app scaffolded with react-scripts.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "build",
+  },
+  {
+    slug: "vue",
+    label: "Vue CLI",
+    description: "Vue application scaffolded with @vue/cli-service.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "astro",
+    label: "Astro (static output)",
+    description: "Astro site built to a fully static output directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "next-static",
+    label: "Next.js (static export)",
+    description: "Next.js with output: 'export' producing a static out/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "out",
+  },
+];
+
+app.get("/v1/deploy/framework-presets", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  return c.json({ presets: FRAMEWORK_PRESETS });
+});
+
+function deployEnvEncryptionKey(env: Bindings): Uint8Array {
+  const value = env.DEPLOY_ENV_ENCRYPTION_KEY ?? "";
+  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("Deploy environment variable encryption is not configured");
+  return new Uint8Array(value.match(/.{2}/g)!.map((part) => Number.parseInt(part, 16)));
+}
+
+const DEPLOY_ENV_CONFIG_REQUIREMENTS =
+  "DEPLOY_ENV_ENCRYPTION_KEY (64 hex chars) must be configured before environment variables can be stored.";
+
+async function encryptDeployEnvValue(env: Bindings, plaintext: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", deployEnvEncryptionKey(env), "AES-GCM", false, ["encrypt"]);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return { iv: base64(iv), ciphertext: base64(new Uint8Array(ciphertext)) };
+}
+
+async function decryptDeployEnvValue(env: Bindings, ciphertext: string, iv: string): Promise<string> {
+  const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", deployEnvEncryptionKey(env), "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(iv) }, key, decode(ciphertext));
+  return new TextDecoder().decode(plaintext);
+}
+
+// Loads a GitHub project for the caller with the same access model as
+// POST /v1/github/projects: platform staff get organization-wide access,
+// customers need an ACTIVE membership on the linked hosting account with the
+// OWNER/ADMIN/DEVELOPER role. Returns null when the project does not exist
+// in the caller's workspace (never leaks existence across tenants).
+async function deployProjectForIdentity(
+  db: D1Database,
+  identity: { id: string; organizationId: string; platformRole: string | null },
+  projectId: string,
+): Promise<{ id: string; organization_id: string } | null> {
+  if (identity.platformRole) {
+    return db.prepare("SELECT id, organization_id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1")
+      .bind(projectId, identity.organizationId).first<{ id: string; organization_id: string }>();
+  }
+  return db.prepare(
+    `SELECT p.id, p.organization_id FROM github_projects p
+     JOIN hosting_accounts a ON a.id = p.hosting_account_id AND a.organization_id = p.organization_id AND a.status = 'ACTIVE'
+     JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE'
+       AND m.role IN ('ACCOUNT_OWNER', 'ACCOUNT_ADMIN', 'ACCOUNT_DEVELOPER')
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId, identity.id).first<{ id: string; organization_id: string }>();
+}
+
+// Posts to the content API are avoided; the trees API plus the contents API
+// for package.json give detection everything it needs.
+type DetectionEvidence = { source: string; detail: string };
+
+function detectFrameworkFromRepository(
+  treePaths: string[],
+  treeTruncated: boolean,
+  packageJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null,
+): { framework: FrameworkPreset["slug"]; requiresBuild: boolean; installCommand: string | null; buildCommand: string | null; outputDirectory: string; detectedFrom: string; evidence: DetectionEvidence[] } {
+  const evidence: DetectionEvidence[] = [];
+  const rootFiles = new Set(treePaths.filter((path) => !path.includes("/")));
+  const dependencies = { ...(packageJson?.dependencies ?? {}), ...(packageJson?.devDependencies ?? {}) };
+
+  if (packageJson) {
+    evidence.push({ source: "package.json", detail: "parsed dependencies" });
+  }
+  for (const rootFile of ["next.config.js", "next.config.mjs", "next.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+  for (const rootFile of ["astro.config.mjs", "astro.config.js", "astro.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+  for (const rootFile of ["vite.config.js", "vite.config.mjs", "vite.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+
+  const pick = (slug: FrameworkPreset["slug"], detectedFrom: string): {
+    framework: FrameworkPreset["slug"]; requiresBuild: boolean; installCommand: string | null; buildCommand: string | null; outputDirectory: string; detectedFrom: string; evidence: DetectionEvidence[];
+  } => {
+    const preset = FRAMEWORK_PRESETS.find((item) => item.slug === slug)!;
+    return {
+      framework: preset.slug,
+      requiresBuild: preset.requiresBuild,
+      installCommand: preset.installCommand,
+      buildCommand: preset.buildCommand,
+      outputDirectory: preset.outputDirectory,
+      detectedFrom,
+      evidence,
+    };
+  };
+
+  if (dependencies.next) return pick("next-static", "package.json:dependencies:next");
+  if (dependencies.astro || rootFiles.has("astro.config.mjs") || rootFiles.has("astro.config.js") || rootFiles.has("astro.config.ts")) {
+    return pick("astro", dependencies.astro ? "package.json:dependencies:astro" : "root-files:astro.config");
+  }
+  if (dependencies["react-scripts"]) return pick("react", "package.json:dependencies:react-scripts");
+  if (dependencies["@vue/cli-service"]) return pick("vue", "package.json:dependencies:@vue/cli-service");
+  if (dependencies.vue && dependencies.vite) return pick("vue", "package.json:dependencies:vue+vite");
+  if (dependencies.vite || rootFiles.has("vite.config.js") || rootFiles.has("vite.config.mjs") || rootFiles.has("vite.config.ts")) {
+    return pick("vite", dependencies.vite ? "package.json:dependencies:vite" : "root-files:vite.config");
+  }
+  if (packageJson) {
+    evidence.push({ source: "package.json", detail: "no recognized framework in dependencies" });
+  }
+  if (treeTruncated) evidence.push({ source: "git-tree", detail: "tree listing truncated by GitHub; detection used the first page" });
+  if (!packageJson && rootFiles.has("index.html")) evidence.push({ source: "root-files", detail: "index.html without package.json" });
+
+  const preset = FRAMEWORK_PRESETS.find((item) => item.slug === "static")!;
+  return {
+    framework: preset.slug,
+    requiresBuild: preset.requiresBuild,
+    installCommand: preset.installCommand,
+    buildCommand: preset.buildCommand,
+    outputDirectory: preset.outputDirectory,
+    detectedFrom: packageJson ? "package.json:fallback" : rootFiles.has("index.html") ? "root-files:index.html" : "root-files:fallback",
+    evidence,
+  };
+}
+
+app.post("/v1/github/projects/detect-framework", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const repositoryId = Number(input.repositoryId);
+  const installationId = Number(input.installationId);
+  const repositoryFullName = typeof input.repositoryFullName === "string" ? input.repositoryFullName.trim() : "";
+  const branch = typeof input.branch === "string" ? input.branch.trim() : "";
+  if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || repositoryFullName.includes("..") || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..")) {
+    return c.json({ message: "Invalid repository, branch, or installation configuration." }, 400);
+  }
+
+  let token: string;
+  try {
+    token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
+  } catch {
+    return c.json({ message: "Connect GitHub first." }, 409);
+  }
+
+  const treeDetail = await githubApiDetail(token, `/repos/${repositoryFullName}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+  if (!treeDetail.ok) {
+    if (treeDetail.status === 404) return c.json({ message: "Repository or branch not found in the connected GitHub account.", ...(githubDetailPayload(treeDetail) as object) }, 404);
+    if (treeDetail.status === 403 && treeDetail.rateLimitRemaining === 0) {
+      return c.json({ message: "GitHub API rate limit exhausted. Try again after the reset time.", ...(githubDetailPayload(treeDetail) as object) }, 429);
+    }
+    return c.json({ message: githubErrorMessage(treeDetail.body) ?? "Unable to inspect the repository tree.", ...(githubDetailPayload(treeDetail) as object) }, 502);
+  }
+  const tree = treeDetail.body as { tree?: Array<{ path?: string; type?: string }>; truncated?: boolean };
+  const treePaths = (tree.tree ?? []).filter((entry) => entry.type === "blob" && typeof entry.path === "string").map((entry) => entry.path as string);
+
+  let packageJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null = null;
+  if (treePaths.includes("package.json")) {
+    const contentDetail = await githubApiDetail(token, `/repos/${repositoryFullName}/contents/package.json?ref=${encodeURIComponent(branch)}`);
+    if (contentDetail.ok && contentDetail.body && typeof (contentDetail.body as { content?: unknown }).content === "string") {
+      try {
+        const decoded = new TextDecoder().decode(Uint8Array.from(atob((contentDetail.body as { content: string }).content.replace(/\n/g, "")), (char) => char.charCodeAt(0)));
+        packageJson = JSON.parse(decoded) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      } catch {
+        packageJson = null;
+      }
+    } else if (!contentDetail.ok && contentDetail.status !== 404) {
+      return c.json({ message: githubErrorMessage(contentDetail.body) ?? "Unable to read package.json.", ...(githubDetailPayload(contentDetail) as object) }, 502);
+    }
+  }
+
+  const detection = detectFrameworkFromRepository(treePaths, tree.truncated === true, packageJson);
+  return c.json({ repositoryFullName, branch, ...detection });
+});
+
+app.get("/v1/github/projects/:projectId/env-vars", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const rows = await c.env.DB.prepare(
+    `SELECT id, key_name, environment, target, is_secret, created_at, updated_at
+     FROM application_env_vars WHERE project_id = ? AND organization_id = ?
+     ORDER BY key_name ASC, environment ASC`,
+  ).bind(projectId, project.organization_id).all<{
+    id: string; key_name: string; environment: string; target: string; is_secret: number; created_at: string; updated_at: string;
+  }>();
+  // Values (or their ciphertext) are intentionally never returned.
+  return c.json({
+    variables: (rows.results ?? []).map((row) => ({
+      id: row.id,
+      keyName: row.key_name,
+      environment: row.environment,
+      target: row.target,
+      isSecret: row.is_secret === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+  });
+});
+
+app.post("/v1/github/projects/:projectId/env-vars", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const keyName = typeof input.key === "string" ? input.key.trim() : "";
+  const value = typeof input.value === "string" ? input.value : "";
+  const environment = typeof input.environment === "string" ? input.environment : "production";
+  const target = typeof input.target === "string" ? input.target : "runtime";
+  const isSecret = input.isSecret === undefined ? true : input.isSecret === true;
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(keyName)) {
+    return c.json({ message: "Variable keys must start with a letter or underscore and contain only letters, digits, and underscores (max 128 characters)." }, 400);
+  }
+  if (value.length === 0 || value.length > 32_768) {
+    return c.json({ message: "Variable values must be between 1 and 32768 characters." }, 400);
+  }
+  if (environment !== "production" && environment !== "preview" && environment !== "development") {
+    return c.json({ message: "Environment must be production, preview, or development." }, 400);
+  }
+  if (target !== "build" && target !== "runtime" && target !== "both") {
+    return c.json({ message: "Target must be build, runtime, or both." }, 400);
+  }
+
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM application_env_vars WHERE project_id = ? AND organization_id = ?",
+  ).bind(projectId, project.organization_id).first<{ total: number }>();
+  if ((count?.total ?? 0) >= 128) {
+    return c.json({ message: "This project already has 128 environment variables. Remove one before adding another." }, 409);
+  }
+
+  let encrypted: { iv: string; ciphertext: string };
+  try {
+    encrypted = await encryptDeployEnvValue(c.env, value);
+  } catch {
+    return c.json({ message: DEPLOY_ENV_CONFIG_REQUIREMENTS }, 503);
+  }
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO application_env_vars (id, organization_id, project_id, key_name, environment, target, encrypted_value, value_iv, is_secret, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, project.organization_id, projectId, keyName, environment, target, encrypted.ciphertext, encrypted.iv, isSecret ? 1 : 0, identity.id).run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: `A variable named ${keyName} already exists for the ${environment} environment.` }, 409);
+    }
+    throw error;
+  }
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.created', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ key: keyName, environment, target, isSecret })).run();
+  return c.json({ variable: { id, keyName, environment, target, isSecret } }, 201);
+});
+
+app.patch("/v1/github/projects/:projectId/env-vars/:envVarId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const envVarId = c.req.param("envVarId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(envVarId)) return c.json({ message: "Invalid identifier" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const existing = await c.env.DB.prepare(
+    "SELECT id, environment, target, is_secret FROM application_env_vars WHERE id = ? AND project_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(envVarId, projectId, project.organization_id).first<{ id: string; environment: string; target: string; is_secret: number }>();
+  if (!existing) return c.json({ message: "Variable not found." }, 404);
+
+  const hasValue = typeof input.value === "string";
+  const value = hasValue ? input.value as string : null;
+  if (hasValue && (value!.length === 0 || value!.length > 32_768)) {
+    return c.json({ message: "Variable values must be between 1 and 32768 characters." }, 400);
+  }
+  const target = typeof input.target === "string" ? input.target : existing.target;
+  if (target !== "build" && target !== "runtime" && target !== "both") {
+    return c.json({ message: "Target must be build, runtime, or both." }, 400);
+  }
+  const isSecret = input.isSecret === undefined ? existing.is_secret === 1 : input.isSecret === true;
+
+  let encrypted: { iv: string; ciphertext: string } | null = null;
+  if (hasValue) {
+    try {
+      encrypted = await encryptDeployEnvValue(c.env, value!);
+    } catch {
+      return c.json({ message: DEPLOY_ENV_CONFIG_REQUIREMENTS }, 503);
+    }
+  }
+  const result = encrypted
+    ? await c.env.DB.prepare(
+        "UPDATE application_env_vars SET encrypted_value = ?, value_iv = ?, target = ?, is_secret = ?, updated_at = datetime('now') WHERE id = ? AND project_id = ? AND organization_id = ?",
+      ).bind(encrypted.ciphertext, encrypted.iv, target, isSecret ? 1 : 0, envVarId, projectId, project.organization_id).run()
+    : await c.env.DB.prepare(
+        "UPDATE application_env_vars SET target = ?, is_secret = ?, updated_at = datetime('now') WHERE id = ? AND project_id = ? AND organization_id = ?",
+      ).bind(target, isSecret ? 1 : 0, envVarId, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Variable not found." }, 404);
+
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.updated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ id: envVarId, valueRotated: hasValue, target, isSecret })).run();
+  return c.json({ variable: { id: envVarId, target, isSecret, valueRotated: hasValue } });
+});
+
+app.delete("/v1/github/projects/:projectId/env-vars/:envVarId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const envVarId = c.req.param("envVarId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(envVarId)) return c.json({ message: "Invalid identifier" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const result = await c.env.DB.prepare(
+    "DELETE FROM application_env_vars WHERE id = ? AND project_id = ? AND organization_id = ?",
+  ).bind(envVarId, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Variable not found." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.deleted', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ id: envVarId })).run();
+  return c.json({ deleted: true });
 });
 
 
@@ -7082,10 +7709,10 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
   }
 
   const deployment = await c.env.DB.prepare(
-    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName, p.trusted_workflow_sha AS trustedWorkflowSha FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
+    "SELECT d.id, d.organization_id AS organizationId, d.project_id AS projectId, d.commit_sha AS commitSha, d.branch, d.status, d.deployment_kind AS deploymentKind, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName, p.trusted_workflow_sha AS trustedWorkflowSha FROM github_deployments d JOIN github_projects p ON p.id = d.project_id AND p.organization_id = d.organization_id WHERE d.id = ? LIMIT 1",
   ).bind(c.req.param("deploymentId")).first<{
     id: string; organizationId: string; projectId: string; commitSha: string; branch: string;
-    status: string; repositoryId: string; repositoryFullName: string; trustedWorkflowSha: string | null;
+    status: string; deploymentKind: string; repositoryId: string; repositoryFullName: string; trustedWorkflowSha: string | null;
   }>();
   if (!deployment || deployment.status !== "queued") {
     return c.json({ message: "Deployment not found or no longer accepting a runner." }, 409);
@@ -7174,11 +7801,48 @@ app.post("/v1/github/deployments/:deploymentId/oidc/exchange", async (c) => {
     return c.json({ message: "This deployment already has an upload capability or could not be claimed." }, 409);
   }
 
+  // Build-environment injection (Nexora Deploy batch 5): hand the verified
+  // builder the project's decrypted environment variables that target the
+  // build phase for this deployment's environment. Values leave the control
+  // plane exactly once, to a builder whose identity is pinned to this commit
+  // and trusted workflow SHA. Undecryptable rows (e.g. after a key rotation
+  // without re-entry) are skipped and reported, never silently dropped.
+  const buildEnvironment = {
+    environmentVariables: [] as Array<{ key: string; value: string; target: string }>,
+    environmentVariablesUndecryptable: 0,
+  };
+  try {
+    const environment = deployment.deploymentKind === "preview" ? "preview" : "production";
+    const envVarRows = await c.env.DB.prepare(
+      "SELECT key_name, target, encrypted_value, value_iv FROM application_env_vars " +
+      "WHERE project_id = ? AND organization_id = ? AND environment = ? AND target IN ('build','both') " +
+      "ORDER BY key_name ASC LIMIT 128",
+    ).bind(deployment.projectId, deployment.organizationId, environment).all<{
+      key_name: string; target: string; encrypted_value: string; value_iv: string;
+    }>();
+    for (const row of envVarRows.results ?? []) {
+      try {
+        buildEnvironment.environmentVariables.push({
+          key: row.key_name,
+          value: await decryptDeployEnvValue(c.env, row.encrypted_value, row.value_iv),
+          target: row.target,
+        });
+      } catch {
+        buildEnvironment.environmentVariablesUndecryptable += 1;
+      }
+    }
+  } catch {
+    // Without an encryption key (or a failed scan) the build still proceeds;
+    // no values are injected and the omission is visible in the response.
+    buildEnvironment.environmentVariables = [];
+  }
+
   return c.json({
     uploadToken: capability,
     expiresAt,
     maxBytes: 104857600,
     contentType: "application/gzip",
+    ...buildEnvironment,
   }, 201);
 });
 
@@ -7325,31 +7989,229 @@ app.put("/v1/github/deployments/:deploymentId/artifact", async (c) => {
   }
 });
 
-app.post("/v1/github/projects/:projectId/deployments", async (c) => {
+// Deployment build-log proxy (Nexora Deploy batch 5).
+//
+// The builder streams log lines through the control plane; every message is
+// REDACTED AT WRITE TIME against the project's decrypted environment variable
+// values and common token patterns, so the read path can never leak a secret
+// that was not already scrubbed. Log authorization reuses the one-time upload
+// capability while it is still unconsumed (logs stream during the build,
+// before the artifact is uploaded); after the artifact consumes the token,
+// only control-plane lifecycle messages remain.
+const LOG_SECRET_PATTERNS: RegExp[] = [
+  /ghs_[A-Za-z0-9]{16,}/g,
+  /ghp_[A-Za-z0-9]{16,}/g,
+  /gho_[A-Za-z0-9]{16,}/g,
+  /ghus_[A-Za-z0-9]{16,}/g,
+  /ghub_[A-Za-z0-9]{16,}/g,
+  /github_pat_[A-Za-z0-9_]{20,}/g,
+  /Bearer\s+[A-Za-z0-9._-]{10,}/gi,
+  /AKIA[0-9A-Z]{16}/g,
+  /x-access-token:\s*[A-Za-z0-9._-]{10,}/gi,
+];
+
+function scrubLogMessage(message: string, secretValues: string[]): string {
+  let scrubbed = message;
+  const sorted = [...secretValues].sort((a, b) => b.length - a.length);
+  for (const value of sorted) {
+    if (value.length >= 4 && scrubbed.includes(value)) {
+      scrubbed = scrubbed.split(value).join("[redacted]");
+    }
+  }
+  for (const pattern of LOG_SECRET_PATTERNS) {
+    scrubbed = scrubbed.replace(pattern, "[redacted]");
+  }
+  return scrubbed.slice(0, 2000);
+}
+
+// Loads every decrypted environment variable value for the project so the
+// scrubber can remove them from builder output. Values never leave this
+// function; only their redacted absence does.
+async function projectSecretValuesForScrubbing(env: Bindings, projectId: string, organizationId: string): Promise<string[]> {
+  const values: string[] = [];
+  try {
+    const rows = await env.DB.prepare(
+      "SELECT encrypted_value, value_iv FROM application_env_vars WHERE project_id = ? AND organization_id = ? LIMIT 128",
+    ).bind(projectId, organizationId).all<{ encrypted_value: string; value_iv: string }>();
+    for (const row of rows.results ?? []) {
+      try {
+        values.push(await decryptDeployEnvValue(env, row.encrypted_value, row.value_iv));
+      } catch { /* undecryptable rows contribute nothing to the scrubber */ }
+    }
+  } catch { /* without an encryption key only pattern-based scrubbing applies */ }
+  return values;
+}
+
+app.post("/v1/github/deployments/:deploymentId/logs", async (c) => {
+  const authorization = c.req.header("authorization") ?? "";
+  const match = /^Bearer\s+([a-f0-9]{64})$/i.exec(authorization);
+  if (!match) return c.json({ message: "A valid upload capability is required to append build logs." }, 401);
+
+  let input: { lines?: unknown };
+  try { input = await c.req.json<{ lines?: unknown }>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 200) {
+    return c.json({ message: "lines must contain between 1 and 200 entries." }, 400);
+  }
+  const messages: string[] = [];
+  for (const line of input.lines) {
+    if (typeof line !== "string" && typeof line !== "object") return c.json({ message: "Each log line must be a string." }, 400);
+    const raw = typeof line === "string" ? line : String((line as Record<string, unknown>).message ?? "");
+    if (raw.length < 1 || raw.length > 4000) {
+      return c.json({ message: "Log lines must be between 1 and 4000 characters." }, 400);
+    }
+    messages.push(raw);
+  }
+
+  const deploymentId = c.req.param("deploymentId");
+  const tokenHash = await sha256(match[1]);
+  const token = await c.env.DB.prepare(
+    "SELECT t.organization_id AS organizationId, t.project_id AS projectId, t.deployment_id AS deploymentId, d.status FROM github_deployment_upload_tokens t JOIN github_deployments d ON d.id = t.deployment_id AND d.organization_id = t.organization_id WHERE t.token_hash = ? AND t.deployment_id = ? AND t.consumed_at IS NULL AND t.expires_at > ? LIMIT 1",
+  ).bind(tokenHash, deploymentId, new Date().toISOString()).first<{
+    organizationId: string; projectId: string; deploymentId: string; status: string;
+  }>();
+  if (!token) return c.json({ message: "Upload capability is invalid, expired, or already consumed." }, 401);
+
+  const secretValues = await projectSecretValuesForScrubbing(c.env, token.projectId, token.organizationId);
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM github_deployment_logs WHERE deployment_id = ? AND organization_id = ?",
+  ).bind(deploymentId, token.organizationId).first<{ total: number }>();
+  let seq = count?.total ?? 0;
+  const statements = messages.map((message) => {
+    const statement = c.env.DB.prepare(
+      "INSERT INTO github_deployment_logs (id, organization_id, project_id, deployment_id, seq, source, message_redacted) VALUES (?, ?, ?, ?, ?, 'builder', ?)",
+    ).bind(crypto.randomUUID(), token.organizationId, token.projectId, deploymentId, seq, scrubLogMessage(message, secretValues));
+    seq += 1;
+    return statement;
+  });
+  try {
+    const results = await c.env.DB.batch(statements);
+    if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+      throw new Error("log lines were not appended atomically");
+    }
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: "A concurrent writer already appended these sequence numbers; retry from the current tail." }, 409);
+    }
+    throw error;
+  }
+  return c.json({ appended: messages.length, tailSeq: seq - 1 }, 201);
+});
+
+app.get("/v1/github/projects/:projectId/deployments/:deploymentId/logs", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
-  if (!c.env.GITHUB_APP_ID || !c.env.GITHUB_APP_PRIVATE_KEY) {
-    return c.json({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
+  const projectId = c.req.param("projectId");
+  const deploymentId = c.req.param("deploymentId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(deploymentId)) {
+    return c.json({ message: "Invalid identifier" }, 400);
   }
-  const project = await c.env.DB.prepare(
-    `SELECT p.id, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName,
-            p.github_installation_id AS installationId, p.production_branch AS productionBranch,
-            p.trusted_workflow_sha AS trustedWorkflowSha, p.status,
-            COALESCE(NULLIF(s.output_directory, ''), p.output_directory) AS outputDirectory
-     FROM github_projects p
-     LEFT JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id
-     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
-  ).bind(c.req.param("projectId"), identity.organizationId).first<{
-    id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
-    productionBranch: string; trustedWorkflowSha: string | null; status: string; outputDirectory: string;
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const deployment = await c.env.DB.prepare(
+    "SELECT id, status, log_excerpt AS logExcerpt FROM github_deployments WHERE id = ? AND project_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(deploymentId, projectId, project.organization_id).first<{ id: string; status: string; logExcerpt: string | null }>();
+  if (!deployment) return c.json({ message: "Deployment not found for this project." }, 404);
+
+  const afterRaw = c.req.query("after");
+  const after = afterRaw === null || afterRaw === undefined || afterRaw === "" ? -1 : Number(afterRaw);
+  const limitRaw = c.req.query("limit");
+  const limit = limitRaw === null || limitRaw === undefined || limitRaw === "" ? 200 : Number(limitRaw);
+  if (!Number.isSafeInteger(after) || after < -1) return c.json({ message: "Invalid after cursor." }, 400);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) return c.json({ message: "limit must be between 1 and 500." }, 400);
+
+  const rows = await c.env.DB.prepare(
+    "SELECT seq, source, message_redacted AS message, emitted_at AS emittedAt FROM github_deployment_logs " +
+    "WHERE deployment_id = ? AND organization_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?",
+  ).bind(deploymentId, project.organization_id, after, limit + 1).all<{
+    seq: number; source: string; message: string; emittedAt: string;
   }>();
-  if (!project) return c.json({ message: "GitHub project not found." }, 404);
-  if (!project.installationId) return c.json({ message: "Reconnect the GitHub App and relink this repository." }, 409);
-  if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
-    return c.json({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
+  const results = rows.results ?? [];
+  const hasMore = results.length > limit;
+  const lines = (hasMore ? results.slice(0, limit) : results);
+  // Defense in depth: the read path re-applies generic pattern scrubbing even
+  // though every line was already scrubbed at write time.
+  return c.json({
+    deploymentId,
+    status: deployment.status,
+    logExcerpt: deployment.logExcerpt ? scrubLogMessage(deployment.logExcerpt, []) : null,
+    lines,
+    nextCursor: hasMore ? lines[lines.length - 1]?.seq ?? after : null,
+  });
+});
+
+// Shared deployment dispatch (Nexora Deploy batch 4).
+//
+// One code path dispatches every deployment — manual dashboard dispatches,
+// push-webhook auto deploys, and preview (pull request) deploys. The helper
+// owns every prerequisite check (GitHub App credentials, workflow trust,
+// runtime admission, static-v1 gating, output directory validity, in-flight
+// dedup), the atomic deployment+release creation, the trusted workflow
+// dispatch, and the failure bookkeeping. Routes only load their project and
+// choose the kind/branch/trigger, so webhook-driven deploys can never skip a
+// gate that manual deploys honor.
+
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=UTF-8" },
+  });
+}
+
+// The serving domain for deployment hostnames. DEPLOY_DOMAIN may point at a
+// dedicated zone; the default is the platform apex domain.
+function deployDomain(env: Bindings): string {
+  const value = (env.DEPLOY_DOMAIN ?? "nexoraedge.digital").trim().toLowerCase();
+  return /^[a-z0-9.-]{3,253}$/.test(value) ? value : "nexoraedge.digital";
+}
+
+function productionAliasHostname(projectId: string, domain: string): string {
+  return `prod-${projectId.replace(/-/g, "").slice(0, 12)}.${domain}`;
+}
+
+function previewAliasHostname(deploymentId: string, projectId: string, domain: string): string {
+  return `dpl-${deploymentId.replace(/-/g, "").slice(0, 12)}.proj-${projectId.replace(/-/g, "").slice(0, 12)}.${domain}`;
+}
+
+type DispatchProject = {
+  id: string;
+  organizationId: string;
+  repositoryId: string;
+  repositoryFullName: string;
+  installationId: string | null;
+  productionBranch: string;
+  trustedWorkflowSha: string | null;
+  status: string;
+  outputDirectory: string;
+};
+
+async function dispatchGitHubDeployment(
+  env: Bindings,
+  args: {
+    project: DispatchProject;
+    deploymentKind: "production" | "preview";
+    branch: string;
+    triggerType: "manual" | "push";
+    actorType: "user" | "github_webhook";
+    actorId: string | null;
+    sourceDeploymentId?: string | null;
+    commitSha?: string | null;
+    commitMessage?: string | null;
+    detailSource: string;
+  },
+): Promise<Response> {
+  const { project } = args;
+  const db = env.DB;
+  if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
+    return jsonResponse({ message: "GitHub App ID and private key are required before deployments can be dispatched." }, 503);
   }
-  const runtimeAssignment = await c.env.DB.prepare(
+  if (!project.installationId) {
+    return jsonResponse({ message: "Reconnect the GitHub App and relink this repository." }, 409);
+  }
+  if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
+    return jsonResponse({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
+  }
+  const runtimeAssignment = await db.prepare(
     "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
     "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, rp.profile_key AS profileKey, " +
     "rp.runtime_family AS runtimeFamily, s.build_method AS buildMethod, p.status AS poolStatus, " +
@@ -7362,14 +8224,14 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
     "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
-  ).bind(project.id, identity.organizationId).first<{
+  ).bind(project.id, project.organizationId).first<{
     runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
     runtimeEnabled: number; profileKey: string; runtimeFamily: string; buildMethod: string;
     poolStatus: string | null; isolationLevel: string | null; assignedNodeId: string | null;
   }>();
   // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
   if (!runtimeAssignment || !isRuntimeAssignmentAdmitted(runtimeAssignment)) {
-    return c.json({
+    return jsonResponse({
       message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
     }, 409);
   }
@@ -7378,7 +8240,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
   if (runtimeAssignment.profileKey !== "static-v1" ||
       runtimeAssignment.runtimeFamily !== "static" ||
       runtimeAssignment.buildMethod !== "static") {
-    return c.json({
+    return jsonResponse({
       message: "This deployment workflow currently supports only the static-v1 runtime with static output. Other runtime profiles remain disabled until their dedicated build and execution pipelines pass acceptance.",
     }, 409);
   }
@@ -7386,53 +8248,57 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       !/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) ||
       project.outputDirectory.startsWith("/") ||
       project.outputDirectory.split("/").some((part) => part === "." || part === "..")) {
-    return c.json({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
+    return jsonResponse({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
   }
 
-  const active = await c.env.DB.prepare(
+  const active = await db.prepare(
     "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
   ).bind(project.id).first<{ id: string }>();
-  if (active) return c.json({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
+  if (active) return jsonResponse({ message: "A deployment is already in progress for this project.", deploymentId: active.id }, 409);
 
   const deploymentId = crypto.randomUUID();
   const applicationReleaseId = crypto.randomUUID();
   let deploymentCreated = false;
   let dispatchAccepted = false;
   try {
-    const token = await githubInstallationToken(c.env, project.installationId, project.repositoryId);
-    const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(project.productionBranch)}`, {
+    const token = await githubInstallationToken(env, project.installationId, project.repositoryId);
+    // Webhook payloads carry a commit SHA; verify it exists rather than
+    // trusting the payload. Manual dispatches resolve the branch head.
+    const commitRef = args.commitSha ?? args.branch;
+    const refResponse = await fetch(`https://api.github.com/repos/${project.repositoryFullName}/commits/${encodeURIComponent(commitRef)}`, {
       headers: {
         Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Nexora-Control-Panel",
       },
     });
-    if (!refResponse.ok) return c.json({ message: "Unable to resolve the configured production branch in GitHub." }, 502);
+    if (!refResponse.ok) return jsonResponse({ message: args.commitSha ? "The pushed commit is no longer available in GitHub." : "Unable to resolve the configured production branch in GitHub." }, 502);
     const commitData = await refResponse.json() as { sha?: string; commit?: { message?: string } };
-    if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return c.json({ message: "GitHub returned an invalid commit SHA." }, 502);
+    if (!commitData.sha || !/^[a-f0-9]{40}$/i.test(commitData.sha)) return jsonResponse({ message: "GitHub returned an invalid commit SHA." }, 502);
+    const resolvedMessage = args.commitMessage ?? commitData.commit?.message ?? "";
 
     const creationStatements = [
-      c.env.DB.prepare(
-        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message)
-         VALUES (?, ?, ?, ?, ?, 'manual', 'queued', ?)`,
-      ).bind(deploymentId, identity.organizationId, project.id, commitData.sha.toLowerCase(), project.productionBranch,
-        (commitData.commit?.message ?? "").slice(0, 500)),
+      db.prepare(
+        `INSERT INTO github_deployments (id, organization_id, project_id, commit_sha, branch, trigger_type, status, commit_message, deployment_kind, source_deployment_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+      ).bind(deploymentId, project.organizationId, project.id, commitData.sha.toLowerCase(), args.branch,
+        args.triggerType, resolvedMessage.slice(0, 500), args.deploymentKind, args.sourceDeploymentId ?? null),
     ];
     if (runtimeAssignment && applicationReleaseId) {
-      creationStatements.push(c.env.DB.prepare(
+      creationStatements.push(db.prepare(
         "INSERT INTO application_releases " +
         "(id, organization_id, project_id, deployment_id, node_pool_id, runtime_profile_id, assigned_node_id, spec_version, state, source_commit_sha) " +
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)",
-      ).bind(applicationReleaseId, identity.organizationId, project.id, deploymentId,
+      ).bind(applicationReleaseId, project.organizationId, project.id, deploymentId,
         runtimeAssignment.nodePoolId, runtimeAssignment.runtimeProfileId, runtimeAssignment.assignedNodeId,
         runtimeAssignment.specVersion, commitData.sha.toLowerCase()));
-      creationStatements.push(c.env.DB.prepare(
+      creationStatements.push(db.prepare(
         "INSERT INTO application_release_events " +
         "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
-        "VALUES (?, ?, ?, NULL, 'queued', 'user', ?, 'deployment_queued', ?)",
-      ).bind(crypto.randomUUID(), identity.organizationId, applicationReleaseId, identity.id,
-        JSON.stringify({ source: "github_manual_dispatch", nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId })));
+        "VALUES (?, ?, ?, NULL, 'queued', ?, ?, 'deployment_queued', ?)",
+      ).bind(crypto.randomUUID(), project.organizationId, applicationReleaseId, args.actorType, args.actorId,
+        JSON.stringify({ source: args.detailSource, nodePoolId: runtimeAssignment.nodePoolId, assignedNodeId: runtimeAssignment.assignedNodeId, deploymentKind: args.deploymentKind })));
     }
-    const created = await c.env.DB.batch(creationStatements);
+    const created = await db.batch(creationStatements);
     if (Number(created[0]?.meta?.changes ?? 0) !== 1 ||
         (runtimeAssignment && Number(created[1]?.meta?.changes ?? 0) !== 1)) {
       throw new Error("Unable to create the deployment and its application release atomically");
@@ -7450,7 +8316,7 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
           "User-Agent": "Nexora-Control-Panel",
         },
         body: JSON.stringify({
-          ref: project.productionBranch,
+          ref: args.branch,
           inputs: {
             deployment_id: deploymentId,
             commit_sha: commitData.sha,
@@ -7460,26 +8326,26 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
       },
     );
     if (dispatch.status !== 204) {
-      await c.env.DB.prepare(
+      await db.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = ? WHERE id = ? AND organization_id = ? AND status = 'queued'",
-      ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, identity.organizationId).run();
+      ).bind(`GitHub workflow dispatch rejected (HTTP ${dispatch.status}).`, deploymentId, project.organizationId).run();
       if (applicationReleaseId) {
-        await c.env.DB.batch([
-          c.env.DB.prepare(
+        await db.batch([
+          db.prepare(
             "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_rejected', " +
             "failure_message_redacted = 'GitHub workflow dispatch was rejected.', updated_at = datetime('now') " +
             "WHERE id = ? AND organization_id = ? AND state = 'queued'",
-          ).bind(applicationReleaseId, identity.organizationId),
-          c.env.DB.prepare(
+          ).bind(applicationReleaseId, project.organizationId),
+          db.prepare(
             "INSERT INTO application_release_events " +
             "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
             "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_rejected', '{}' " +
             "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
             "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_rejected')",
-          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+          ).bind(crypto.randomUUID(), applicationReleaseId, project.organizationId),
         ]);
       }
-      return c.json({
+      return jsonResponse({
         message: dispatch.status === 404
           ? "Add .github/workflows/nexora-deploy.yml to this repository and grant the Nexora GitHub App Actions: write permission."
           : "GitHub did not accept the deployment workflow dispatch.",
@@ -7488,15 +8354,15 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     }
 
     dispatchAccepted = true;
-    await c.env.DB.batch([
-      c.env.DB.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
-        .bind(project.id, identity.organizationId),
-      c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
-        .bind(crypto.randomUUID(), identity.organizationId, identity.id, deploymentId,
-          JSON.stringify({ repository: project.repositoryFullName, branch: project.productionBranch, commitSha: commitData.sha })),
+    await db.batch([
+      db.prepare("UPDATE github_projects SET status = 'building', updated_at = datetime('now') WHERE id = ? AND organization_id = ?")
+        .bind(project.id, project.organizationId),
+      db.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.deployment_dispatched', 'github_deployment', ?, ?)")
+        .bind(crypto.randomUUID(), project.organizationId, args.actorId, deploymentId,
+          JSON.stringify({ repository: project.repositoryFullName, branch: args.branch, commitSha: commitData.sha, deploymentKind: args.deploymentKind, source: args.detailSource })),
     ]);
-    return c.json({
-      deployment: { id: deploymentId, commitSha: commitData.sha, branch: project.productionBranch, status: "queued" },
+    return jsonResponse({
+      deployment: { id: deploymentId, commitSha: commitData.sha, branch: args.branch, status: "queued", deploymentKind: args.deploymentKind },
       applicationRelease: applicationReleaseId ? {
         id: applicationReleaseId,
         deploymentId,
@@ -7508,34 +8374,391 @@ app.post("/v1/github/projects/:projectId/deployments", async (c) => {
     }, 202);
   } catch (error) {
     if (deploymentCreated && !dispatchAccepted) {
-      await c.env.DB.prepare(
+      await db.prepare(
         "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), log_excerpt = 'GitHub did not accept the workflow dispatch.' WHERE id = ? AND organization_id = ? AND status = 'queued'",
-      ).bind(deploymentId, identity.organizationId).run().catch(() => undefined);
+      ).bind(deploymentId, project.organizationId).run().catch(() => undefined);
       if (applicationReleaseId) {
-        await c.env.DB.batch([
-          c.env.DB.prepare(
+        await db.batch([
+          db.prepare(
             "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), failure_code = 'workflow_dispatch_error', " +
             "failure_message_redacted = 'GitHub workflow dispatch did not complete.', updated_at = datetime('now') " +
             "WHERE id = ? AND organization_id = ? AND state = 'queued'",
-          ).bind(applicationReleaseId, identity.organizationId),
-          c.env.DB.prepare(
+          ).bind(applicationReleaseId, project.organizationId),
+          db.prepare(
             "INSERT INTO application_release_events " +
             "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
             "SELECT ?, organization_id, id, 'queued', 'failed', 'control_plane', NULL, 'workflow_dispatch_error', '{}' " +
             "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'failed' " +
             "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = application_releases.id AND e.event_code = 'workflow_dispatch_error')",
-          ).bind(crypto.randomUUID(), applicationReleaseId, identity.organizationId),
+          ).bind(crypto.randomUUID(), applicationReleaseId, project.organizationId),
         ]).catch(() => undefined);
       }
     }
     const detail = error instanceof Error ? error.message : "unknown error";
     console.error("GitHub deployment dispatch failed:", detail);
     if (/UNIQUE constraint failed/i.test(detail)) {
-      return c.json({ message: "A deployment is already queued or running for this project." }, 409);
+      return jsonResponse({ message: "A deployment is already queued or running for this project." }, 409);
     }
-    return c.json({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
+    return jsonResponse({ message: "Unable to dispatch the GitHub deployment. Check the GitHub App installation and permissions.", deploymentId: deploymentCreated ? deploymentId : undefined }, 502);
   }
+}
+
+app.post("/v1/github/projects/:projectId/deployments", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  const projectId = c.req.param("projectId");
+  const project = await c.env.DB.prepare(
+    `SELECT p.id, p.github_repository_id AS repositoryId, p.repository_full_name AS repositoryFullName,
+            p.github_installation_id AS installationId, p.production_branch AS productionBranch,
+            p.trusted_workflow_sha AS trustedWorkflowSha, p.status,
+            COALESCE(NULLIF(s.output_directory, ''), p.output_directory) AS outputDirectory
+     FROM github_projects p
+     LEFT JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? LIMIT 1`,
+  ).bind(projectId, identity.organizationId).first<{
+    id: string; repositoryId: string; repositoryFullName: string; installationId: string | null;
+    productionBranch: string; trustedWorkflowSha: string | null; status: string; outputDirectory: string;
+  }>();
+  if (!project) return c.json({ message: "GitHub project not found." }, 404);
+  return dispatchGitHubDeployment(c.env, {
+    project: { ...project, organizationId: identity.organizationId },
+    deploymentKind: "production",
+    branch: project.productionBranch,
+    triggerType: "manual",
+    actorType: "user",
+    actorId: identity.id,
+    detailSource: "github_manual_dispatch",
+  });
 });
+
+// Rotates the per-project webhook secret. The raw secret is returned exactly
+// once — the stored copy is encrypted and is never readable again.
+app.put("/v1/github/projects/:projectId/webhook-secret", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const rawSecret = randomHex(32);
+  let encrypted: { iv: string; ciphertext: string };
+  try {
+    encrypted = await encryptGithubToken(c.env, rawSecret);
+  } catch {
+    return c.json({ message: "GITHUB_TOKEN_ENCRYPTION_KEY (64 hex chars) must be configured before webhook secrets can be stored." }, 503);
+  }
+  const result = await c.env.DB.prepare(
+    "UPDATE github_projects SET webhook_secret_encrypted = ?, webhook_secret_iv = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?",
+  ).bind(encrypted.ciphertext, encrypted.iv, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Project not found in this workspace." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.webhook_secret_rotated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({})).run();
+  return c.json({
+    webhookSecret: rawSecret,
+    message: "Store this secret in the repository's GitHub webhook settings now. It is encrypted at rest and cannot be retrieved again.",
+  });
+});
+
+// Push/PR webhook receiver (Nexora Deploy batch 4).
+//
+// Trust model: each project stores its own webhook secret (encrypted). A
+// delivery is trusted only when its x-hub-signature-256 verifies against the
+// secret of a project linked to the delivered repository; anything else gets
+// a uniform 401 with no record written (an attacker must not be able to
+// poison the delivery ledger or discover which repositories are linked).
+// Verified deliveries are recorded once per x-github-delivery id (UNIQUE
+// index makes replays explicit skipped_replay outcomes) and every skip or
+// dispatch decision is auditable.
+function webhookPathIsIgnored(path: string, patterns: string[]): boolean {
+  return patterns.some((raw) => {
+    const pattern = raw.trim().replace(/^\/+|\/+$/g, "");
+    if (!pattern) return false;
+    return path === pattern || path.startsWith(pattern + "/");
+  });
+}
+
+app.post("/v1/github/webhooks", async (c) => {
+  const deliveryId = (c.req.header("x-github-delivery") ?? "").trim();
+  const eventType = (c.req.header("x-github-event") ?? "").trim();
+  const signatureHeader = (c.req.header("x-hub-signature-256") ?? "").trim();
+  if (!deliveryId || !/^[A-Za-z0-9-]{1,128}$/.test(deliveryId) || !eventType) {
+    return c.json({ message: "GitHub delivery headers are required." }, 400);
+  }
+  const rawBody = await c.req.text();
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return c.json({ message: "Webhook payload is not valid JSON." }, 400);
+  }
+  const repository = payload.repository as { id?: unknown } | undefined;
+  const repositoryId = repository && typeof repository.id === "number" ? String(repository.id) : null;
+  if (!repositoryId) return c.json({ message: "Webhook payload does not identify a repository." }, 400);
+
+  const candidates = await c.env.DB.prepare(
+    `SELECT id, organization_id, repository_full_name AS repositoryFullName,
+            github_repository_id AS repositoryId, github_installation_id AS installationId,
+            production_branch AS productionBranch, trusted_workflow_sha AS trustedWorkflowSha,
+            status, auto_deploy, preview_enabled, ignored_build_paths,
+            COALESCE(NULLIF((SELECT s.output_directory FROM application_project_settings s
+                             WHERE s.project_id = github_projects.id AND s.organization_id = github_projects.organization_id), ''),
+                     github_projects.output_directory) AS outputDirectory,
+            webhook_secret_encrypted AS webhookSecretEncrypted, webhook_secret_iv AS webhookSecretIv
+     FROM github_projects WHERE github_repository_id = ?`,
+  ).bind(repositoryId).all<{
+    id: string; organization_id: string; repositoryFullName: string; repositoryId: string;
+    installationId: string | null; productionBranch: string; trustedWorkflowSha: string | null;
+    status: string; auto_deploy: number; preview_enabled: number; ignored_build_paths: string;
+    outputDirectory: string; webhookSecretEncrypted: string | null; webhookSecretIv: string | null;
+  }>();
+
+  // Verify the signature against each candidate project's secret. Only a
+  // verified delivery is attributed and recorded.
+  let verified: (typeof candidates.results)[number] | null = null;
+  if (signatureHeader.startsWith("sha256=")) {
+    const provided = signatureHeader.slice("sha256=".length).toLowerCase();
+    for (const candidate of candidates.results ?? []) {
+      if (!candidate.webhookSecretEncrypted || !candidate.webhookSecretIv) continue;
+      let secret: string;
+      try {
+        secret = await decryptGithubToken(c.env, candidate.webhookSecretEncrypted, candidate.webhookSecretIv);
+      } catch {
+        continue;
+      }
+      const expected = await hmacSha256(secret, rawBody);
+      if (constantTimeEqual(expected, provided)) {
+        verified = candidate;
+        break;
+      }
+    }
+  }
+  if (!verified) return c.json({ message: "Webhook signature verification failed." }, 401);
+
+  // Idempotency: a delivery id is processed exactly once.
+  const replay = await c.env.DB.prepare(
+    "SELECT id FROM github_webhook_deliveries WHERE delivery_id = ? LIMIT 1",
+  ).bind(deliveryId).first<{ id: string }>();
+  if (replay) return c.json({ outcome: "skipped_replay", deliveryId }, 200);
+
+  const verifiedProject = verified;
+  const recordDelivery = async (outcome: string, detail: Record<string, unknown>, branch: string | null, commitSha: string | null) => {
+    await c.env.DB.prepare(
+      `INSERT INTO github_webhook_deliveries (id, organization_id, repository_id, delivery_id, event_type, branch, commit_sha, outcome, detail_redacted)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), verifiedProject.organization_id, repositoryId, deliveryId, eventType, branch, commitSha, outcome,
+      JSON.stringify(detail).slice(0, 2000)).run();
+  };
+
+  const project = verifiedProject;
+  const projectContext: DispatchProject = {
+    id: project.id,
+    organizationId: project.organization_id,
+    repositoryId: project.repositoryId,
+    repositoryFullName: project.repositoryFullName,
+    installationId: project.installationId,
+    productionBranch: project.productionBranch,
+    trustedWorkflowSha: project.trustedWorkflowSha,
+    status: project.status,
+    outputDirectory: project.outputDirectory,
+  };
+
+  if (eventType === "push") {
+    const ref = typeof payload.ref === "string" ? payload.ref : "";
+    const branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : "";
+    const deleted = payload.after === "0000000000000000000000000000000000000000" || payload.deleted === true;
+    const headCommit = (payload.head_commit ?? {}) as { id?: unknown; message?: unknown };
+    const commitSha = typeof headCommit.id === "string" ? headCommit.id : null;
+    if (!branch) {
+      await recordDelivery("skipped_branch_mismatch", { reason: "payload ref is not a branch head" }, null, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId }, 200);
+    }
+    // Decision order: configuration skips first, then targeting, then
+    // content, then concurrency — so a disabled project never reaches the
+    // more expensive checks.
+    if (project.auto_deploy !== 1) {
+      await recordDelivery("skipped_auto_deploy_disabled", {}, branch, commitSha);
+      return c.json({ outcome: "skipped_auto_deploy_disabled", deliveryId }, 200);
+    }
+    if (deleted) {
+      await recordDelivery("skipped_branch_deleted", {}, branch, commitSha);
+      return c.json({ outcome: "skipped_branch_deleted", deliveryId }, 200);
+    }
+    if (branch !== project.productionBranch) {
+      await recordDelivery("skipped_branch_mismatch", { branch, productionBranch: project.productionBranch }, branch, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId, branch }, 200);
+    }
+    let ignoredPatterns: string[] = [];
+    try {
+      const parsed = JSON.parse(project.ignored_build_paths) as unknown;
+      if (Array.isArray(parsed)) ignoredPatterns = parsed.filter((item): item is string => typeof item === "string");
+    } catch { /* treat as no ignore list */ }
+    const commits = Array.isArray(payload.commits) ? payload.commits as Array<Record<string, unknown>> : [];
+    const changedFiles = new Set<string>();
+    for (const commit of commits) {
+      for (const key of ["added", "modified", "removed"]) {
+        const list = commit[key];
+        if (Array.isArray(list)) for (const file of list) if (typeof file === "string") changedFiles.add(file);
+      }
+    }
+    if (changedFiles.size > 0 && [...changedFiles].every((file) => webhookPathIsIgnored(file, ignoredPatterns))) {
+      await recordDelivery("skipped_ignored_paths", { changedFiles: [...changedFiles].slice(0, 25), ignoredPatterns }, branch, commitSha);
+      return c.json({ outcome: "skipped_ignored_paths", deliveryId }, 200);
+    }
+    const headMessage = typeof headCommit.message === "string" ? headCommit.message : "";
+    if (headMessage.toLowerCase().includes("[skip deploy]")) {
+      await recordDelivery("skipped_commit_message", { headCommitSha: commitSha }, branch, commitSha);
+      return c.json({ outcome: "skipped_commit_message", deliveryId }, 200);
+    }
+    const inFlight = await c.env.DB.prepare(
+      "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
+    ).bind(project.id).first<{ id: string }>();
+    if (inFlight) {
+      await recordDelivery("skipped_in_flight", { deploymentId: inFlight.id }, branch, commitSha);
+      return c.json({ outcome: "skipped_in_flight", deliveryId }, 200);
+    }
+    const response = await dispatchGitHubDeployment(c.env, {
+      project: projectContext,
+      deploymentKind: "production",
+      branch: project.productionBranch,
+      triggerType: "push",
+      actorType: "github_webhook",
+      actorId: null,
+      commitSha,
+      commitMessage: headMessage || null,
+      detailSource: "github_push_webhook",
+    });
+    if (response.status === 202) {
+      const body = await response.json() as { deployment?: { id?: string } };
+      await recordDelivery("dispatched", { deploymentId: body.deployment?.id, deploymentKind: "production" }, branch, commitSha);
+      return c.json({ outcome: "dispatched", deliveryId, deploymentId: body.deployment?.id }, 200);
+    }
+    const body = await response.json() as { message?: string };
+    await recordDelivery("error", { status: response.status, message: body.message ?? "dispatch failed" }, branch, commitSha);
+    return c.json({ outcome: "error", deliveryId, detail: { status: response.status } }, 200);
+  }
+
+  if (eventType === "pull_request") {
+    const action = typeof payload.action === "string" ? payload.action : "";
+    const pullRequest = (payload.pull_request ?? {}) as {
+      head?: { ref?: unknown; sha?: unknown };
+    };
+    const branch = pullRequest.head && typeof pullRequest.head.ref === "string" ? pullRequest.head.ref : "";
+    const commitSha = pullRequest.head && typeof pullRequest.head.sha === "string" ? pullRequest.head.sha : null;
+    if (project.preview_enabled !== 1) {
+      await recordDelivery("skipped_preview_disabled", { action }, branch || null, commitSha);
+      return c.json({ outcome: "skipped_preview_disabled", deliveryId }, 200);
+    }
+    if (!["opened", "synchronize", "reopened"].includes(action)) {
+      await recordDelivery("skipped_pull_request_closed", { action }, branch || null, commitSha);
+      return c.json({ outcome: "skipped_pull_request_closed", deliveryId }, 200);
+    }
+    if (!branch) {
+      await recordDelivery("skipped_branch_mismatch", { reason: "payload does not identify the pull request branch" }, null, commitSha);
+      return c.json({ outcome: "skipped_branch_mismatch", deliveryId }, 200);
+    }
+    const inFlight = await c.env.DB.prepare(
+      "SELECT id FROM github_deployments WHERE project_id = ? AND status IN ('queued','cloning','installing','building','publishing') LIMIT 1",
+    ).bind(project.id).first<{ id: string }>();
+    if (inFlight) {
+      await recordDelivery("skipped_in_flight", { deploymentId: inFlight.id }, branch, commitSha);
+      return c.json({ outcome: "skipped_in_flight", deliveryId }, 200);
+    }
+    const response = await dispatchGitHubDeployment(c.env, {
+      project: projectContext,
+      deploymentKind: "preview",
+      branch,
+      triggerType: "push",
+      actorType: "github_webhook",
+      actorId: null,
+      commitSha,
+      detailSource: "github_pull_request_webhook",
+    });
+    if (response.status === 202) {
+      const body = await response.json() as { deployment?: { id?: string } };
+      await recordDelivery("dispatched", { deploymentId: body.deployment?.id, deploymentKind: "preview", pullRequestAction: action }, branch, commitSha);
+      return c.json({ outcome: "dispatched", deliveryId, deploymentId: body.deployment?.id, deploymentKind: "preview" }, 200);
+    }
+    const body = await response.json() as { message?: string };
+    await recordDelivery("error", { status: response.status, message: body.message ?? "dispatch failed" }, branch, commitSha);
+    return c.json({ outcome: "error", deliveryId, detail: { status: response.status } }, 200);
+  }
+
+  // Other event types (ping, installation, ...) are acknowledged but never deploy.
+  await recordDelivery("skipped_branch_mismatch", { reason: `unhandled event type ${eventType}` }, null, null);
+  return c.json({ outcome: "skipped_branch_mismatch", deliveryId, unhandledEvent: eventType }, 200);
+});
+
+// Promotion: re-point the production alias at a preview deployment's release
+// without rebuilding. The artifact, digest, and release stay untouched — this
+// is a routing switch, the same primitive rollback uses in reverse.
+app.post("/v1/github/projects/:projectId/deployments/:deploymentId/promote", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const deploymentId = c.req.param("deploymentId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(deploymentId)) {
+    return c.json({ message: "Invalid identifier" }, 400);
+  }
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const deployment = await c.env.DB.prepare(
+    `SELECT d.id, d.deployment_kind AS deploymentKind, d.status, d.branch,
+            r.id AS releaseId, r.state AS releaseState, r.artifact_digest AS artifactDigest
+     FROM github_deployments d
+     LEFT JOIN application_releases r ON r.deployment_id = d.id AND r.organization_id = d.organization_id
+     WHERE d.id = ? AND d.project_id = ? AND d.organization_id = ? LIMIT 1`,
+  ).bind(deploymentId, projectId, project.organization_id).first<{
+    id: string; deploymentKind: string; status: string; branch: string | null;
+    releaseId: string | null; releaseState: string | null; artifactDigest: string | null;
+  }>();
+  if (!deployment) return c.json({ message: "Deployment not found for this project." }, 404);
+  if (deployment.deploymentKind !== "preview") {
+    return c.json({ message: "Only preview deployments can be promoted." }, 409);
+  }
+  if (deployment.status !== "succeeded" || deployment.releaseState !== "succeeded" || !deployment.artifactDigest) {
+    return c.json({ message: "Only a healthy preview deployment with a published artifact can be promoted." }, 409);
+  }
+  const productionAlias = await c.env.DB.prepare(
+    "SELECT id, alias FROM application_deployment_aliases WHERE project_id = ? AND organization_id = ? AND kind = 'production' LIMIT 1",
+  ).bind(projectId, project.organization_id).first<{ id: string; alias: string }>();
+  if (!productionAlias) {
+    return c.json({ message: "No production deployment exists yet; promote after the first production release is live." }, 409);
+  }
+  if (productionAlias.alias === previewAliasHostname(deploymentId, projectId, deployDomain(c.env))) {
+    return c.json({ message: "This preview deployment is already serving production traffic." }, 409);
+  }
+
+  const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_deployment_aliases SET release_id = ?, deployment_id = ?, status = 'active', updated_at = datetime('now') " +
+      "WHERE id = ? AND organization_id = ? AND kind = 'production'",
+    ).bind(deployment.releaseId, deploymentId, productionAlias.id, project.organization_id),
+    c.env.DB.prepare(
+      "INSERT INTO application_release_events " +
+      "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
+      "SELECT ?, organization_id, id, 'succeeded', 'succeeded', 'user', ?, 'promoted_to_production', ? " +
+      "FROM application_releases WHERE id = ? AND organization_id = ? AND state = 'succeeded'",
+    ).bind(crypto.randomUUID(), identity.id,
+      JSON.stringify({ promotedDeploymentId: deploymentId, alias: productionAlias.alias }),
+      deployment.releaseId, project.organization_id),
+  ]);
+  if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
+    return c.json({ message: "Promotion could not be committed safely; the production alias is unchanged." }, 409);
+  }
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.preview_promoted', 'github_deployment', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, deploymentId,
+      JSON.stringify({ alias: productionAlias.alias, releaseId: deployment.releaseId })).run();
+  return c.json({
+    promoted: true,
+    alias: productionAlias.alias,
+    productionReleaseId: deployment.releaseId,
+    sourceDeploymentId: deploymentId,
+    message: "Production traffic now serves the preview deployment's artifact. No rebuild was performed.",
+  });
+});
+
 
 
 // Runtime catalog is metadata only. Disabled profiles cannot be selected for execution.
@@ -9027,6 +10250,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
   const release = await c.env.DB.prepare(
     "SELECT r.id AS releaseRowId, r.state, r.artifact_digest AS artifactDigest, " +
     "d.artifact_sha256 AS deploymentArtifactDigest, r.project_id AS projectId, " +
+    "d.deployment_kind AS deploymentKind, " +
     "r.organization_id AS organizationId, s.health_check_path AS healthCheckPath, " +
     "w.active_release_id AS previousActiveReleaseId, previous.deployment_id AS previousDeploymentId, " +
     "previous.artifact_digest AS previousArtifactDigest, previous_node.id AS previousActiveNodeId, " +
@@ -9040,7 +10264,8 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
-    deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
+    deploymentArtifactDigest: string | null; projectId: string; deploymentKind: string;
+    organizationId: string;
     healthCheckPath: string | null; previousActiveReleaseId: string | null;
     previousDeploymentId: string | null;
     previousArtifactDigest: string | null;
@@ -9158,6 +10383,29 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
+    // Alias activation: the moment a release passes its health check it
+    // becomes the traffic target for its deployment kind. Production
+    // releases take over the project's stable production hostname; preview
+    // releases claim their per-deployment preview hostname. Promotion and
+    // rollback later re-point the production alias without rebuilding.
+    ...(release.deploymentKind === "production"
+      ? [c.env.DB.prepare(
+          "INSERT INTO application_deployment_aliases (id, organization_id, project_id, alias, kind, status, release_id, deployment_id) " +
+          "VALUES (?, ?, ?, ?, 'production', 'active', ?, ?) " +
+          "ON CONFLICT(alias, kind) DO UPDATE SET release_id = excluded.release_id, " +
+          "deployment_id = excluded.deployment_id, status = 'active', updated_at = datetime('now')",
+        ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+          productionAliasHostname(release.projectId, deployDomain(c.env)),
+          release.releaseRowId, body.deploymentId)]
+      : release.deploymentKind === "preview"
+        ? [c.env.DB.prepare(
+            "INSERT INTO application_deployment_aliases (id, organization_id, project_id, alias, kind, status, release_id, deployment_id) " +
+            "VALUES (?, ?, ?, ?, 'preview', 'active', ?, ?) " +
+            "ON CONFLICT(deployment_id, kind) DO UPDATE SET status = 'active', updated_at = datetime('now')",
+          ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
+            previewAliasHostname(body.deploymentId, release.projectId, deployDomain(c.env)),
+            release.releaseRowId, body.deploymentId)]
+        : []),
   ] : [
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'failed', finished_at = datetime('now'), " +
@@ -9643,12 +10891,64 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
   if (!project) return c.json({ message: "GitHub project not found." }, 404);
   const rows = await c.env.DB.prepare(
     `SELECT id, commit_sha AS commitSha, branch, trigger_type AS triggerType, status,
-            commit_message AS commitMessage, deployment_url AS deploymentUrl, log_excerpt AS logExcerpt,
-            requested_at AS requestedAt, started_at AS startedAt, finished_at AS finishedAt
+            deployment_kind AS deploymentKind, commit_message AS commitMessage, deployment_url AS deploymentUrl,
+            log_excerpt AS logExcerpt, requested_at AS requestedAt, started_at AS startedAt, finished_at AS finishedAt
      FROM github_deployments WHERE project_id = ? AND organization_id = ?
      ORDER BY requested_at DESC LIMIT 50`,
   ).bind(project.id, identity.organizationId).all();
   return c.json({ deployments: rows.results ?? [] });
+});
+
+// Deploy settings: preview deployments, auto-deploy on push, and the ignored
+// path list used by the push webhook. Same access model as env vars.
+app.patch("/v1/github/projects/:projectId/deploy-settings", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const current = await c.env.DB.prepare(
+    "SELECT auto_deploy, preview_enabled, ignored_build_paths FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1",
+  ).bind(projectId, project.organization_id).first<{ auto_deploy: number; preview_enabled: number; ignored_build_paths: string }>();
+  if (!current) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  const autoDeploy = typeof input.autoDeploy === "boolean" ? (input.autoDeploy ? 1 : 0) : current.auto_deploy;
+  const previewEnabled = typeof input.previewEnabled === "boolean" ? (input.previewEnabled ? 1 : 0) : current.preview_enabled;
+  let ignoredPaths: string[];
+  if (input.ignoredBuildPaths === undefined) {
+    try {
+      const parsed = JSON.parse(current.ignored_build_paths) as unknown;
+      ignoredPaths = Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+    } catch { ignoredPaths = []; }
+  } else {
+    if (!Array.isArray(input.ignoredBuildPaths) || input.ignoredBuildPaths.length > 32) {
+      return c.json({ message: "ignoredBuildPaths must be an array of at most 32 relative path prefixes." }, 400);
+    }
+    ignoredPaths = input.ignoredBuildPaths as string[];
+    for (const path of ignoredPaths) {
+      // The webhook matcher normalizes trailing slashes, so "docs/" is a
+      // valid directory prefix; only interior empty/./.. segments are bad.
+      const normalized = path.replace(/\/+$/, "");
+      if (typeof path !== "string" || path.length < 1 || path.length > 200 || path.startsWith("/") ||
+          normalized.length < 1 ||
+          normalized.split("/").some((part) => part === "." || part === ".." || part === "")) {
+        return c.json({ message: "Ignored paths must be relative path prefixes without '.', '..' or empty interior segments." }, 400);
+      }
+    }
+  }
+
+  const result = await c.env.DB.prepare(
+    "UPDATE github_projects SET auto_deploy = ?, preview_enabled = ?, ignored_build_paths = ?, updated_at = datetime('now') WHERE id = ? AND organization_id = ?",
+  ).bind(autoDeploy, previewEnabled, JSON.stringify(ignoredPaths), projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Project not found in this workspace." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.deploy_settings_updated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId,
+      JSON.stringify({ autoDeploy: autoDeploy === 1, previewEnabled: previewEnabled === 1, ignoredPathsCount: ignoredPaths.length })).run();
+  return c.json({ settings: { autoDeploy: autoDeploy === 1, previewEnabled: previewEnabled === 1, ignoredBuildPaths: ignoredPaths } });
 });
 
 app.delete("/v1/github/connection", async (c) => {
