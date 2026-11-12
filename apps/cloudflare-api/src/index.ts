@@ -6717,7 +6717,7 @@ app.get("/v1/github/repositories", async (c) => {
       let providerMessage = "";
       try {
         const payload = await response.clone().json() as { message?: unknown };
-        if (typeof payload.message === "string") providerMessage = payload.message.replace(/[\\u0000-\\u001f\\u007f]/g, " ").slice(0, 240);
+        if (typeof payload.message === "string") providerMessage = payload.message.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 240);
       } catch { /* GitHub may return a non-JSON error body. */ }
       const remaining = response.headers.get("x-ratelimit-remaining");
       const reset = response.headers.get("x-ratelimit-reset");
@@ -6756,10 +6756,10 @@ app.get("/v1/github/repositories", async (c) => {
         if (!Array.isArray(pageItems)) throw new Error(`GitHub returned an invalid ${collection} response`);
         items.push(...pageItems as T[]);
         const link = response.headers.get("link") ?? "";
-        const nextUrl = /<([^>]+)>;\\s*rel="next"/i.exec(link)?.[1];
+        const nextUrl = /<([^>]+)>;\s*rel="next"/i.exec(link)?.[1];
         if (nextUrl) {
           const parsed = new URL(nextUrl);
-          if (parsed.origin !== "https://api.github.com" || !parsed.pathname.startsWith("/user/installations/")) {
+          if (parsed.origin !== "https://api.github.com" || !(parsed.pathname === "/user/installations" || parsed.pathname.startsWith("/user/installations/"))) {
             throw new Error("GitHub returned an unexpected pagination URL");
           }
           nextPath = parsed.pathname + parsed.search;
