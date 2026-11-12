@@ -18,6 +18,19 @@ type RuntimeProfile = { id: string; runtimeFamily: string; profileKey: string; d
 type RuntimePlanLimits = { cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number; buildMinutesPerMonth: number };
 type RuntimeUsage = { periodStart: string; buildMinutesLimit: number; buildMinutesUsed: number; buildSecondsRemaining: number; quotaExhausted: boolean; meteringStatus: string; executionEnabled: boolean };
 
+function normalizeIgnoredBuildPaths(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean);
+  if (typeof value !== "string" || !value.trim()) return [];
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === "string").map(item => item.trim()).filter(Boolean);
+    } catch { /* Accept legacy comma-separated values below. */ }
+  }
+  return trimmed.split(",").map(item => item.trim()).filter(Boolean);
+}
+
 function RuntimeProjectSettings({ projectId }: { projectId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [profiles, setProfiles] = useState<RuntimeProfile[]>([]);
@@ -647,7 +660,7 @@ function EnvVarsPanel({ projectId }: { projectId: string }) {
 function DeploySettingsPanel({ project, onChanged }: { project: Project; onChanged: () => void }) {
   const [previewEnabled, setPreviewEnabled] = useState(project.previewEnabled === 1);
   const [autoDeploy, setAutoDeploy] = useState(project.autoDeploy !== 0);
-  const [ignoredPaths, setIgnoredPaths] = useState((project.ignoredBuildPaths ?? []).join(", "));
+  const [ignoredPaths, setIgnoredPaths] = useState(normalizeIgnoredBuildPaths(project.ignoredBuildPaths).join(", "));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -664,7 +677,7 @@ function DeploySettingsPanel({ project, onChanged }: { project: Project; onChang
       if (!response.ok) throw new Error(data.message ?? "Unable to save deploy settings.");
       setPreviewEnabled(data.settings.previewEnabled);
       setAutoDeploy(data.settings.autoDeploy);
-      setIgnoredPaths((data.settings.ignoredBuildPaths ?? []).join(", "));
+      setIgnoredPaths(normalizeIgnoredBuildPaths(data.settings?.ignoredBuildPaths).join(", "));
       setNotice("Deploy settings saved.");
       onChanged();
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to save deploy settings."); }
