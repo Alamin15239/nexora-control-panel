@@ -453,6 +453,83 @@ try:
 except sqlite3.IntegrityError:
     pass
 
+# --- Deploy platform foundation guards (0046) ---
+deploy_actual = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+for table in ("application_env_vars", "application_deployment_aliases", "github_webhook_deliveries"):
+    assert table in deploy_actual, f"Missing deploy platform table: {table}"
+
+db.execute("""INSERT INTO application_env_vars
+(id,organization_id,project_id,key_name,environment,target,encrypted_value,value_iv,is_secret)
+VALUES ('env-a','org-a','project-a','API_TOKEN','production','runtime','cipher','iv',1)""")
+must_reject("env var numeric-leading key name",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-b','org-a','project-a','1BAD','production','c','i')", ())
+must_reject("env var invalid-character key name",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-c','org-a','project-a','BAD-NAME','production','c','i')", ())
+must_reject("env var overlong key name",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-d','org-a','project-a',?,'production','c','i')", ("K" * 129,))
+must_reject("env var invalid environment",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-e','org-a','project-a','OK_KEY','staging','c','i')", ())
+must_reject("env var invalid target",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,target,encrypted_value,value_iv) "
+            "VALUES ('env-f','org-a','project-a','OK_KEY','production','buildtime','c','i')", ())
+must_reject("env var cross-tenant insert blocked by org-guard trigger",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-g','org-b','project-a','OK_KEY','production','c','i')", ())
+must_reject("env var duplicate (project, key, environment)",
+            "INSERT INTO application_env_vars(id,organization_id,project_id,key_name,environment,encrypted_value,value_iv) "
+            "VALUES ('env-h','org-a','project-a','API_TOKEN','production','c','i')", ())
+# Same key in a different environment is legitimate.
+db.execute("""INSERT INTO application_env_vars
+(id,organization_id,project_id,key_name,environment,target,encrypted_value,value_iv,is_secret)
+VALUES ('env-i','org-a','project-a','API_TOKEN','preview','both','cipher2','iv2',0)""")
+
+db.execute("""INSERT INTO application_deployment_aliases
+(id,organization_id,project_id,alias,kind,status)
+VALUES ('alias-a','org-a','project-a','dpl-abc123.nexoraedge.digital','preview','pending')""")
+must_reject("deployment alias uppercase not allowed",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind) "
+            "VALUES ('alias-b','org-a','project-a','DPL-ABC123.nexoraedge.digital','preview')", ())
+must_reject("deployment alias invalid characters",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind) "
+            "VALUES ('alias-c','org-a','project-a','dpl_abc123.nexoraedge.digital','preview')", ())
+must_reject("deployment alias invalid kind",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind) "
+            "VALUES ('alias-d','org-a','project-a','dpl-def456.nexoraedge.digital','canary')", ())
+must_reject("deployment alias invalid status",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind,status) "
+            "VALUES ('alias-e','org-a','project-a','dpl-def456.nexoraedge.digital','preview','staging')", ())
+must_reject("deployment alias cross-tenant insert blocked by org-guard trigger",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind) "
+            "VALUES ('alias-f','org-b','project-a','dpl-ghi789.nexoraedge.digital','preview')", ())
+must_reject("deployment alias UNIQUE(alias, kind)",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind) "
+            "VALUES ('alias-g','org-a','project-a','dpl-abc123.nexoraedge.digital','preview')", ())
+# One alias per deployment per kind.
+db.execute("""INSERT INTO application_deployment_aliases
+(id,organization_id,project_id,alias,kind,status,deployment_id)
+VALUES ('alias-h','org-a','project-a','app.example.test','production','active','deployment-a')""")
+must_reject("deployment alias UNIQUE(deployment_id, kind)",
+            "INSERT INTO application_deployment_aliases(id,organization_id,project_id,alias,kind,status,deployment_id) "
+            "VALUES ('alias-i','org-a','project-a','other.example.test','production','active','deployment-a')", ())
+
+db.execute("""INSERT INTO github_webhook_deliveries
+(id,organization_id,repository_id,delivery_id,event_type,outcome)
+VALUES ('whd-a','org-a','repo-1','delivery-uuid-1','push','dispatched')""")
+must_reject("webhook delivery unknown outcome",
+            "INSERT INTO github_webhook_deliveries(id,organization_id,repository_id,delivery_id,event_type,outcome) "
+            "VALUES ('whd-b','org-a','repo-1','delivery-uuid-2','push','teleported')", ())
+must_reject("webhook delivery_id UNIQUE",
+            "INSERT INTO github_webhook_deliveries(id,organization_id,repository_id,delivery_id,event_type,outcome) "
+            "VALUES ('whd-c','org-a','repo-1','delivery-uuid-1','push','dispatched')", ())
+db.execute("""INSERT INTO github_webhook_deliveries
+(id,organization_id,repository_id,delivery_id,event_type,outcome,branch,commit_sha,detail_redacted)
+VALUES ('whd-d','org-a','repo-1','delivery-uuid-3','push','skipped_branch_mismatch','dev',?,'branch mismatch')""", ("c" * 40,))
+assert db.execute("SELECT outcome FROM github_webhook_deliveries WHERE delivery_id='delivery-uuid-3'").fetchone()[0] == "skipped_branch_mismatch"
+
 violations = list(db.execute("PRAGMA foreign_key_check"))
 assert not violations, f"Foreign-key violations: {violations}"
-print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, and foreign keys verified.")
+print(f"PASS: {len(list(MIGRATIONS.glob('*.sql')))} migrations applied; runtime schema, plan quota defaults/checks, per-node Ed25519 key/nonce constraints, usage ledger idempotency/tenant guards/immutable aggregation, customer account membership role and tenant constraints, release transitions, deploy platform env-var/alias/webhook constraints and org guards, and foreign keys verified.")

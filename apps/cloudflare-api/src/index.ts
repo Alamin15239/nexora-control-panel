@@ -19,6 +19,7 @@ type Bindings = {
   GITHUB_APP_CLIENT_SECRET?: string;
   GITHUB_OAUTH_CALLBACK_URL?: string;
   GITHUB_TOKEN_ENCRYPTION_KEY?: string;
+  DEPLOY_ENV_ENCRYPTION_KEY?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
   GITHUB_APP_SLUG?: string;
@@ -400,7 +401,15 @@ app.use("/v1/*", async (c, next) => {
     path === "/v1/github/callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
-    path.startsWith("/v1/github/deployments/")
+    path.startsWith("/v1/github/deployments/") ||
+    // Nexora Deploy project-scoped routes authenticate inside their handlers
+    // (organization role or active hosting-account membership, mirroring
+    // POST /v1/github/projects); they must not be gated to platform staff.
+    /^\/v1\/github\/projects\/[0-9a-fA-F-]{36}\/env-vars(\/[0-9a-fA-F-]{36})?$/.test(path) ||
+    path === "/v1/github/projects/detect-framework" ||
+    // Nexora Deploy helper catalog (framework presets); handlers authenticate
+    // with bearerIdentity and are safe for customer identities.
+    path.startsWith("/v1/deploy/")
   ) {
     await next();
     return;
@@ -428,7 +437,7 @@ app.get("/v1/health/ready", async (c) => {
 });
 
 app.get("/v1/health/schema", async (c) => {
-  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders"];
+  const expected = ["users", "organizations", "memberships", "platform_memberships", "auth_sessions", "login_attempts", "servers", "hosting_plans", "hosting_accounts", "hosting_account_memberships", "domains", "hosting_databases", "hosting_database_users", "agent_credentials", "agent_nonces", "provisioning_jobs", "audit_logs", "server_service_checks", "server_incidents", "incident_notification_settings", "incident_notification_outbox", "hosting_backups", "github_connections", "github_oauth_states", "github_projects", "github_deployments", "github_deployment_upload_tokens", "application_runtime_profiles", "application_node_pools", "application_nodes", "application_project_settings", "application_releases", "application_release_events", "application_workloads", "application_usage_periods", "application_usage_events", "application_node_request_nonces", "application_node_signing_key_history", "application_rollback_acknowledgements", "payment_settings", "payment_orders", "application_env_vars", "application_deployment_aliases", "github_webhook_deliveries"];
   try {
     const rows = await c.env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (" + expected.map(() => "?").join(",") + ")",
@@ -7066,6 +7075,408 @@ app.get("/v1/github/projects", async (c) => {
         `SELECT p.id, p.hosting_account_id AS hostingAccountId, p.repository_full_name AS repositoryFullName, p.production_branch AS productionBranch, p.root_directory AS rootDirectory, p.output_directory AS outputDirectory, p.framework, p.auto_deploy AS autoDeploy, p.status, p.created_at AS createdAt FROM github_projects p JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id WHERE p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE' ORDER BY p.created_at DESC`,
       ).bind(identity.organizationId, identity.id).all();
   return c.json({ projects: result.results ?? [] });
+});
+
+// ---------------------------------------------------------------------------
+// Nexora Deploy: framework presets, detection, and environment variables.
+//
+// Framework presets are the single source of truth for build commands and
+// output directories; detection inspects a repository's git tree and
+// package.json to suggest one. Environment variables are encrypted at rest
+// with AES-GCM under DEPLOY_ENV_ENCRYPTION_KEY (independent from the GitHub
+// token key so credentials rotate separately) and are never returned in API
+// responses — only metadata is exposed.
+// ---------------------------------------------------------------------------
+
+type FrameworkPreset = {
+  slug: "static" | "vite" | "react" | "vue" | "astro" | "next-static";
+  label: string;
+  description: string;
+  requiresBuild: boolean;
+  installCommand: string | null;
+  buildCommand: string | null;
+  outputDirectory: string;
+};
+
+const FRAMEWORK_PRESETS: FrameworkPreset[] = [
+  {
+    slug: "static",
+    label: "Static site",
+    description: "Plain HTML/CSS/JS served as uploaded. No build step.",
+    requiresBuild: false,
+    installCommand: null,
+    buildCommand: null,
+    outputDirectory: ".",
+  },
+  {
+    slug: "vite",
+    label: "Vite",
+    description: "Vite or Vue + Vite single-page application.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "react",
+    label: "React (Create React App)",
+    description: "React app scaffolded with react-scripts.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "build",
+  },
+  {
+    slug: "vue",
+    label: "Vue CLI",
+    description: "Vue application scaffolded with @vue/cli-service.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "astro",
+    label: "Astro (static output)",
+    description: "Astro site built to a fully static output directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+  },
+  {
+    slug: "next-static",
+    label: "Next.js (static export)",
+    description: "Next.js with output: 'export' producing a static out/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "out",
+  },
+];
+
+app.get("/v1/deploy/framework-presets", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  return c.json({ presets: FRAMEWORK_PRESETS });
+});
+
+function deployEnvEncryptionKey(env: Bindings): Uint8Array {
+  const value = env.DEPLOY_ENV_ENCRYPTION_KEY ?? "";
+  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("Deploy environment variable encryption is not configured");
+  return new Uint8Array(value.match(/.{2}/g)!.map((part) => Number.parseInt(part, 16)));
+}
+
+const DEPLOY_ENV_CONFIG_REQUIREMENTS =
+  "DEPLOY_ENV_ENCRYPTION_KEY (64 hex chars) must be configured before environment variables can be stored.";
+
+async function encryptDeployEnvValue(env: Bindings, plaintext: string) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", deployEnvEncryptionKey(env), "AES-GCM", false, ["encrypt"]);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return { iv: base64(iv), ciphertext: base64(new Uint8Array(ciphertext)) };
+}
+
+async function decryptDeployEnvValue(env: Bindings, ciphertext: string, iv: string): Promise<string> {
+  const decode = (value: string) => Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", deployEnvEncryptionKey(env), "AES-GCM", false, ["decrypt"]);
+  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(iv) }, key, decode(ciphertext));
+  return new TextDecoder().decode(plaintext);
+}
+
+// Loads a GitHub project for the caller with the same access model as
+// POST /v1/github/projects: platform staff get organization-wide access,
+// customers need an ACTIVE membership on the linked hosting account with the
+// OWNER/ADMIN/DEVELOPER role. Returns null when the project does not exist
+// in the caller's workspace (never leaks existence across tenants).
+async function deployProjectForIdentity(
+  db: D1Database,
+  identity: { id: string; organizationId: string; platformRole: string | null },
+  projectId: string,
+): Promise<{ id: string; organization_id: string } | null> {
+  if (identity.platformRole) {
+    return db.prepare("SELECT id, organization_id FROM github_projects WHERE id = ? AND organization_id = ? LIMIT 1")
+      .bind(projectId, identity.organizationId).first<{ id: string; organization_id: string }>();
+  }
+  return db.prepare(
+    `SELECT p.id, p.organization_id FROM github_projects p
+     JOIN hosting_accounts a ON a.id = p.hosting_account_id AND a.organization_id = p.organization_id AND a.status = 'ACTIVE'
+     JOIN hosting_account_memberships m ON m.hosting_account_id = p.hosting_account_id AND m.organization_id = p.organization_id
+     WHERE p.id = ? AND p.organization_id = ? AND m.user_id = ? AND m.status = 'ACTIVE'
+       AND m.role IN ('ACCOUNT_OWNER', 'ACCOUNT_ADMIN', 'ACCOUNT_DEVELOPER')
+     LIMIT 1`,
+  ).bind(projectId, identity.organizationId, identity.id).first<{ id: string; organization_id: string }>();
+}
+
+// Posts to the content API are avoided; the trees API plus the contents API
+// for package.json give detection everything it needs.
+type DetectionEvidence = { source: string; detail: string };
+
+function detectFrameworkFromRepository(
+  treePaths: string[],
+  treeTruncated: boolean,
+  packageJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null,
+): { framework: FrameworkPreset["slug"]; requiresBuild: boolean; installCommand: string | null; buildCommand: string | null; outputDirectory: string; detectedFrom: string; evidence: DetectionEvidence[] } {
+  const evidence: DetectionEvidence[] = [];
+  const rootFiles = new Set(treePaths.filter((path) => !path.includes("/")));
+  const dependencies = { ...(packageJson?.dependencies ?? {}), ...(packageJson?.devDependencies ?? {}) };
+
+  if (packageJson) {
+    evidence.push({ source: "package.json", detail: "parsed dependencies" });
+  }
+  for (const rootFile of ["next.config.js", "next.config.mjs", "next.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+  for (const rootFile of ["astro.config.mjs", "astro.config.js", "astro.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+  for (const rootFile of ["vite.config.js", "vite.config.mjs", "vite.config.ts"]) {
+    if (rootFiles.has(rootFile)) evidence.push({ source: "root-files", detail: rootFile });
+  }
+
+  const pick = (slug: FrameworkPreset["slug"], detectedFrom: string): {
+    framework: FrameworkPreset["slug"]; requiresBuild: boolean; installCommand: string | null; buildCommand: string | null; outputDirectory: string; detectedFrom: string; evidence: DetectionEvidence[];
+  } => {
+    const preset = FRAMEWORK_PRESETS.find((item) => item.slug === slug)!;
+    return {
+      framework: preset.slug,
+      requiresBuild: preset.requiresBuild,
+      installCommand: preset.installCommand,
+      buildCommand: preset.buildCommand,
+      outputDirectory: preset.outputDirectory,
+      detectedFrom,
+      evidence,
+    };
+  };
+
+  if (dependencies.next) return pick("next-static", "package.json:dependencies:next");
+  if (dependencies.astro || rootFiles.has("astro.config.mjs") || rootFiles.has("astro.config.js") || rootFiles.has("astro.config.ts")) {
+    return pick("astro", dependencies.astro ? "package.json:dependencies:astro" : "root-files:astro.config");
+  }
+  if (dependencies["react-scripts"]) return pick("react", "package.json:dependencies:react-scripts");
+  if (dependencies["@vue/cli-service"]) return pick("vue", "package.json:dependencies:@vue/cli-service");
+  if (dependencies.vue && dependencies.vite) return pick("vue", "package.json:dependencies:vue+vite");
+  if (dependencies.vite || rootFiles.has("vite.config.js") || rootFiles.has("vite.config.mjs") || rootFiles.has("vite.config.ts")) {
+    return pick("vite", dependencies.vite ? "package.json:dependencies:vite" : "root-files:vite.config");
+  }
+  if (packageJson) {
+    evidence.push({ source: "package.json", detail: "no recognized framework in dependencies" });
+  }
+  if (treeTruncated) evidence.push({ source: "git-tree", detail: "tree listing truncated by GitHub; detection used the first page" });
+  if (!packageJson && rootFiles.has("index.html")) evidence.push({ source: "root-files", detail: "index.html without package.json" });
+
+  const preset = FRAMEWORK_PRESETS.find((item) => item.slug === "static")!;
+  return {
+    framework: preset.slug,
+    requiresBuild: preset.requiresBuild,
+    installCommand: preset.installCommand,
+    buildCommand: preset.buildCommand,
+    outputDirectory: preset.outputDirectory,
+    detectedFrom: packageJson ? "package.json:fallback" : rootFiles.has("index.html") ? "root-files:index.html" : "root-files:fallback",
+    evidence,
+  };
+}
+
+app.post("/v1/github/projects/detect-framework", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const repositoryId = Number(input.repositoryId);
+  const installationId = Number(input.installationId);
+  const repositoryFullName = typeof input.repositoryFullName === "string" ? input.repositoryFullName.trim() : "";
+  const branch = typeof input.branch === "string" ? input.branch.trim() : "";
+  if (!Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || repositoryFullName.includes("..") || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..")) {
+    return c.json({ message: "Invalid repository, branch, or installation configuration." }, 400);
+  }
+
+  let token: string;
+  try {
+    token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
+  } catch {
+    return c.json({ message: "Connect GitHub first." }, 409);
+  }
+
+  const treeDetail = await githubApiDetail(token, `/repos/${repositoryFullName}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
+  if (!treeDetail.ok) {
+    if (treeDetail.status === 404) return c.json({ message: "Repository or branch not found in the connected GitHub account.", ...(githubDetailPayload(treeDetail) as object) }, 404);
+    if (treeDetail.status === 403 && treeDetail.rateLimitRemaining === 0) {
+      return c.json({ message: "GitHub API rate limit exhausted. Try again after the reset time.", ...(githubDetailPayload(treeDetail) as object) }, 429);
+    }
+    return c.json({ message: githubErrorMessage(treeDetail.body) ?? "Unable to inspect the repository tree.", ...(githubDetailPayload(treeDetail) as object) }, 502);
+  }
+  const tree = treeDetail.body as { tree?: Array<{ path?: string; type?: string }>; truncated?: boolean };
+  const treePaths = (tree.tree ?? []).filter((entry) => entry.type === "blob" && typeof entry.path === "string").map((entry) => entry.path as string);
+
+  let packageJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> } | null = null;
+  if (treePaths.includes("package.json")) {
+    const contentDetail = await githubApiDetail(token, `/repos/${repositoryFullName}/contents/package.json?ref=${encodeURIComponent(branch)}`);
+    if (contentDetail.ok && contentDetail.body && typeof (contentDetail.body as { content?: unknown }).content === "string") {
+      try {
+        const decoded = new TextDecoder().decode(Uint8Array.from(atob((contentDetail.body as { content: string }).content.replace(/\n/g, "")), (char) => char.charCodeAt(0)));
+        packageJson = JSON.parse(decoded) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+      } catch {
+        packageJson = null;
+      }
+    } else if (!contentDetail.ok && contentDetail.status !== 404) {
+      return c.json({ message: githubErrorMessage(contentDetail.body) ?? "Unable to read package.json.", ...(githubDetailPayload(contentDetail) as object) }, 502);
+    }
+  }
+
+  const detection = detectFrameworkFromRepository(treePaths, tree.truncated === true, packageJson);
+  return c.json({ repositoryFullName, branch, ...detection });
+});
+
+app.get("/v1/github/projects/:projectId/env-vars", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const rows = await c.env.DB.prepare(
+    `SELECT id, key_name, environment, target, is_secret, created_at, updated_at
+     FROM application_env_vars WHERE project_id = ? AND organization_id = ?
+     ORDER BY key_name ASC, environment ASC`,
+  ).bind(projectId, project.organization_id).all<{
+    id: string; key_name: string; environment: string; target: string; is_secret: number; created_at: string; updated_at: string;
+  }>();
+  // Values (or their ciphertext) are intentionally never returned.
+  return c.json({
+    variables: (rows.results ?? []).map((row) => ({
+      id: row.id,
+      keyName: row.key_name,
+      environment: row.environment,
+      target: row.target,
+      isSecret: row.is_secret === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
+  });
+});
+
+app.post("/v1/github/projects/:projectId/env-vars", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId)) return c.json({ message: "Invalid project id" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const keyName = typeof input.key === "string" ? input.key.trim() : "";
+  const value = typeof input.value === "string" ? input.value : "";
+  const environment = typeof input.environment === "string" ? input.environment : "production";
+  const target = typeof input.target === "string" ? input.target : "runtime";
+  const isSecret = input.isSecret === undefined ? true : input.isSecret === true;
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(keyName)) {
+    return c.json({ message: "Variable keys must start with a letter or underscore and contain only letters, digits, and underscores (max 128 characters)." }, 400);
+  }
+  if (value.length === 0 || value.length > 32_768) {
+    return c.json({ message: "Variable values must be between 1 and 32768 characters." }, 400);
+  }
+  if (environment !== "production" && environment !== "preview" && environment !== "development") {
+    return c.json({ message: "Environment must be production, preview, or development." }, 400);
+  }
+  if (target !== "build" && target !== "runtime" && target !== "both") {
+    return c.json({ message: "Target must be build, runtime, or both." }, 400);
+  }
+
+  const count = await c.env.DB.prepare(
+    "SELECT COUNT(*) AS total FROM application_env_vars WHERE project_id = ? AND organization_id = ?",
+  ).bind(projectId, project.organization_id).first<{ total: number }>();
+  if ((count?.total ?? 0) >= 128) {
+    return c.json({ message: "This project already has 128 environment variables. Remove one before adding another." }, 409);
+  }
+
+  let encrypted: { iv: string; ciphertext: string };
+  try {
+    encrypted = await encryptDeployEnvValue(c.env, value);
+  } catch {
+    return c.json({ message: DEPLOY_ENV_CONFIG_REQUIREMENTS }, 503);
+  }
+  const id = crypto.randomUUID();
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO application_env_vars (id, organization_id, project_id, key_name, environment, target, encrypted_value, value_iv, is_secret, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, project.organization_id, projectId, keyName, environment, target, encrypted.ciphertext, encrypted.iv, isSecret ? 1 : 0, identity.id).run();
+  } catch (error) {
+    if (isUniqueConstraintError(error)) {
+      return c.json({ message: `A variable named ${keyName} already exists for the ${environment} environment.` }, 409);
+    }
+    throw error;
+  }
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.created', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ key: keyName, environment, target, isSecret })).run();
+  return c.json({ variable: { id, keyName, environment, target, isSecret } }, 201);
+});
+
+app.patch("/v1/github/projects/:projectId/env-vars/:envVarId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const envVarId = c.req.param("envVarId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(envVarId)) return c.json({ message: "Invalid identifier" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); } catch { return c.json({ message: "Invalid JSON request" }, 400); }
+  const existing = await c.env.DB.prepare(
+    "SELECT id, environment, target, is_secret FROM application_env_vars WHERE id = ? AND project_id = ? AND organization_id = ? LIMIT 1",
+  ).bind(envVarId, projectId, project.organization_id).first<{ id: string; environment: string; target: string; is_secret: number }>();
+  if (!existing) return c.json({ message: "Variable not found." }, 404);
+
+  const hasValue = typeof input.value === "string";
+  const value = hasValue ? input.value as string : null;
+  if (hasValue && (value!.length === 0 || value!.length > 32_768)) {
+    return c.json({ message: "Variable values must be between 1 and 32768 characters." }, 400);
+  }
+  const target = typeof input.target === "string" ? input.target : existing.target;
+  if (target !== "build" && target !== "runtime" && target !== "both") {
+    return c.json({ message: "Target must be build, runtime, or both." }, 400);
+  }
+  const isSecret = input.isSecret === undefined ? existing.is_secret === 1 : input.isSecret === true;
+
+  let encrypted: { iv: string; ciphertext: string } | null = null;
+  if (hasValue) {
+    try {
+      encrypted = await encryptDeployEnvValue(c.env, value!);
+    } catch {
+      return c.json({ message: DEPLOY_ENV_CONFIG_REQUIREMENTS }, 503);
+    }
+  }
+  const result = encrypted
+    ? await c.env.DB.prepare(
+        "UPDATE application_env_vars SET encrypted_value = ?, value_iv = ?, target = ?, is_secret = ?, updated_at = datetime('now') WHERE id = ? AND project_id = ? AND organization_id = ?",
+      ).bind(encrypted.ciphertext, encrypted.iv, target, isSecret ? 1 : 0, envVarId, projectId, project.organization_id).run()
+    : await c.env.DB.prepare(
+        "UPDATE application_env_vars SET target = ?, is_secret = ?, updated_at = datetime('now') WHERE id = ? AND project_id = ? AND organization_id = ?",
+      ).bind(target, isSecret ? 1 : 0, envVarId, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Variable not found." }, 404);
+
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.updated', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ id: envVarId, valueRotated: hasValue, target, isSecret })).run();
+  return c.json({ variable: { id: envVarId, target, isSecret, valueRotated: hasValue } });
+});
+
+app.delete("/v1/github/projects/:projectId/env-vars/:envVarId", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  const projectId = c.req.param("projectId");
+  const envVarId = c.req.param("envVarId");
+  if (!/^[0-9a-fA-F-]{36}$/.test(projectId) || !/^[0-9a-fA-F-]{36}$/.test(envVarId)) return c.json({ message: "Invalid identifier" }, 400);
+  const project = await deployProjectForIdentity(c.env.DB, identity, projectId);
+  if (!project) return c.json({ message: "Project not found in this workspace." }, 404);
+  const result = await c.env.DB.prepare(
+    "DELETE FROM application_env_vars WHERE id = ? AND project_id = ? AND organization_id = ?",
+  ).bind(envVarId, projectId, project.organization_id).run();
+  if (!result.meta.changes) return c.json({ message: "Variable not found." }, 404);
+  await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'deploy.env_var.deleted', 'github_project', ?, ?)")
+    .bind(crypto.randomUUID(), project.organization_id, identity.id, projectId, JSON.stringify({ id: envVarId })).run();
+  return c.json({ deleted: true });
 });
 
 
