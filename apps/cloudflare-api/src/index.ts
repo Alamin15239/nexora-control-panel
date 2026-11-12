@@ -6832,6 +6832,9 @@ app.get("/v1/github/callback", async (c) => {
          encrypted_access_token = excluded.encrypted_access_token, access_token_iv = excluded.access_token_iv,
          encrypted_refresh_token = excluded.encrypted_refresh_token, refresh_token_iv = excluded.refresh_token_iv,
          token_expires_at = excluded.token_expires_at, refresh_token_expires_at = excluded.refresh_token_expires_at,
+         github_installation_id = CASE WHEN github_connections.github_user_id <> excluded.github_user_id THEN NULL ELSE github_connections.github_installation_id END,
+         github_installation_account = CASE WHEN github_connections.github_user_id <> excluded.github_user_id THEN NULL ELSE github_connections.github_installation_account END,
+         github_installation_account_type = CASE WHEN github_connections.github_user_id <> excluded.github_user_id THEN NULL ELSE github_connections.github_installation_account_type END,
          scopes = excluded.scopes, updated_at = datetime('now')`,
     ).bind(crypto.randomUUID(), pending.organization_id, String(githubUser.id), githubUser.login,
       encrypted.ciphertext, encrypted.iv, encryptedRefresh?.ciphertext ?? null, encryptedRefresh?.iv ?? null,
@@ -6862,9 +6865,11 @@ app.post("/v1/github/installations/start", async (c) => {
     }
     const state = randomHex(32);
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    await c.env.DB.prepare(
-      "INSERT INTO github_installation_states (state_hash, organization_id, user_id, expires_at) VALUES (?, ?, ?, ?)",
-    ).bind(await sha256(state), identity.organizationId, identity.id, expiresAt).run();
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM github_installation_states WHERE expires_at <= ? OR consumed_at IS NOT NULL").bind(new Date().toISOString()),
+      c.env.DB.prepare("INSERT INTO github_installation_states (state_hash, organization_id, user_id, expires_at) VALUES (?, ?, ?, ?)")
+        .bind(await sha256(state), identity.organizationId, identity.id, expiresAt),
+    ]);
     const installationUrl = new URL(`https://github.com/apps/${appData.slug}/installations/new`);
     installationUrl.searchParams.set("state", state);
     const callbackUrl = new URL(c.env.GITHUB_OAUTH_CALLBACK_URL);
@@ -6911,7 +6916,7 @@ app.get("/v1/github/installation-callback", async (c) => {
     if ((consumed.meta?.changes ?? 0) !== 1) return c.text("GitHub App installation state has already been used.", 400);
     const update = await c.env.DB.prepare(
       "UPDATE github_connections SET github_installation_id = ?, github_installation_account = ?, github_installation_account_type = ?, updated_at = datetime('now') WHERE organization_id = ?",
-    ).bind(String(installation.id), installation.account.login, installation.account.type, pending.organization_id).run();
+    ).bind(String(installation.id), installation.account.login, installation.account.type ?? "User", pending.organization_id).run();
     if ((update.meta?.changes ?? 0) !== 1) return c.text("The GitHub account authorization no longer exists. Reconnect GitHub from Nexora.", 409);
     await c.env.DB.prepare(
       "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, metadata) VALUES (?, ?, ?, 'github.app_installed', 'github_installation', ?)",
