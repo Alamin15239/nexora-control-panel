@@ -39,6 +39,7 @@ class ArtifactD1 {
     healthCheckPath: "/ready",
     previousActiveReleaseId: "previous-release",
     previousDeploymentId: "previous-deployment",
+    previousArtifactDigest: "b".repeat(64),
     previousActiveNodeIdentity: "previous-runtime-node",
   };
   nonces = new Set<string>();
@@ -100,6 +101,7 @@ class ArtifactD1 {
                 healthCheckPath: db.release.healthCheckPath,
                 previousActiveReleaseId: db.release.previousActiveReleaseId,
                 previousDeploymentId: db.release.previousDeploymentId,
+                previousArtifactDigest: db.release.previousArtifactDigest,
                 previousActiveNodeIdentity: db.release.previousActiveNodeIdentity,
               } as T) : null;
         }
