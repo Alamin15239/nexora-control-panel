@@ -6196,46 +6196,60 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     httpStatus: body.httpStatus,
     durationMs: body.durationMs,
   });
+  // Claim the authenticated node inside the same D1 batch before any acknowledgement
+  // or workload mutation. Every following write is guarded by the still-authorized
+  // node row; a zero-row claim therefore cannot leave a partial acknowledgement.
   const results = await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND last_heartbeat_at >= datetime('now', '-15 minutes')",
+    ).bind(node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "INSERT OR IGNORE INTO application_rollback_acknowledgements " +
       "(operation_id, organization_id, project_id, node_id, failed_release_id, target_release_id, " +
       "failed_deployment_id, target_deployment_id, target_artifact_sha256, http_status, probe_duration_ms) " +
       "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
-      "WHERE EXISTS (SELECT 1 FROM application_workloads w WHERE w.id = ? " +
+      "WHERE EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+      "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+      "AND n.signing_public_key = ?) " +
+      "AND EXISTS (SELECT 1 FROM application_workloads w WHERE w.id = ? " +
       "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy'))",
     ).bind(body.operationId, binding.organizationId, binding.projectId, node.id,
       binding.failedReleaseId, binding.targetReleaseId, body.failedDeploymentId,
       body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs,
-      binding.workloadId, binding.targetReleaseId, node.id),
+      node.id, nodeIdentity, node.signingPublicKey, binding.workloadId, binding.targetReleaseId, node.id),
     c.env.DB.prepare(
       "UPDATE application_workloads SET status = 'healthy', desired_replicas = 1, " +
       "observed_replicas = 1, updated_at = datetime('now') " +
       "WHERE id = ? AND active_release_id = ? AND node_id = ? AND status IN ('unhealthy','healthy') " +
+      "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+      "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+      "AND n.signing_public_key = ?) " +
       "AND EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
       "WHERE a.operation_id = ? AND a.node_id = ? AND a.failed_release_id = ? " +
       "AND a.target_release_id = ? AND a.target_artifact_sha256 = ? " +
       "AND a.http_status = ? AND a.probe_duration_ms = ?)",
-    ).bind(binding.workloadId, binding.targetReleaseId, node.id, body.operationId, node.id,
-      binding.failedReleaseId, binding.targetReleaseId, body.targetArtifactSha256,
+    ).bind(binding.workloadId, binding.targetReleaseId, node.id, node.id, nodeIdentity, node.signingPublicKey,
+      body.operationId, node.id, binding.failedReleaseId, binding.targetReleaseId, body.targetArtifactSha256,
       body.httpStatus, body.durationMs),
     c.env.DB.prepare(
       "INSERT INTO application_release_events " +
       "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
       "SELECT ?, ?, ?, 'succeeded', 'succeeded', 'node', ?, 'rollback_completed', ? " +
-      "WHERE EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
+      "WHERE EXISTS (SELECT 1 FROM application_nodes n WHERE n.id = ? AND n.node_identity = ? " +
+      "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+      "AND n.signing_public_key = ?) " +
+      "AND EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
       "WHERE a.operation_id = ? AND a.node_id = ? AND a.target_release_id = ?) " +
       "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = ? " +
       "AND e.event_code = 'rollback_completed' AND e.details_redacted_json = ?)",
     ).bind(crypto.randomUUID(), binding.organizationId, binding.targetReleaseId, node.id, details,
-      body.operationId, node.id, binding.targetReleaseId, binding.targetReleaseId, details),
-    c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
-      "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
-    ).bind(node.id, nodeIdentity, node.signingPublicKey),
+      node.id, nodeIdentity, node.signingPublicKey, body.operationId, node.id, binding.targetReleaseId,
+      binding.targetReleaseId, details),
   ]);
-  if (Number(results[3]?.meta?.changes ?? 0) !== 1) {
+  if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Runtime node was revoked or changed during rollback acknowledgement." }, 409);
   }
 
