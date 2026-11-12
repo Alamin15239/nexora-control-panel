@@ -400,6 +400,8 @@ app.use("/v1/*", async (c, next) => {
     // not a session; the handler rejects unsigned or stale requests.
     path.startsWith("/v1/billing/webhooks/") ||
     path === "/v1/github/callback" ||
+    // GitHub App setup redirects are unauthenticated provider callbacks; the handler validates one-time state and the App installation with a signed App JWT.
+    path === "/v1/github/installation-callback" ||
     path === "/v1/github/connection" || path === "/v1/github/connect" ||
     path === "/v1/github/repositories" || path === "/v1/github/projects" ||
     path.startsWith("/v1/github/deployments/") ||
