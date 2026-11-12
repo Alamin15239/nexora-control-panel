@@ -4128,6 +4128,138 @@ app.get("/v1/platform/customers", async (c) => {
   return c.json({ customers: result.results ?? [] });
 });
 
+// Permanently remove a customer login across Nexora. Hosting, billing, and
+// organization records are retained; sole ownership must be transferred first.
+app.delete("/v1/platform/customers/:id", async (c) => {
+  const identity = await bearerIdentity(c.req.raw, c.env.DB);
+  if (!identity) return c.json({ message: "Not authenticated" }, 401);
+  if (!platformAdmin(identity)) return c.json({ message: "Platform administrator access required." }, 403);
+
+  const userId = c.req.param("id");
+  if (!/^[0-9a-f-]{36}$/i.test(userId)) return c.json({ message: "A valid customer ID is required." }, 400);
+  if (userId === identity.id) return c.json({ message: "You cannot permanently delete your own platform login." }, 409);
+
+  let input: Record<string, unknown>;
+  try { input = await c.req.json<Record<string, unknown>>(); }
+  catch { return c.json({ message: "Type the customer's email address to confirm permanent deletion." }, 400); }
+  const confirmEmail = typeof input.confirmEmail === "string" ? input.confirmEmail.trim().toLowerCase() : "";
+  const target = await c.env.DB.prepare(
+    "SELECT id, email FROM users WHERE id = ? LIMIT 1",
+  ).bind(userId).first<{ id: string; email: string }>();
+  if (!target) return c.json({ message: "Customer account not found." }, 404);
+  if (confirmEmail !== target.email.toLowerCase()) {
+    return c.json({ message: "Confirmation email does not match the customer account." }, 400);
+  }
+
+  const platformMembership = await c.env.DB.prepare(
+    "SELECT 1 AS present FROM platform_memberships WHERE user_id = ? LIMIT 1",
+  ).bind(userId).first();
+  if (platformMembership) {
+    return c.json({ message: "Platform staff accounts cannot be deleted from the customer directory. Remove platform privileges through the platform access workflow first." }, 409);
+  }
+
+  const ownership = await c.env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(*) FROM memberships mine
+        WHERE mine.user_id = ? AND mine.role = 'OWNER'
+          AND NOT EXISTS (
+            SELECT 1 FROM memberships replacement
+            WHERE replacement.organization_id = mine.organization_id
+              AND replacement.user_id != mine.user_id AND replacement.role = 'OWNER'
+          )) AS soleOrganizationOwnerships,
+       (SELECT COUNT(*) FROM hosting_account_memberships mine
+        WHERE mine.user_id = ? AND mine.status = 'ACTIVE' AND mine.role = 'ACCOUNT_OWNER'
+          AND NOT EXISTS (
+            SELECT 1 FROM hosting_account_memberships replacement
+            WHERE replacement.hosting_account_id = mine.hosting_account_id
+              AND replacement.user_id != mine.user_id
+              AND replacement.status = 'ACTIVE' AND replacement.role = 'ACCOUNT_OWNER'
+          )) AS soleHostingAccountOwnerships`,
+  ).bind(userId, userId).first<{ soleOrganizationOwnerships: number; soleHostingAccountOwnerships: number }>();
+  const soleOrganizationOwnerships = Number(ownership?.soleOrganizationOwnerships ?? 0);
+  const soleHostingAccountOwnerships = Number(ownership?.soleHostingAccountOwnerships ?? 0);
+  if (soleOrganizationOwnerships > 0 || soleHostingAccountOwnerships > 0) {
+    return c.json({
+      message: "Transfer ownership before deleting this login. The customer is the sole owner of one or more organizations or hosting accounts.",
+      soleOrganizationOwnerships,
+      soleHostingAccountOwnerships,
+    }, 409);
+  }
+
+  const now = new Date().toISOString();
+  // Repeat every safety predicate in both statements. D1 batch is atomic, so
+  // a concurrent ownership change cannot slip between validation and deletion.
+  const safeTarget = `u.id = ? AND u.id != ?
+    AND NOT EXISTS (SELECT 1 FROM platform_memberships pm WHERE pm.user_id = u.id)
+    AND NOT EXISTS (
+      SELECT 1 FROM memberships mine
+      WHERE mine.user_id = u.id AND mine.role = 'OWNER'
+        AND NOT EXISTS (
+          SELECT 1 FROM memberships replacement
+          WHERE replacement.organization_id = mine.organization_id
+            AND replacement.user_id != mine.user_id AND replacement.role = 'OWNER'
+        )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM hosting_account_memberships mine
+      WHERE mine.user_id = u.id AND mine.status = 'ACTIVE' AND mine.role = 'ACCOUNT_OWNER'
+        AND NOT EXISTS (
+          SELECT 1 FROM hosting_account_memberships replacement
+          WHERE replacement.hosting_account_id = mine.hosting_account_id
+            AND replacement.user_id != mine.user_id
+            AND replacement.status = 'ACTIVE' AND replacement.role = 'ACCOUNT_OWNER'
+        )
+    )`;
+  try {
+    const results = await c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO audit_logs
+         (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata)
+         SELECT ?, NULL, ?, 'platform.customer_account_deleted', 'user', ?, ?
+         FROM users u WHERE ${safeTarget}`,
+      ).bind(
+        crypto.randomUUID(), identity.id, userId,
+        JSON.stringify({ email: target.email, deletedAt: now, relatedResourcesRetained: true }),
+        userId, identity.id,
+      ),
+      c.env.DB.prepare(
+        `DELETE FROM users WHERE id = ? AND id != ?
+          AND NOT EXISTS (SELECT 1 FROM platform_memberships pm WHERE pm.user_id = users.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM memberships mine
+            WHERE mine.user_id = users.id AND mine.role = 'OWNER'
+              AND NOT EXISTS (
+                SELECT 1 FROM memberships replacement
+                WHERE replacement.organization_id = mine.organization_id
+                  AND replacement.user_id != mine.user_id AND replacement.role = 'OWNER'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM hosting_account_memberships mine
+            WHERE mine.user_id = users.id AND mine.status = 'ACTIVE' AND mine.role = 'ACCOUNT_OWNER'
+              AND NOT EXISTS (
+                SELECT 1 FROM hosting_account_memberships replacement
+                WHERE replacement.hosting_account_id = mine.hosting_account_id
+                  AND replacement.user_id != mine.user_id
+                  AND replacement.status = 'ACTIVE' AND replacement.role = 'ACCOUNT_OWNER'
+              )
+          )`,
+      ).bind(userId, identity.id),
+    ]);
+    if ((results[0]?.meta?.changes ?? 0) !== 1 || (results[1]?.meta?.changes ?? 0) !== 1) {
+      return c.json({ message: "Deletion was not completed because the account changed or an ownership safeguard now applies. Refresh and review the customer before retrying." }, 409);
+    }
+  } catch {
+    return c.json({ message: "The account could not be deleted safely. No customer data was intentionally removed; review dependent resources and retry." }, 409);
+  }
+
+  return c.json({
+    success: true,
+    deletedUserId: userId,
+    message: "Customer login permanently deleted. All sessions and user access were revoked. Organization, hosting, website, database, backup, and billing records were retained.",
+  });
+});
+
 app.get("/v1/users", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
