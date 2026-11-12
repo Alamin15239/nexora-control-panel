@@ -54,6 +54,8 @@ jobs:
         run: node --experimental-strip-types --test apps/cloudflare-api/scripts/build-quota.test.ts
       - name: Cloudflare API database secret encryption tests (Fix 5)
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-secret-encryption.test.ts
+      - name: Cloudflare API database lifecycle agent-result regression tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/database-lifecycle-result.integration.test.ts
       - name: Cloudflare API backup scheduler recurrence tests (Fix 3)
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/backup-scheduler-recurrence.test.ts
       - name: Cloudflare D1 migration and tenant-isolation tests
