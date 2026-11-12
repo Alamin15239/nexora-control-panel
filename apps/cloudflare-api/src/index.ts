@@ -9522,7 +9522,9 @@ app.get("/v1/github/projects/:projectId/deployments", async (c) => {
 app.delete("/v1/github/connection", async (c) => {
   const identity = await bearerIdentity(c.req.raw, c.env.DB);
   if (!identity) return c.json({ message: "Not authenticated" }, 401);
-  if (!Boolean(identity.platformRole)) return c.json({ message: "Administrator access required" }, 403);
+  if (!identity.platformRole && identity.role !== "OWNER" && identity.role !== "ADMIN") {
+    return c.json({ message: "Organization owner or administrator access required" }, 403);
+  }
   if (c.env.GITHUB_APP_CLIENT_ID && c.env.GITHUB_APP_CLIENT_SECRET) {
     try {
       const token = await githubAccessToken(c.env, c.env.DB, identity.organizationId);
