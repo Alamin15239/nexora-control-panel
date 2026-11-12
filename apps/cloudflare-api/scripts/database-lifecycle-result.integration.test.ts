@@ -79,8 +79,12 @@ class AgentResultD1 {
     };
   }
 
-  async batch() {
-    throw new Error("Unexpected batch() in agent-result regression test");
+  async batch(statements: Array<{ query: string; getValues(): unknown[] }>) {
+    for (const statement of statements) {
+      if (statement.query.startsWith("INSERT INTO database_user_secrets")) this.credentialSecretWrites++;
+      if (statement.query.includes("UPDATE hosting_database_users SET status = 'ACTIVE'")) this.user.status = "ACTIVE";
+    }
+    return statements.map(() => ({ success: true, meta: { changes: 1 } }));
   }
 }
 
