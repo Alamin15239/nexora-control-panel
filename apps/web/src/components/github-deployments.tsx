@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, ExternalLink, Github, GitBranch, KeyRound, Link2, Loader2, RefreshCw, ScrollText, ShieldCheck, Unplug, Rocket } from "lucide-react";
+import { ArrowUpRight, ExternalLink, Github, GitBranch, KeyRound, Link2, Loader2, RefreshCw, ScrollText, Unplug, Rocket } from "lucide-react";
 import {
   EmptyState, InlineAlert, Meter, Modal, NexoraMark, PageHeader, SectionCard,
   Spinner, StatusBadge, statusTone,
