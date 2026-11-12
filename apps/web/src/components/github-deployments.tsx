@@ -8,7 +8,7 @@ import {
   Spinner, StatusBadge, statusTone,
 } from "@/components/ui";
 
-type Connection = { login: string; scopes: string; connectedAt: string } | null;
+type Connection = { login: string; scopes: string; connectedAt: string; installed: boolean; installationAccount: string | null; installationAccountType: string | null } | null;
 type Repository = { id: number; name: string; fullName: string; private: boolean; defaultBranch: string; htmlUrl: string; installationId: number; owner: string };
 type Account = { id: string; username: string; primary_domain: string | null; status: string };
 type Project = { id: string; hostingAccountId: string; repositoryFullName: string; productionBranch: string; rootDirectory: string; outputDirectory: string; framework: string; status: string; createdAt: string; previewEnabled?: number; autoDeploy?: number; ignoredBuildPaths?: string[] };
@@ -204,7 +204,6 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   const [projects, setProjects] = useState<Project[]>([]);
   const [deploymentsByProject, setDeploymentsByProject] = useState<Record<string, Deployment[]>>({});
   const [selectedRepository, setSelectedRepository] = useState("");
-  const [installationUrl, setInstallationUrl] = useState<string | null>(null);
   const [hostingAccountId, setHostingAccountId] = useState("");
   const [branch, setBranch] = useState("main");
   const [rootDirectory, setRootDirectory] = useState(".");
@@ -269,28 +268,28 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
   };
 
   const loadRepositories = useCallback(async () => {
-    if (!connected) return;
+    if (!connected || !connection?.installed) { setRepositories([]); return; }
     setBusy(true); setError("");
     try {
       const response = await fetch("/api/control/github/repositories", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) {
-        const diagnostic = data.github?.requestId ? ` Support reference: ${data.github.requestId}.` : "";
+        const diagnostic = data.diagnostics?.requestId ? ` Support reference: ${data.diagnostics.requestId}.` : "";
         throw new Error((data.message ?? "Unable to load repositories.") + diagnostic);
       }
       setRepositories(data.repositories ?? []);
-      setInstallationUrl(typeof data.app?.installationUrl === "string" ? data.app.installationUrl : null);
       if (!data.repositories?.length && data.message) setNotice(data.message);
       else if (!data.repositories?.length) setNotice("");
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to load repositories."); }
     finally { setBusy(false); }
-  }, [connected]);
+  }, [connected, connection?.installed]);
 
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { if (connected) void loadRepositories(); }, [connected, loadRepositories]);
+  useEffect(() => { if (connected && connection?.installed) void loadRepositories(); }, [connected, connection?.installed, loadRepositories]);
   useEffect(() => {
     const status = new URLSearchParams(window.location.search).get("github");
     if (status === "connected") { setNotice("GitHub account connected successfully."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
+    else if (status === "installed") { setNotice("Nexora GitHub App installed successfully. Loading repositories…"); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); void load(); }
     else if (status === "denied") { setError("GitHub authorization was cancelled."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
     else if (status === "error") { setError("GitHub connection failed. Check the GitHub App configuration and try again."); window.history.replaceState({}, "", customerMode ? "/customer/deploy" : "/github-deployments"); }
   }, [load, customerMode]);
@@ -303,6 +302,15 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       if (!response.ok || !data.authorizationUrl) throw new Error(data.message ?? "Unable to start GitHub authorization.");
       window.location.assign(data.authorizationUrl);
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to connect GitHub."); setBusy(false); }
+  }
+  async function installGithubApp() {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/api/control/github/installations/start", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok || !data.installationUrl) throw new Error(data.message ?? "Unable to start GitHub App installation.");
+      window.location.assign(data.installationUrl);
+    } catch (err) { setError(err instanceof Error ? err.message : "Unable to install the Nexora GitHub App."); setBusy(false); }
   }
 
   async function linkRepository(event: React.FormEvent<HTMLFormElement>) {
@@ -329,7 +337,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       const response = await fetch("/api/control/github/connection", { method: "DELETE" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message ?? "Unable to disconnect GitHub.");
-      setRepositories([]); setConnected(false); setConnection(null); setInstallationUrl(null); setNotice("GitHub account disconnected."); await load();
+      setRepositories([]); setConnected(false); setConnection(null); setNotice("GitHub account disconnected."); await load();
     } catch (err) { setError(err instanceof Error ? err.message : "Unable to disconnect GitHub."); }
     finally { setBusy(false); }
   }
@@ -399,13 +407,27 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                 <div>
                   <p className="text-sm font-bold text-slate-900">@{connection?.login}</p>
                   <p className="mt-0.5 text-xs text-slate-500">Connected {connection?.connectedAt ? new Date(connection.connectedAt).toLocaleString() : ""}</p>
+                  <p className="mt-1 text-xs font-medium text-slate-600">{connection?.installed ? "Nexora GitHub App installed · repository access enabled" : "GitHub authorized; Nexora GitHub App installation required."}</p>
                 </div>
-                <ShieldCheck size={16} className="text-emerald-600" />
+                <div className="flex flex-wrap items-center gap-2">
+                  {!connection?.installed && (
+                    <button onClick={installGithubApp} disabled={busy} className="nx-btn bg-navy-950 text-white shadow-sm hover:bg-navy-900"><Github size={15} /> Install Nexora GitHub App</button>
+                  )}
+                  <ShieldCheck size={16} className="text-emerald-600" />
+                </div>
               </div>
             )}
           </SectionCard>
 
-          {connected && (
+          {connected && !connection?.installed && (
+            <SectionCard
+              title="Install the Nexora GitHub App"
+              description="OAuth authorization is complete. Install the GitHub App on your personal account or organization, then select the repositories Nexora may access."
+            >
+              <button onClick={installGithubApp} disabled={busy} className="nx-btn-primary"><Github size={16} /> Continue to GitHub App installation</button>
+            </SectionCard>
+          )}
+          {connected && connection?.installed && (
             <SectionCard
               title="Link a repository"
               description="Select an installed repository and the hosting account that will serve its built files."
@@ -450,7 +472,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
               {!repositories.length && (
                 <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-xs leading-5 text-slate-600">
                   <p className="font-semibold text-slate-800">No repositories are visible yet.</p>
-                  <p className="mt-1">Connecting the GitHub account authorizes OAuth sign-in; repositories only appear after the Nexora GitHub App is <span className="font-semibold">installed</span> and granted repository access.{installationUrl && <> Install or update it at <a href={installationUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline">GitHub App installation <ExternalLink size={11} /></a>, then use “Refresh repositories”.</>}</p>
+                  <p className="mt-1">Connecting the GitHub account authorizes OAuth sign-in; repositories only appear after the Nexora GitHub App is <span className="font-semibold">installed</span> and granted repository access. Use “Install Nexora GitHub App” above, then refresh repositories.</p>
                 </div>
               )}
             </SectionCard>

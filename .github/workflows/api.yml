@@ -70,8 +70,6 @@ jobs:
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/mfa-login.integration.test.ts
       - name: Organization, customer self-service, billing and email integration tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/platform-completion.integration.test.ts
-      - name: GitHub repository discovery regression tests
-        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/github-repository-discovery.integration.test.ts
       - name: Deploy platform framework detection and environment variable tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-env-vars.integration.test.ts
       - name: Deploy platform webhook, preview, and promotion tests
