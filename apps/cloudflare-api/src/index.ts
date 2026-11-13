@@ -5308,7 +5308,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
-    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+    "AND n.revoked_at IS NULL " +
     "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted' " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
@@ -5323,6 +5323,16 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   ).bind(node.id, nonce).run();
   if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+  const heartbeat = await c.env.DB.prepare(
+    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+    "AND revoked_at IS NULL AND signing_public_key = ? " +
+    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+    "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
+  if (Number(heartbeat.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Static runtime node is no longer eligible to poll." }, 409);
   }
   const rows = await c.env.DB.prepare(
     "SELECT r.deployment_id AS deploymentId, r.organization_id AS organizationId, " +
@@ -5382,13 +5392,6 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     projectId: string; hostingAccountId: string; hostname: string;
     healthCheckPath: string; targetArtifactSha256: string;
   }>();
-  await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
-    "AND revoked_at IS NULL AND signing_public_key = ? " +
-      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
-      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
-  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
   return c.json({
     nodeIdentity,
     polledAt: new Date().toISOString(),
