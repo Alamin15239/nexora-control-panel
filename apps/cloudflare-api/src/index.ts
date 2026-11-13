@@ -9597,8 +9597,8 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "SELECT n.id, n.node_pool_id AS nodePoolId, n.signing_public_key AS signingPublicKey " +
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
-    "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
+    "AND n.revoked_at IS NULL " +
+    "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted' " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -9612,6 +9612,16 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
   ).bind(node.id, nonce).run();
   if (Number(nonceResult.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Application-node request nonce has already been used." }, 409);
+  }
+  const heartbeat = await c.env.DB.prepare(
+    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+    "AND revoked_at IS NULL AND signing_public_key = ? " +
+    "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+    "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
+  if (Number(heartbeat.meta?.changes ?? 0) !== 1) {
+    return c.json({ message: "Static runtime node is no longer eligible to poll." }, 409);
   }
   // Releases are returned in three lifecycle states:
   //   - artifact_uploaded / publishing: the publisher must download, validate,
@@ -9652,7 +9662,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND pool.status = 'ready' AND (pool.isolation_level IN ('rootless','microvm') OR (pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted')) " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' " +
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     releaseId: string; state: string; artifactSha256: string;
@@ -9677,9 +9687,11 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools pool ON pool.id = failed.node_pool_id " +
     "WHERE failed.assigned_node_id = ? AND failed.node_pool_id = ? AND failed.state = 'failed' " +
     "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
     "AND rp.execution_kind = 'static' AND rp.enabled = 1 " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' " +
     "AND target.assigned_node_id = ? AND target.node_pool_id = ? AND target.state = 'succeeded' " +
     "AND target.artifact_digest IS NOT NULL AND w.node_id = ? AND w.status IN ('unhealthy','healthy') " +
     "AND NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements a WHERE a.failed_release_id = failed.id) " +
@@ -9689,14 +9701,6 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     projectId: string; hostingAccountId: string; hostname: string;
     healthCheckPath: string; targetArtifactSha256: string;
   }>();
-  // A successful signed static-release poll is the publisher's liveness signal.
-  // Refresh both timestamps so a publisher that does not run the generic
-  // desired-state agent remains eligible for the next poll.
-  await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), " +
-    "last_signature_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE id = ? AND node_identity = ? AND status = 'online' AND revoked_at IS NULL",
-  ).bind(node.id, nodeIdentity).run();
   return c.json({
     nodeIdentity,
     polledAt: new Date().toISOString(),
