@@ -9916,7 +9916,9 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
   await c.env.DB.prepare(
     "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
     "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
-    "AND revoked_at IS NULL AND signing_public_key = ?",
+    "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
   ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
   return new Response(object.body, {
     status: 200,
@@ -10071,7 +10073,9 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
   ]);
   if ([0, 2, 4, 6].some((index) => Number(results[index]?.meta?.changes ?? 0) !== 1) ||
@@ -10231,7 +10235,9 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
   ]);
   if (results.some((result) => Number(result?.meta?.changes ?? 0) !== 1)) {
@@ -10494,7 +10500,9 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
     // Alias activation: the moment a release passes its health check it
     // becomes the traffic target for its deployment kind. Production
@@ -10557,7 +10565,9 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
   ];
 
@@ -10779,7 +10789,9 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
-      "AND revoked_at IS NULL AND signing_public_key = ?",
+      "AND revoked_at IS NULL AND signing_public_key = ? " +
+      "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
   ]);
   if (Number(results[3]?.meta?.changes ?? 0) !== 1) {
