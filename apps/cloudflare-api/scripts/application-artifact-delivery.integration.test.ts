@@ -15,8 +15,8 @@ class ArtifactD1 {
     status: "online",
     role: "runtime",
     poolStatus: "ready",
-    isolationLevel: "rootless",
-    runtimeEngine: "containerd",
+    isolationLevel: "untrusted",
+    runtimeEngine: "static",
     revokedAt: null as string | null,
   };
   release = {
@@ -597,7 +597,7 @@ test("runtime node receives a signed artifact for a release assigned to its pool
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), artifactBytes);
 });
 
-test("artifact delivery rejects builder nodes and untrusted runtime pools", async () => {
+test("artifact delivery rejects builder nodes and non-static runtime pools", async () => {
   const db = new ArtifactD1();
   const node = await keyPair("Ed25519");
   db.node.signingPublicKey = node.publicKey;
@@ -607,9 +607,13 @@ test("artifact delivery rejects builder nodes and untrusted runtime pools", asyn
   const builder = await worker.fetch(await signedArtifactRequest(node.privateKey, "b".repeat(32)), env, {} as ExecutionContext);
   assert.equal(builder.status, 401);
   db.node.role = "runtime";
+  db.node.runtimeEngine = "containerd";
+  db.node.isolationLevel = "rootless";
+  const nonStatic = await worker.fetch(await signedArtifactRequest(node.privateKey, "c".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(nonStatic.status, 401);
   db.node.isolationLevel = "untrusted";
-  const untrusted = await worker.fetch(await signedArtifactRequest(node.privateKey, "c".repeat(32)), env, {} as ExecutionContext);
-  assert.equal(untrusted.status, 401);
+  const untrustedNonStatic = await worker.fetch(await signedArtifactRequest(node.privateKey, "d".repeat(32)), env, {} as ExecutionContext);
+  assert.equal(untrustedNonStatic.status, 401);
 });
 
 test("static publisher can fetch static releases from an explicitly static untrusted pool", async () => {
