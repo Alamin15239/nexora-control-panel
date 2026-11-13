@@ -159,8 +159,8 @@ test("static pending poll returns only well-formed assigned releases and same-no
 
   const nodeQuery = db.queries.find((query) => query.includes("FROM application_nodes n"));
   assert.ok(nodeQuery);
-  assert.match(nodeQuery, /p\\.runtime_engine = 'static'/);
-  assert.match(nodeQuery, /p\\.isolation_level = 'untrusted'/);
+  assert.match(nodeQuery, /p\.runtime_engine = 'static'/);
+  assert.match(nodeQuery, /p\.isolation_level = 'untrusted'/);
   assert.doesNotMatch(nodeQuery, /last_heartbeat_at >=/);
   assert.equal(db.heartbeatUpdated, true);
   assert.equal(db.heartbeatUpdatedAfterNonce, true);
