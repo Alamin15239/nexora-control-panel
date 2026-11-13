@@ -10360,10 +10360,14 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools pool ON pool.id = r.node_pool_id " +
     "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
     "LEFT JOIN application_nodes previous_node ON previous_node.id = w.node_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; projectId: string; deploymentKind: string;
@@ -10470,11 +10474,18 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "INSERT INTO application_workloads " +
       "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
-      "VALUES (?, ?, ?, ?, ?, 'web', 'healthy', 1, 1) " +
-      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "SELECT ?, ?, ?, ?, ?, 'web', 'healthy', 1, 1 " +
+      "WHERE EXISTS (SELECT 1 FROM application_releases r " +
+      "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "WHERE r.id = ? AND r.state = 'succeeded' AND r.artifact_digest = ? " +
+      "AND r.assigned_node_id = ? AND r.node_pool_id = ? AND s.build_method = 'static' " +
+      "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1)" + activeNodePredicate +
+      " ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
       "active_release_id = excluded.active_release_id, node_id = excluded.node_id, status = 'healthy', " +
       "desired_replicas = 1, observed_replicas = 1, updated_at = datetime('now')",
-    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id),
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id,
+        release.releaseRowId, body.artifactSha256, node.id, node.nodePoolId, ...commonNodeArgs),
     c.env.DB.prepare(
       "UPDATE github_deployments SET status = 'succeeded', finished_at = datetime('now'), " +
       "log_excerpt = 'Application health check succeeded.' " +
@@ -10523,14 +10534,21 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "INSERT INTO application_workloads " +
       "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
-      "VALUES (?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0) " +
-      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "SELECT ?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0 " +
+      "WHERE EXISTS (SELECT 1 FROM application_releases r " +
+      "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "WHERE r.id = ? AND r.state = 'failed' AND r.artifact_digest = ? " +
+      "AND r.assigned_node_id = ? AND r.node_pool_id = ? AND s.build_method = 'static' " +
+      "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1)" + activeNodePredicate +
+      " ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
       "status = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
       "THEN application_workloads.status ELSE 'unhealthy' END, " +
       "observed_replicas = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
       "THEN application_workloads.observed_replicas ELSE 0 END, updated_at = datetime('now')",
     ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
-      release.previousActiveReleaseId, release.previousActiveNodeId ?? node.id),
+      release.previousActiveReleaseId, release.previousActiveNodeId ?? node.id,
+      release.releaseRowId, body.artifactSha256, node.id, node.nodePoolId, ...commonNodeArgs),
     c.env.DB.prepare(
       "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), " +
       "log_excerpt = 'Application health check failed.' " +
@@ -10697,12 +10715,19 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     "AND target.artifact_digest = ? AND w.active_release_id = target.id " +
     "AND EXISTS (SELECT 1 FROM application_project_settings s " +
     "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools p ON p.id = failed.node_pool_id " +
+    "JOIN application_nodes n ON n.id = ? AND n.node_pool_id = p.id " +
     "WHERE s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
     "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
-    "AND rp.execution_kind = 'static' AND rp.enabled = 1) " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 " +
+    "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted' " +
+    "AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND n.signing_public_key = ? " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes')) " +
     "AND w.node_id = ? AND w.status IN ('unhealthy','healthy') LIMIT 1",
   ).bind(body.targetDeploymentId, body.failedDeploymentId, node.id, node.id,
-    node.nodePoolId, node.nodePoolId, body.targetArtifactSha256, node.id).first<{
+    node.nodePoolId, node.nodePoolId, body.targetArtifactSha256, node.id,
+    node.id, nodeIdentity, node.signingPublicKey).first<{
       failedReleaseId: string; organizationId: string; projectId: string;
       targetReleaseId: string; targetArtifactDigest: string; workloadId: string;
     }>();
