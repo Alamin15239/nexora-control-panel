@@ -498,7 +498,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                         <p className="truncate text-sm font-bold text-slate-900">{project.repositoryFullName}</p>
                         <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500"><GitBranch size={13} className="text-slate-400" />{project.productionBranch}<span className="text-slate-300">·</span>{project.framework}<span className="text-slate-300">·</span>Output: {project.outputDirectory}</p>
                       </div>
-                      <StatusBadge tone={statusTone(project.status)} dot>{project.status === "configured" ? "Configured · build worker pending" : project.status}</StatusBadge>
+                      <StatusBadge tone={statusTone(project.status)} dot>{project.status === "configured" ? (project.autoDeploy === 0 ? "Configured · auto-deploy off" : "Auto-deploy enabled · runtime acceptance pending") : project.status}</StatusBadge>
                     </div>
                     <ProjectDeployTools project={project} onChanged={() => { void load(); }} />
                     <div className="border-t border-slate-100 bg-slate-50/50 px-6 py-4">
@@ -734,7 +734,7 @@ function ProjectDeployTools({ project, onChanged }: { project: Project; onChange
         <DeploySettingsPanel project={project} onChanged={onChanged} />
         <div className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs font-bold text-slate-800">Push & PR webhooks</p>
+            <p className="text-xs font-bold text-slate-800">GitHub App webhook</p>
             <button onClick={rotateSecret} disabled={rotating} className="nx-btn-secondary nx-btn-sm"><KeyRound size={13} /> {rotating ? "Rotating…" : "Rotate secret"}</button>
           </div>
           {error && <div className="mt-2"><InlineAlert tone="error">{error}</InlineAlert></div>}
@@ -747,7 +747,7 @@ function ProjectDeployTools({ project, onChanged }: { project: Project; onChange
               </InlineAlert>
             </div>
           )}
-          <p className="mt-2 text-[11px] leading-5 text-slate-400">Deliveries are verified per-project with HMAC-SHA256; every push and pull-request decision is recorded with its outcome.</p>
+          <p className="mt-2 text-[11px] leading-5 text-slate-400">The App-level webhook handles push and pull-request events for all repositories granted to Nexora. Per-project secrets remain available for legacy repository webhooks.</p>
         </div>
       </div>
       <EnvVarsPanel projectId={project.id} />
