@@ -5360,6 +5360,9 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "FROM application_releases failed " +
     "JOIN application_workloads w ON w.organization_id = failed.organization_id " +
     "AND w.project_id = failed.project_id AND w.workload_kind = 'web' " +
+    "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools pool ON pool.id = failed.node_pool_id " +
     "JOIN application_releases target ON target.id = w.active_release_id " +
     "AND target.organization_id = failed.organization_id AND target.project_id = failed.project_id " +
     "JOIN github_projects p ON p.id = failed.project_id AND p.organization_id = failed.organization_id " +
@@ -5368,6 +5371,9 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
     "WHERE failed.assigned_node_id = ? AND failed.node_pool_id = ? AND failed.state = 'failed' " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' " +
     "AND target.assigned_node_id = ? AND target.node_pool_id = ? AND target.state = 'succeeded' " +
     "AND target.artifact_digest IS NOT NULL AND w.node_id = ? AND w.status IN ('unhealthy','healthy') " +
     "AND NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements a WHERE a.failed_release_id = failed.id) " +
@@ -5502,7 +5508,11 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
     "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id, purpose, purpose).first<{
@@ -5650,7 +5660,11 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "d.artifact_bytes AS deploymentArtifactBytes " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     releaseArtifactBytes: number | null; deploymentArtifactDigest: string | null;
@@ -5828,7 +5842,11 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; nodePoolId: string;
@@ -6008,10 +6026,15 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools pool ON pool.id = r.node_pool_id " +
     "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
     "LEFT JOIN application_nodes previous_node ON previous_node.id = w.node_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseRowId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; projectId: string; organizationId: string;
@@ -6304,11 +6327,17 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     "FROM application_releases failed " +
     "JOIN application_releases target ON target.deployment_id = ? " +
     "AND target.organization_id = failed.organization_id AND target.project_id = failed.project_id " +
+    "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools pool ON pool.id = failed.node_pool_id " +
     "JOIN application_workloads w ON w.organization_id = failed.organization_id " +
     "AND w.project_id = failed.project_id AND w.workload_kind = 'web' " +
     "WHERE failed.deployment_id = ? AND failed.assigned_node_id = ? " +
     "AND target.assigned_node_id = ? AND failed.node_pool_id = ? AND target.node_pool_id = ? " +
     "AND failed.state = 'failed' AND target.state = 'succeeded' " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+    "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+    "AND pool.status = 'ready' AND pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted' " +
     "AND target.artifact_digest = ? AND w.active_release_id = target.id " +
     "AND w.node_id = ? AND w.status IN ('unhealthy','healthy') LIMIT 1",
   ).bind(body.targetDeploymentId, body.failedDeploymentId, node.id, node.id,
