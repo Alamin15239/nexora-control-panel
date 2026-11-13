@@ -303,7 +303,8 @@ class ArtifactD1 {
           db.githubDeploymentStatus = "failed";
           return { success: true, meta: { changes: 1 } };
         }
-        if (query.includes("UPDATE application_nodes SET last_signature_at")) {
+        if (query.includes("UPDATE application_nodes SET last_heartbeat_at") ||
+            query.includes("UPDATE application_nodes SET last_signature_at")) {
           db.lastSignatureUpdated = true;
         }
         return { success: true, meta: { changes: 1 } };
