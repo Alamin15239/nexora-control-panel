@@ -9676,7 +9676,10 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
     "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "WHERE failed.assigned_node_id = ? AND failed.node_pool_id = ? AND failed.state = 'failed' " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 " +
     "AND target.assigned_node_id = ? AND target.node_pool_id = ? AND target.state = 'succeeded' " +
     "AND target.artifact_digest IS NOT NULL AND w.node_id = ? AND w.status IN ('unhealthy','healthy') " +
     "AND NOT EXISTS (SELECT 1 FROM application_rollback_acknowledgements a WHERE a.failed_release_id = failed.id) " +
