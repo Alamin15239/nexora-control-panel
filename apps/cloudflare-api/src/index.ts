@@ -9123,7 +9123,7 @@ app.get("/internal/v1/operator/application-node-pools", async (c) => {
     "(SELECT COUNT(*) FROM application_nodes n WHERE n.node_pool_id = p.id AND n.node_role = 'runtime' " +
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') AND n.signing_public_key IS NOT NULL) AS onlineRuntimeNodes " +
-    "FROM application_node_pools p WHERE p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "FROM application_node_pools p WHERE p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "ORDER BY p.environment, p.region, p.name",
   ).all<{
     id: string; name: string; environment: string; region: string;
@@ -9243,7 +9243,7 @@ app.post("/internal/v1/operator/application-nodes", async (c) => {
         "INSERT INTO application_nodes " +
         "(id, node_pool_id, node_identity, enrollment_key_hash, node_role, status) " +
         "SELECT ?, p.id, ?, ?, 'runtime', 'pending' FROM application_node_pools p " +
-        "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+        "WHERE p.id = ? AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
         "ON CONFLICT(node_identity) DO NOTHING",
       ).bind(nodeId, body.nodeIdentity, enrollmentKeyHash, body.nodePoolId),
       c.env.DB.prepare(
@@ -9399,7 +9399,7 @@ app.post("/internal/v1/application-nodes/enroll", async (c) => {
         "status = 'online', agent_version = ?, last_heartbeat_at = datetime('now'), updated_at = datetime('now') " +
         "WHERE node_identity = ? AND enrollment_key_hash = ? AND enrollment_consumed_at IS NULL " +
         "AND signing_public_key IS NULL AND status = 'pending' " +
-        "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready')",
+        "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))",
       ).bind(body.publicKey.toLowerCase(), body.agentVersion, body.nodeIdentity, tokenHash),
       c.env.DB.prepare(
         "INSERT INTO application_node_signing_key_history (id,node_id,public_key) " +
@@ -9447,7 +9447,7 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
     "JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
     "AND n.revoked_at IS NULL AND p.status = 'ready' " +
-    "AND p.isolation_level IN ('rootless','microvm') AND n.signing_public_key IS NOT NULL LIMIT 1",
+    "AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
     node.signingPublicKey, nodeIdentity, timestamp, nonce, "POST", path, rawBody, signature,
@@ -9478,7 +9478,7 @@ app.post("/internal/v1/application-nodes/heartbeat", async (c) => {
     "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
     "AND revoked_at IS NULL AND signing_public_key = ? " +
     "AND EXISTS (SELECT 1 FROM application_node_pools p WHERE p.id = application_nodes.node_pool_id " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))",
   ).bind(body.agentVersion, node.id, nodeIdentity, node.signingPublicKey).run();
   if (Number(result.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Runtime node is no longer eligible to heartbeat." }, 409);
@@ -9598,7 +9598,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -9652,7 +9652,7 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "AND s.build_method = 'static' AND n.node_identity = ? AND n.node_role = 'runtime' " +
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND pool.status = 'ready' AND pool.isolation_level IN ('rootless','microvm') " +
+    "AND pool.status = 'ready' AND (pool.isolation_level IN ('rootless','microvm') OR (pool.runtime_engine = 'static' AND pool.isolation_level = 'untrusted')) " +
     "ORDER BY r.requested_at LIMIT 10",
   ).bind(node.id, node.nodePoolId, nodeIdentity).all<{
     releaseId: string; state: string; artifactSha256: string;
@@ -9791,7 +9791,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -9831,7 +9831,11 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
     "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 " +
     "AND ((? = 'validate' AND r.state IN ('artifact_uploaded','validating','publishing')) " +
     "OR (? = 'publish' AND r.state IN ('ready_to_publish','publishing'))) LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id, purpose, purpose).first<{
@@ -9881,7 +9885,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
       "AND EXISTS (SELECT 1 FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
       "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
       "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-      "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm'))",
+      "AND n.signing_public_key = ? AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))",
     ).bind(release.releaseId, release.nodePoolId, node.id, node.id, nodeIdentity, node.signingPublicKey).run();
     if (Number(transition.meta?.changes ?? 0) !== 1) {
       const latest = await c.env.DB.prepare("SELECT state FROM application_releases WHERE id = ? LIMIT 1")
@@ -9895,7 +9899,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
     "SELECT n.id FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND n.signing_public_key = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') LIMIT 1",
+    "AND n.signing_public_key = ? AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) LIMIT 1",
   ).bind(node.id, nodeIdentity, node.signingPublicKey).first<{ id: string }>();
   if (!stillEligible) return c.json({ message: "Runtime node or isolated pool became ineligible during artifact delivery." }, 409);
   await c.env.DB.prepare(
@@ -9940,7 +9944,7 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -9979,7 +9983,11 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "d.artifact_bytes AS deploymentArtifactBytes " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     releaseArtifactBytes: number | null; deploymentArtifactDigest: string | null;
@@ -10017,7 +10025,7 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key = ? AND p.status = 'ready' " +
-    "AND p.isolation_level IN ('rootless','microvm'))";
+    "AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'validating', updated_at = datetime('now') " +
@@ -10122,7 +10130,7 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -10157,7 +10165,9 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "d.artifact_sha256 AS deploymentArtifactDigest, r.node_pool_id AS nodePoolId " +
     "FROM application_releases r JOIN github_deployments d " +
     "ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
-    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? LIMIT 1",
+    "WHERE r.deployment_id = ? AND r.node_pool_id = ? AND r.assigned_node_id = ? " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 LIMIT 1",
   ).bind(body.deploymentId, node.nodePoolId, node.id).first<{
     releaseId: string; state: string; artifactDigest: string | null;
     deploymentArtifactDigest: string | null; nodePoolId: string;
@@ -10194,7 +10204,7 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key = ? AND p.status = 'ready' " +
-    "AND p.isolation_level IN ('rootless','microvm'))";
+    "AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))";
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE application_releases SET state = 'health_checking', updated_at = datetime('now') " +
@@ -10275,7 +10285,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.status = 'online' AND n.node_role = 'runtime' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -10338,6 +10348,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "FROM application_releases r " +
     "JOIN github_deployments d ON d.id = r.deployment_id AND d.organization_id = r.organization_id AND d.project_id = r.project_id " +
     "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
     "LEFT JOIN application_workloads w ON w.project_id = r.project_id AND w.organization_id = r.organization_id AND w.workload_kind = 'web' " +
     "LEFT JOIN application_releases previous ON previous.id = w.active_release_id AND previous.project_id = r.project_id AND previous.organization_id = r.organization_id " +
     "LEFT JOIN application_nodes previous_node ON previous_node.id = w.node_id " +
@@ -10431,7 +10442,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     "AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key = ? AND p.status = 'ready' " +
-    "AND p.isolation_level IN ('rootless','microvm'))";
+    "AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')))";
   const commonNodeArgs = [node.id, nodeIdentity, node.signingPublicKey];
   const statements = healthStatus === "healthy" ? [
     c.env.DB.prepare(
@@ -10596,7 +10607,7 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     "FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
     "WHERE n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
     "AND n.revoked_at IS NULL AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
-    "AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND n.signing_public_key IS NOT NULL LIMIT 1",
   ).bind(nodeIdentity).first<{ id: string; nodePoolId: string; signingPublicKey: string }>();
   if (!node || !await verifyApplicationNodeRequestSignature(
@@ -10673,6 +10684,11 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     "AND target.assigned_node_id = ? AND failed.node_pool_id = ? AND target.node_pool_id = ? " +
     "AND failed.state = 'failed' AND target.state = 'succeeded' " +
     "AND target.artifact_digest = ? AND w.active_release_id = target.id " +
+    "AND EXISTS (SELECT 1 FROM application_project_settings s " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "WHERE s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1) " +
     "AND w.node_id = ? AND w.status IN ('unhealthy','healthy') LIMIT 1",
   ).bind(body.targetDeploymentId, body.failedDeploymentId, node.id, node.id,
     node.nodePoolId, node.nodePoolId, body.targetArtifactSha256, node.id).first<{
