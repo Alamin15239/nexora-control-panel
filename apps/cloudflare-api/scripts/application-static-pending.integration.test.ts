@@ -38,6 +38,8 @@ class StaticPendingD1 {
   releaseRows: Array<Record<string, unknown>> = [{ ...validRelease }];
   rollbackRows: Array<Record<string, unknown>> = [{ ...validRollback }];
   queries: string[] = [];
+  heartbeatUpdated = false;
+  heartbeatUpdatedAfterNonce = false;
 
   prepare(query: string) {
     const db = this;
@@ -45,6 +47,7 @@ class StaticPendingD1 {
     const statement = {
       bind(...args: unknown[]) { values = args; return statement; },
       async first<T>() {
+        db.queries.push(query);
         if (query.includes("FROM application_nodes n")) {
           return values[0] === db.node.nodeIdentity
             ? ({
@@ -72,6 +75,10 @@ class StaticPendingD1 {
           if (db.nonces.has(nonce)) return { success: true, meta: { changes: 0 } };
           db.nonces.add(nonce);
           return { success: true, meta: { changes: 1 } };
+        }
+        if (query.includes("UPDATE application_nodes SET last_heartbeat_at")) {
+          db.heartbeatUpdated = true;
+          db.heartbeatUpdatedAfterNonce = db.nonces.size === 1;
         }
         return { success: true, meta: { changes: 1 } };
       },
@@ -131,6 +138,15 @@ test("static pending poll returns only well-formed assigned releases and same-no
   assert.equal(body.nodeIdentity, "runtime-a");
   assert.deepEqual(body.releases, [validRelease]);
   assert.deepEqual(body.rollbacks, [validRollback]);
+  const nodeQuery = db.queries.find((query) => query.includes("FROM application_nodes n"));
+  assert.ok(nodeQuery);
+  assert.match(nodeQuery, /p\\.runtime_engine = 'static'/);
+  assert.match(nodeQuery, /p\\.isolation_level = 'untrusted'/);
+  assert.equal(db.heartbeatUpdated, true);
+  assert.equal(db.heartbeatUpdatedAfterNonce, true);
+  const heartbeatQuery = db.queries.find((query) => query.includes("UPDATE application_nodes SET last_heartbeat_at"));
+  assert.ok(heartbeatQuery);
+  assert.match(heartbeatQuery, /signing_public_key = \\?/);
 
   const releaseQuery = db.queries.find((query) => query.includes("FROM application_releases r"));
   const rollbackQuery = db.queries.find((query) => query.includes("FROM application_releases failed"));
