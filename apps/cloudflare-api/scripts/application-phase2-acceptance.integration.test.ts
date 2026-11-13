@@ -67,6 +67,7 @@ class TwoNodeD1 {
   releases: ReleaseRow[] = [];
   events: Array<{ releaseId: string; eventCode: string }> = [];
   nonces = new Set<string>();
+  staticPollHeartbeatUpdated = false;
 
   prepare(query: string) {
     const db = this;
@@ -166,6 +167,9 @@ class TwoNodeD1 {
         return { results: [] as T[] };
       },
       async run() {
+        if (query.includes("UPDATE application_nodes SET last_heartbeat_at")) {
+          db.staticPollHeartbeatUpdated = true;
+        }
         // Nonce replay protection (INSERT OR IGNORE).
         if (query.includes("INSERT OR IGNORE INTO application_node_request_nonces")) {
           const nonce = String(values[1]);
@@ -359,6 +363,7 @@ test("two independently authenticated nodes see only their own assigned releases
     env, {} as ExecutionContext,
   );
   assert.equal(pollA.status, 200);
+  assert.equal(db.staticPollHeartbeatUpdated, true, "a signed static poll must refresh node liveness");
   const bodyA = await pollA.json() as { releases: Array<{ releaseId: string }> };
   assert.equal(bodyA.releases.length, 1);
   assert.equal(bodyA.releases[0].releaseId, "release-a");
