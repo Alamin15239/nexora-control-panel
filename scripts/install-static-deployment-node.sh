@@ -65,6 +65,7 @@ if [[ "$MODE" == "plan" ]]; then
   printf 'Would create/verify nexora-static group and nexora-runtime:www-data service account.\n'
   printf 'Would install binaries root:root 0755 and units root:root 0644.\n'
   if [[ "$DEVELOPMENT_TEST" == "1" ]]; then printf 'Mode: explicit development-test only; no node enrollment or customer runtime admission.\n'; fi
+  if [[ "$PRODUCTION_NODE" == "1" ]]; then printf 'Mode: explicitly approved production node install; services remain stopped and disabled.\n'; fi
   printf 'Would leave both services stopped and disabled; no secrets/config installed.\n'
   for target in "${TARGETS[@]}"; do
     if [[ -e "$target" || -L "$target" ]]; then printf 'CONFLICT: target already exists: %s\n' "$target" >&2; exit 3; fi
@@ -76,14 +77,16 @@ fi
 [[ -n "$NODE_ID" && "$NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$ ]] || { echo "--apply requires a valid --node-id" >&2; exit 2; }
 host="$(hostname -s)"
 if [[ "$host" == "nexora-server" ]]; then
-  [[ "$DEVELOPMENT_TEST" == "1" ]] || { echo "Refusing nexora-server install without explicit --development-test approval" >&2; exit 4; }
-elif [[ "$DEVELOPMENT_TEST" == "1" ]]; then
-  echo "--development-test is restricted to the exact host nexora-server" >&2
+  [[ "$DEVELOPMENT_TEST" == "1" || "$PRODUCTION_NODE" == "1" ]] || {
+    echo "Refusing nexora-server install without explicit --development-test or --production-node approval" >&2; exit 4;
+  }
+elif [[ "$DEVELOPMENT_TEST" == "1" || "$PRODUCTION_NODE" == "1" ]]; then
+  echo "--development-test and --production-node are restricted to the exact host nexora-server" >&2
   exit 4
 fi
 [[ -f "$APPROVAL_FILE" && ! -L "$APPROVAL_FILE" ]] || { echo "Missing operator approval file: $APPROVAL_FILE" >&2; exit 4; }
 [[ "$(stat -c '%U:%G:%a' "$APPROVAL_FILE")" == "root:root:600" ]] || { echo "Approval file must be root:root mode 0600" >&2; exit 4; }
-python3 - "$APPROVAL_FILE" "$NODE_ID" "$DEVELOPMENT_TEST" <<'PY'
+python3 - "$APPROVAL_FILE" "$NODE_ID" "$DEVELOPMENT_TEST" "$PRODUCTION_NODE" <<'PY'
 import json, sys
 from pathlib import Path
 try:
@@ -100,6 +103,15 @@ if sys.argv[3] == "1":
              approval.get("allow_development_host_install") is True)
     if not valid:
         raise SystemExit("Approval must explicitly authorize this exact nexora-server development-test node")
+elif sys.argv[4] == "1":
+    expected = common | {"environment", "allow_production_node_install"}
+    valid = (isinstance(approval, dict) and set(approval) == expected and
+             approval.get("environment") == "production" and
+             approval.get("node_identity") == sys.argv[2] and
+             approval.get("allow_static_publisher_install") is True and
+             approval.get("allow_production_node_install") is True)
+    if not valid:
+        raise SystemExit("Approval must explicitly authorize this nexora-server production node identity")
 else:
     expected = common | {"environment"}
     valid = (isinstance(approval, dict) and set(approval) == expected and
@@ -131,7 +143,9 @@ install -D -o root -g root -m 0755 "$ARTIFACT_DIR/nexora-static-vhostd" /usr/loc
 install -D -o root -g root -m 0755 "$ARTIFACT_DIR/nexora-static-publisher" /usr/local/bin/nexora-static-publisher
 install -D -o root -g root -m 0644 "$ARTIFACT_DIR/nexora-static-vhostd.service" /etc/systemd/system/nexora-static-vhostd.service
 install -D -o root -g root -m 0644 "$ARTIFACT_DIR/nexora-static-publisher.service" /etc/systemd/system/nexora-static-publisher.service
-if [[ "$DEVELOPMENT_TEST" == "1" ]]; then
+if [[ "$PRODUCTION_NODE" == "1" ]]; then
+  printf 'Installed on explicitly approved production node %s. Services remain stopped and disabled.\n' "$NODE_ID"
+elif [[ "$DEVELOPMENT_TEST" == "1" ]]; then
   printf 'Installed on approved development-test node %s. Services remain stopped and disabled.\n' "$NODE_ID"
 else
   printf 'Installed on approved disposable-test node %s. Services remain stopped and disabled.\n' "$NODE_ID"
