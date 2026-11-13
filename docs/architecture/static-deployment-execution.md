@@ -25,9 +25,10 @@ The existing nexora-agent and nexora-provisiond are hosting control-plane compon
 
 ## Required workflow contract
 
-The customer repository contains .github/workflows/nexora-deploy.yml, reviewed and pinned by a platform administrator. The supplied template at docs/templates/nexora-deploy.yml is intentionally limited to npm projects with package-lock.json and a dist/ output directory.
+When a repository is linked, Nexora uses its repository-scoped GitHub App installation token to create `.github/workflows/nexora-deploy.yml` from the canonical template when that file is absent. It records the exact commit SHA returned by GitHub as the trusted workflow revision. If a different file already occupies that path, Nexora leaves it untouched and refuses automatic provisioning rather than overwriting customer automation. The supplied template at `docs/templates/nexora-deploy.yml` is intentionally limited to npm projects with `package-lock.json` and a configured static output directory.
 
-- Trigger only through workflow_dispatch; automatic push deployment is not part of this phase.
+- Trigger deployments through Nexora's verified App-level push webhook and the GitHub Actions `workflow_dispatch` API. Pushes to the selected production branch request production deployments; pull-request previews remain separately controlled.
+- The workflow SHA is pinned automatically at link time to the commit that created or last updated the exact canonical workflow. Any later workflow modification changes the OIDC `workflow_sha` and is rejected until an administrator reviews and updates the trust pin.
 - Use GitHub-hosted ubuntu-latest, never self-hosted runners.
 - Pin every third-party action to a full immutable commit SHA.
 - Grant only contents: read and id-token: write; disable checkout credential persistence.
@@ -76,7 +77,7 @@ These components are not proof that a production publisher node is enrolled, onl
 
 Before enabling customer deployments:
 
-- Pin the reviewed workflow revision for each project and verify that the actual workflow content matches the review.
+- Verify that the auto-provisioned workflow content matches the canonical template and that the stored workflow commit SHA matches the GitHub OIDC `workflow_sha` claim. Any workflow change must be explicitly reviewed before updating the trust pin.
 - Provision a separate publisher node or approved isolated node pool; do not repurpose the current Nexora development VM as a multi-tenant executor.
 - Enroll its Ed25519 node identity and install the publisher trust public key/configuration with owner-only permissions.
 - Verify systemd confinement, service account, writable paths, account directory ownership, and Nginx/static-site serving behavior.
@@ -84,7 +85,7 @@ Before enabling customer deployments:
 - Exercise valid and malicious archives, interrupted downloads, replayed envelopes, checksum mismatches, failed activation, concurrent deployment attempts, health-check failure, and rollback.
 - Verify organization and hosting-account membership isolation through HTTP integration tests.
 - Confirm artifact retention and cleanup policies, quotas, rate limits, audit records, and bounded logs.
-- Keep automatic push webhooks disabled until signature verification, replay protection, queue idempotency, and end-to-end tests are complete.
+- Keep automatic push dispatch gated by webhook signature verification, replay protection, queue idempotency, workflow identity pinning, isolated runtime admission, and end-to-end publication acceptance. The webhook receiver may record verified events while runtime admission is unavailable, but must not bypass the admission gate.
 
 **Current safety posture:** building and artifact staging are separate from publication. Do not merge a workflow change into production, enable runtime profiles, enroll the current VM as a publisher, or advertise production deployment availability until these gates pass.
 
