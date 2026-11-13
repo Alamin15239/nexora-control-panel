@@ -9689,8 +9689,12 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     projectId: string; hostingAccountId: string; hostname: string;
     healthCheckPath: string; targetArtifactSha256: string;
   }>();
+  // A successful signed static-release poll is the publisher's liveness signal.
+  // Refresh both timestamps so a publisher that does not run the generic
+  // desired-state agent remains eligible for the next poll.
   await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), " +
+    "last_signature_at = datetime('now'), updated_at = datetime('now') " +
     "WHERE id = ? AND node_identity = ? AND status = 'online' AND revoked_at IS NULL",
   ).bind(node.id, nodeIdentity).run();
   return c.json({
