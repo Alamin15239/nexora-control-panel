@@ -47,8 +47,8 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
         for required in (
             "MODE=plan", "--apply", "--node-id", "--development-test", "--production-node", "/etc/nexora-static-node/approval.json",
             'approval.get("environment") == "disposable-test"', "allow_static_publisher_install",
-            "Refusing nexora-server install without explicit --development-test approval",
-            "--development-test is restricted to the exact host nexora-server",
+            "Refusing nexora-server install without explicit --development-test or --production-node approval",
+            "--development-test and --production-node are restricted to the exact host nexora-server",
             'approval.get("environment") == "development-test"',
             'approval.get("allow_development_host_install") is True',
             "allow_development_host_install",
