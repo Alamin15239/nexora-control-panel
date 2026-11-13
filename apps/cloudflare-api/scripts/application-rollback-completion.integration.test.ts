@@ -37,6 +37,7 @@ class RollbackCompletionD1 {
     nodeId: "runtime-node-id",
   };
   batches = 0;
+  batchQueries: string[] = [];
 
   prepare(query: string) {
     const db = this;
@@ -107,6 +108,7 @@ class RollbackCompletionD1 {
 
   async batch(statements: Array<{ query: string; getValues(): unknown[] }>) {
     this.batches += 1;
+    this.batchQueries = statements.map((statement) => statement.query);
     const ack = statements[0].getValues();
     this.acknowledgement = {
       nodeId: String(ack[3]),
@@ -171,6 +173,14 @@ test("rollback completion accepts a verified same-node rollback and restores wor
   assert.equal(db.acknowledgement?.targetReleaseId, "release-previous");
   assert.equal(db.workload.status, "healthy");
   assert.equal(db.batches, 1);
+  assert.equal(db.batchQueries.length, 4);
+  assert.match(db.batchQueries[0], /n\.status = 'online'/);
+  assert.match(db.batchQueries[0], /rp\.profile_key = 'static-v1'/);
+  assert.match(db.batchQueries[0], /p\.isolation_level = 'untrusted'/);
+  assert.match(db.batchQueries[1], /rp\.profile_key = 'static-v1'/);
+  assert.match(db.batchQueries[1], /n\.signing_public_key = \?/);
+  assert.match(db.batchQueries[2], /target\.artifact_digest = a\.target_artifact_sha256/);
+  assert.match(db.batchQueries[2], /rp\.enabled = 1/);
 });
 
 test("rollback completion is idempotent for an exact operation retry", async () => {
