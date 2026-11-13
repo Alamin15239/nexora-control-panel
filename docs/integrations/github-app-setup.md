@@ -15,7 +15,7 @@ In GitHub, open **Settings → Developer settings → GitHub Apps → Nexora** a
 - **User authorization callback URL:** keep the existing configured OAuth callback, `https://api.nexoraedge.digital/v1/github/callback`.
 - **Repository permissions:**
   - Metadata: Read-only (required by GitHub).
-  - Contents: Read-only.
+  - Contents: Read and write (Nexora adds its pinned deployment workflow when a repository is linked).
   - Actions: Read and write (used by the deployment workflow integration).
 - **Webhook:** set the URL to `https://api.nexoraedge.digital/v1/github/webhooks`, configure a strong webhook secret, and subscribe to **Push** and **Pull requests** events. Store the exact same secret in the Nexora API Worker as `GITHUB_APP_WEBHOOK_SECRET`. This is one App-level webhook for all repositories covered by the installation; per-repository webhook setup is not required.
 - **Where can this GitHub App be installed?** Choose the intended availability (any account, or only the Nexora-controlled organization).
@@ -30,7 +30,7 @@ The API verifies the installation ID against the configured GitHub App ID using 
 4. Return to Nexora Deploy. The verified installation should be shown and the repository list should load.
 5. Link a repository to its hosting account. Production auto-deploy is enabled by default: pushes to the selected production branch trigger a deployment. You can explicitly turn it off in Deploy settings.
 
-Repository discovery uses the GitHub App installation API, not the OAuth user's installation list. Project linking re-verifies the selected repository using a short-lived installation token scoped to that repository. The App-level webhook authenticates events with its shared secret and matches the repository and installation IDs to the linked project.
+Repository discovery uses the GitHub App installation API, not the OAuth user's installation list. Project linking re-verifies the selected repository using a short-lived installation token scoped to that repository, then adds `.github/workflows/nexora-deploy.yml` if it is absent and pins the exact workflow commit SHA automatically. Nexora never overwrites a different workflow at that path; resolve a conflict before linking. The App-level webhook authenticates events with its shared secret and matches the repository and installation IDs to the linked project. After linking, pushes to the selected production branch automatically request a deployment. The first deployment is dispatched immediately when the isolated static runtime is admitted; otherwise it remains gated until runtime admission succeeds.
 
 ## Disconnect behavior
 
