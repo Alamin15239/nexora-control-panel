@@ -49,4 +49,4 @@ These defaults are starting metadata, not a promise that a runtime is supported.
 
 ## Operational warning
 
-The existing VirtualBox Ubuntu VM is a development/test machine. Do not register it as a production multi-tenant node. The current legacy hosting agent must not be repurposed to execute customer builds or arbitrary container commands.
+The user has designated the existing VirtualBox Ubuntu VM (`nexora-server`) as the initial production host. Treat it as a single-node deployment target with no high availability: protect it with backups, restricted operator access, signed artifacts, least-privilege filesystem boundaries, health checks, and tested rollback. This does not make it a production multi-tenant compute fleet. Keep OCI/container profiles disabled, do not execute arbitrary customer build commands on the host, and do not repurpose the legacy hosting agent as a build executor.
