@@ -64,6 +64,29 @@ The Worker admits an untrusted pool only when its runtime engine is explicitly `
 
 Create the static pool as `provisioning` while preparing the node. After the reviewed binaries, trust files, account/domain bindings, service identities, and read-only preflight have passed, an authorized operator may mark that exact static pool `ready` so the one-time enrollment token can be issued. Do not create a pool with a rootless or microVM classification to bypass this gate. The operator enrollment endpoint accepts only a ready pool that is either explicitly isolated or explicitly `runtime_engine='static' AND isolation_level='untrusted'`.
 
+Create the pool with a unique operator-generated ID before preparing the node. Keep it in `provisioning` during installation and preflight:
+
+```sql
+INSERT INTO application_node_pools
+  (id, name, environment, region, runtime_engine, status, isolation_level)
+VALUES
+  ('YOUR_STATIC_POOL_ID', 'nexora-static-production', 'production',
+   'local-virtualbox', 'static', 'provisioning', 'untrusted');
+```
+
+After the host has passed the reviewed installation and read-only preflight, change only that pool to `ready` and verify exactly one row changed:
+
+```sql
+UPDATE application_node_pools
+SET status = 'ready', updated_at = datetime('now')
+WHERE id = 'YOUR_STATIC_POOL_ID'
+  AND runtime_engine = 'static'
+  AND isolation_level = 'untrusted'
+  AND status = 'provisioning';
+```
+
+Choose the node identity before writing the install approval file (for example, `nexora-server-static-01`). The operator enrollment endpoint then issues a one-time token for that exact identity and pool. Do not mark the pool ready merely to bypass preflight; it is the admission switch for enrollment.
+
 ## 1. Create the deployment-envelope signing key pair
 
 Generate a dedicated RSA key pair on a trusted operator workstation. Keep the private key outside the repository and outside every hosting node.
