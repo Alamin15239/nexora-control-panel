@@ -6,12 +6,14 @@ MODE=plan
 ARTIFACT_DIR=""
 NODE_ID=""
 DEVELOPMENT_TEST=0
+PRODUCTION_NODE=0
 APPROVAL_FILE="/etc/nexora-static-node/approval.json"
 usage() {
   cat <<'EOF'
 Usage: install-static-deployment-node.sh --artifact-dir DIR [--node-id ID] [--plan]
        install-static-deployment-node.sh --artifact-dir DIR --node-id ID --apply
        install-static-deployment-node.sh --artifact-dir DIR --node-id ID --development-test --apply
+       install-static-deployment-node.sh --artifact-dir DIR --node-id ID --production-node --apply
 Default is a read-only plan. Disposable-node apply requires a root:root 0600 approval JSON:
 {"environment":"disposable-test","node_identity":"NODE_ID","allow_static_publisher_install":true}
 The explicitly selected nexora-server development-test path additionally requires:
@@ -29,10 +31,12 @@ while (($#)); do
     --artifact-dir) [[ $# -ge 2 ]] || { echo "Missing --artifact-dir value" >&2; exit 2; }; ARTIFACT_DIR=$2; shift 2 ;;
     --node-id) [[ $# -ge 2 ]] || { echo "Missing --node-id value" >&2; exit 2; }; NODE_ID=$2; shift 2 ;;
     --development-test) DEVELOPMENT_TEST=1; shift ;;
+    --production-node) PRODUCTION_NODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+[[ "$DEVELOPMENT_TEST" == "0" || "$PRODUCTION_NODE" == "0" ]] || { echo "--development-test and --production-node are mutually exclusive" >&2; exit 2; }
 [[ -n "$ARTIFACT_DIR" ]] || { echo "--artifact-dir is required" >&2; exit 2; }
 [[ -d "$ARTIFACT_DIR" && ! -L "$ARTIFACT_DIR" ]] || { echo "Artifact directory must be a real directory" >&2; exit 2; }
 for file in nexora-static-vhostd nexora-static-publisher nexora-static-vhostd.service nexora-static-publisher.service; do
