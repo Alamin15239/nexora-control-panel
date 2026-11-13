@@ -2,7 +2,7 @@
 
 This is an operator runbook for a **non-production, explicitly approved static publisher test node**. The normal path is a disposable VM. The user-selected `nexora-server` may use the narrowly scoped `development-test` install path below, but this does not make it a production node or authorize customer deployments. Complete the architecture acceptance gates before starting either service.
 
-## 0. Install reviewed binaries on an approved disposable node
+## 0. Install reviewed binaries on an approved test node
 
 The repository includes `scripts/install-static-deployment-node.sh`. It defaults to
 a read-only plan and accepts only a directory containing these four reviewed
@@ -19,9 +19,9 @@ First inspect the plan without changing the node:
 bash scripts/install-static-deployment-node.sh --artifact-dir /path/to/reviewed-artifacts --plan
 ```
 
-Applying requires all of the following: an explicitly disposable test node, a
-root-owned approval file with mode `0600`, an exact node identity match, and
-the explicit `--apply` flag. For a disposable test VM, the approval file schema is exactly:
+For a disposable test VM, applying requires a root-owned approval file with mode
+`0600`, an exact node identity match, and the explicit `--apply` flag. Its approval
+file schema is exactly:
 
 ```json
 {
