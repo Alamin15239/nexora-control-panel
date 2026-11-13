@@ -6379,11 +6379,29 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
       "failed_deployment_id, target_deployment_id, target_artifact_sha256, http_status, probe_duration_ms) " +
       "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
       "WHERE EXISTS (SELECT 1 FROM application_workloads w WHERE w.id = ? " +
-      "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy'))",
+      "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy')) " +
+      "AND EXISTS (SELECT 1 FROM application_releases failed " +
+      "JOIN application_releases target ON target.id = ? AND target.organization_id = failed.organization_id " +
+      "AND target.project_id = failed.project_id " +
+      "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "JOIN application_node_pools p ON p.id = failed.node_pool_id " +
+      "JOIN application_nodes n ON n.id = ? AND n.node_pool_id = p.id " +
+      "WHERE failed.id = ? AND failed.state = 'failed' AND target.state = 'succeeded' " +
+      "AND failed.assigned_node_id = n.id AND target.assigned_node_id = n.id " +
+      "AND failed.node_pool_id = ? AND target.node_pool_id = p.id " +
+      "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
+      "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted' " +
+      "AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+      "AND n.revoked_at IS NULL AND n.signing_public_key = ? " +
+      "AND n.last_heartbeat_at >= datetime('now', '-15 minutes'))",
     ).bind(body.operationId, binding.organizationId, binding.projectId, node.id,
       binding.failedReleaseId, binding.targetReleaseId, body.failedDeploymentId,
       body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs,
-      binding.workloadId, binding.targetReleaseId, node.id),
+      binding.workloadId, binding.targetReleaseId, node.id,
+      binding.targetReleaseId, node.id, binding.failedReleaseId, node.nodePoolId,
+      nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
       "UPDATE application_workloads SET status = 'healthy', desired_replicas = 1, " +
       "observed_replicas = 1, updated_at = datetime('now') " +
