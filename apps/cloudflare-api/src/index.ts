@@ -7253,7 +7253,7 @@ app.post("/v1/github/projects", async (c) => {
       initialDeployment: { accepted: initialAccepted, ...(initialResult && typeof initialResult === "object" ? initialResult as Record<string, unknown> : {}) },
       message: initialAccepted
         ? "Repository linked. Nexora installed and pinned its deployment workflow, started the first deployment, and enabled automatic production deploys for future pushes."
-        : "Repository linked and the Nexora workflow is installed and pinned. Automatic production deploys are enabled; the first deployment is waiting for runtime admission to pass.",
+        : "Repository linked and the Nexora workflow is installed and pinned. Automatic production deploys are enabled, but the first build was not started because isolated runtime admission is not ready. A new push after runtime admission passes will trigger the first build.",
     }, 201);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "";
