@@ -61,6 +61,20 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provision ./cmd/nexora-provision
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-provisiond ./cmd/nexora-provisiond
           go build -trimpath -ldflags="-s -w" -o /tmp/nexora-static-vhostd ./cmd/nexora-static-vhostd
+      - name: Package production static deployment artifacts
+        run: |
+          install -d -m 0755 /tmp/nexora-static-deployment-artifacts
+          install -m 0755 /tmp/nexora-static-vhostd /tmp/nexora-static-deployment-artifacts/nexora-static-vhostd
+          install -m 0755 /tmp/nexora-static-publisher /tmp/nexora-static-deployment-artifacts/nexora-static-publisher
+          install -m 0644 systemd/nexora-static-vhostd.service /tmp/nexora-static-deployment-artifacts/nexora-static-vhostd.service
+          install -m 0644 systemd/nexora-static-publisher.service /tmp/nexora-static-deployment-artifacts/nexora-static-publisher.service
+      - name: Upload signed-build inputs for production node installation
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexora-static-deployment-linux-${{ github.sha }}
+          path: /tmp/nexora-static-deployment-artifacts/
+          if-no-files-found: error
+          retention-days: 14
       - name: Verify CLI
         run: /tmp/nexora-agent version
       - name: Verify provisioning systemd unit
