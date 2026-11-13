@@ -140,13 +140,13 @@ test("static pending poll returns only well-formed assigned releases and same-no
   assert.deepEqual(body.rollbacks, [validRollback]);
   const nodeQuery = db.queries.find((query) => query.includes("FROM application_nodes n"));
   assert.ok(nodeQuery);
-  assert.match(nodeQuery, /p\\.runtime_engine = 'static'/);
-  assert.match(nodeQuery, /p\\.isolation_level = 'untrusted'/);
+  assert.ok(nodeQuery.includes("p.runtime_engine = 'static'"));
+  assert.ok(nodeQuery.includes("p.isolation_level = 'untrusted'"));
   assert.equal(db.heartbeatUpdated, true);
   assert.equal(db.heartbeatUpdatedAfterNonce, true);
   const heartbeatQuery = db.queries.find((query) => query.includes("UPDATE application_nodes SET last_heartbeat_at"));
   assert.ok(heartbeatQuery);
-  assert.match(heartbeatQuery, /signing_public_key = \\?/);
+  assert.ok(heartbeatQuery.includes("signing_public_key = ?"));
 
   const releaseQuery = db.queries.find((query) => query.includes("FROM application_releases r"));
   const rollbackQuery = db.queries.find((query) => query.includes("FROM application_releases failed"));
