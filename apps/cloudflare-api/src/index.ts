@@ -1,9 +1,10 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { ensureSaasDnsRecord } from "./cloudflare-dns";
 import { createDnsRecord, deleteDnsRecord, listDnsRecords, updateDnsRecord } from "./dns-records";
 import { pruneFailedDeploymentArtifacts } from "./artifact-retention";
 import { isRuntimeAssignmentAdmitted } from "./runtime-admission";
-import { NEXORA_DEPLOY_WORKFLOW } from "./github-deploy-workflow";
+import { NEXORA_DEPLOY_WORKFLOW, NEXORA_DEPLOY_WORKFLOW_V1 } from "./github-deploy-workflow";
 
 type Bindings = {
   DB: D1Database;
@@ -6812,13 +6813,41 @@ async function ensureNexoraDeploymentWorkflow(
   const contentPath = `/repos/${repository}/contents/${path}?ref=${encodeURIComponent(branch)}`;
   const existing = await githubApi(token, contentPath);
   if (existing.ok) {
-    const file = await existing.json() as { type?: string; encoding?: string; content?: string };
+    const file = await existing.json() as { type?: string; encoding?: string; content?: string; sha?: string };
     if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
       throw new Error("The existing Nexora workflow could not be verified.");
     }
     const decoded = new TextDecoder().decode(Uint8Array.from(atob(file.content.replace(/\\s/g, "")), c => c.charCodeAt(0)));
     if (decoded.replace(/\\r\\n/g, "\\n") !== NEXORA_DEPLOY_WORKFLOW.replace(/\\r\\n/g, "\\n")) {
-      throw new Error("A different workflow already uses .github/workflows/nexora-deploy.yml. It was left untouched; review or rename it before linking.");
+      // Repositories pinned to the frozen v1 revision (npm-only builds) are
+      // upgraded in place so older links keep deploying with the current
+      // pipeline. Any other content is customer-modified and never replaced.
+      if (decoded.replace(/\\r\\n/g, "\\n") !== NEXORA_DEPLOY_WORKFLOW_V1.replace(/\\r\\n/g, "\\n") || !file.sha) {
+        throw new Error("A different workflow already uses .github/workflows/nexora-deploy.yml. It was left untouched; review or rename it before linking.");
+      }
+      const upgraded = await fetch(`https://api.github.com/repos/${repository}/contents/${path}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "Nexora-Control-Panel",
+        },
+        body: JSON.stringify({
+          message: "chore: update Nexora deployment workflow",
+          content: btoa(String.fromCharCode(...new TextEncoder().encode(NEXORA_DEPLOY_WORKFLOW))),
+          sha: file.sha,
+          branch,
+        }),
+      });
+      if (!upgraded.ok) {
+        throw new Error("The repository still carries the previous Nexora workflow revision and the automatic upgrade was rejected. Re-run linking after checking the Nexora App has Contents: read and write and Workflows: read and write permissions.");
+      }
+      const upgradePayload = await upgraded.json() as { commit?: { sha?: string } };
+      const upgradedSha = upgradePayload.commit?.sha ?? "";
+      if (!/^[a-f0-9]{40}$/i.test(upgradedSha)) throw new Error("GitHub did not return the upgraded workflow commit SHA.");
+      return { workflowSha: upgradedSha.toLowerCase(), created: false };
     }
     const commits = await githubApi(token, `/repos/${repository}/commits?path=${encodeURIComponent(NEXORA_DEPLOY_WORKFLOW_PATH)}&sha=${encodeURIComponent(branch)}&per_page=1`);
     if (!commits.ok) throw new Error("Unable to pin the existing Nexora workflow revision.");
@@ -7235,6 +7264,11 @@ app.post("/v1/github/projects", async (c) => {
     ).bind(id, identity.organizationId, hostingAccountId, identity.organizationId, String(repositoryId), repo.full_name, String(installationId), productionBranch, rootDirectory || ".", outputDirectory || "dist", framework, workflow.workflowSha).run();
     await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.project_configured', 'github_project', ?, ?)")
       .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ repository: repo.full_name, hostingAccountId, workflowProvisioned: workflow.created, trustedWorkflowSha: workflow.workflowSha })).run();
+    // Bootstrap the static runtime contract and pool binding from the saved
+    // framework configuration so the first deployment below can dispatch
+    // immediately whenever a runtime node is already serving. The dispatcher
+    // repeats this idempotently, so an absent pool simply stays pending.
+    const runtimeBootstrapped = await ensureStaticRuntimeAssignment(c.env, id, identity.organizationId);
     const initial = await dispatchGitHubDeployment(c.env, {
       project: {
         id, organizationId: identity.organizationId, repositoryId: String(repositoryId),
@@ -7250,10 +7284,15 @@ app.post("/v1/github/projects", async (c) => {
     return c.json({
       project: { id, repositoryFullName: repo.full_name, productionBranch, framework, outputDirectory, status: "configured", autoDeploy: true, trustedWorkflowSha: workflow.workflowSha },
       workflow: { provisioned: true, created: workflow.created },
+      runtime: {
+        settingsBootstrapped: runtimeBootstrapped.settingsCreated,
+        poolAssigned: runtimeBootstrapped.poolAssigned,
+        note: runtimeBootstrapped.note,
+      },
       initialDeployment: { accepted: initialAccepted, ...(initialResult && typeof initialResult === "object" ? initialResult as Record<string, unknown> : {}) },
       message: initialAccepted
-        ? "Repository linked. Nexora installed and pinned its deployment workflow, started the first deployment, and enabled automatic production deploys for future pushes."
-        : "Repository linked and the Nexora workflow is installed and pinned. Automatic production deploys are enabled, but the first build was not started because isolated runtime admission is not ready. A new push after runtime admission passes will trigger the first build.",
+        ? "Repository linked. Nexora detected the app type, installed and pinned its deployment workflow, started the first deployment, and enabled automatic production deploys for future pushes."
+        : "Repository linked. Nexora detected the app type and installed and pinned its deployment workflow. Automatic production deploys are enabled and the first build starts automatically as soon as the runtime node finishes acceptance - no new push or manual action is required.",
     }, 201);
   } catch (error) {
     const detail = error instanceof Error ? error.message : "";
@@ -8287,6 +8326,210 @@ type DispatchProject = {
   outputDirectory: string;
 };
 
+// ---------------------------------------------------------------------------
+// Automatic runtime admission ("connect once, deploy automatically").
+//
+// A linked repository can only dispatch after application_project_settings
+// exist and point at an admitted pool. Historically those rows were created by
+// separate manual steps, so the first deployment silently waited for them.
+// The helpers below let the shared dispatcher self-heal that state from the
+// framework contract chosen at link time, and let the node lifecycle fire the
+// first deployment as soon as admission arrives - no new push required.
+// ---------------------------------------------------------------------------
+
+const STATIC_RUNTIME_PROFILE_KEY = "static-v1";
+
+type RuntimeSelfHealResult = {
+  settingsCreated: boolean;
+  poolAssigned: boolean;
+  note: string | null;
+};
+
+// Picks the best ready pool that currently has an enrolled online runtime
+// node. Static publishing pools are preferred because they are the only pools
+// the static-v1 pipeline can publish through today.
+async function eligibleStaticNodePoolId(db: D1Database): Promise<string | null> {
+  const pool = await db.prepare(
+    "SELECT p.id FROM application_node_pools p " +
+    "WHERE p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') " +
+    "OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
+    "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
+    "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+    "AND n.signing_public_key IS NOT NULL) " +
+    "ORDER BY CASE WHEN p.runtime_engine = 'static' THEN 0 ELSE 1 END, p.environment, p.name LIMIT 1",
+  ).first<{ id: string }>();
+  return pool?.id ?? null;
+}
+
+// Creates static runtime settings from the framework contract saved at link
+// time and assigns an eligible pool when both are missing. Every step is a
+// no-op when its prerequisite is absent, so an unexpected schema state can
+// never block the caller's own admission decision; all failures are reported
+// through `note` instead of thrown.
+async function ensureStaticRuntimeAssignment(
+  env: Bindings, projectId: string, organizationId: string,
+): Promise<RuntimeSelfHealResult> {
+  const db = env.DB;
+  const result: RuntimeSelfHealResult = { settingsCreated: false, poolAssigned: false, note: null };
+  try {
+    const project = await db.prepare(
+      "SELECT p.framework, COALESCE(NULLIF(p.output_directory,''),'dist') AS outputDirectory, " +
+      "p.hosting_account_id AS hostingAccountId FROM github_projects p " +
+      "WHERE p.id = ? AND p.organization_id = ? LIMIT 1",
+    ).bind(projectId, organizationId).first<{ framework: string; outputDirectory: string; hostingAccountId: string }>();
+    if (!project) {
+      result.note = "project_missing";
+      return result;
+    }
+
+    const settings = await db.prepare(
+      "SELECT id, node_pool_id AS nodePoolId FROM application_project_settings " +
+      "WHERE project_id = ? AND organization_id = ? LIMIT 1",
+    ).bind(projectId, organizationId).first<{ id: string; nodePoolId: string | null }>();
+    if (settings?.nodePoolId) return result; // Pool affinity already decided.
+
+    const poolId = await eligibleStaticNodePoolId(db);
+
+    if (!settings) {
+      const profile = await db.prepare(
+        "SELECT id FROM application_runtime_profiles WHERE profile_key = ? AND runtime_family = 'static' AND enabled = 1 LIMIT 1",
+      ).bind(STATIC_RUNTIME_PROFILE_KEY).first<{ id: string }>();
+      if (!profile) {
+        result.note = "static_profile_unavailable";
+        return result;
+      }
+      const plan = await db.prepare(
+        "SELECT hp.app_cpu_millis AS cpuMillis, hp.app_memory_mib AS memoryMiB, " +
+        "hp.app_disk_mib AS diskMiB, hp.app_process_limit AS processLimit " +
+        "FROM hosting_accounts h JOIN hosting_plans hp ON hp.id = h.plan_id AND hp.organization_id = h.organization_id " +
+        "WHERE h.id = ? AND h.organization_id = ? LIMIT 1",
+      ).bind(project.hostingAccountId, organizationId).first<{ cpuMillis: number; memoryMiB: number; diskMiB: number; processLimit: number }>();
+      if (!plan) {
+        result.note = "hosting_plan_unavailable";
+        return result;
+      }
+      // Same conservative defaults the dashboard runtime form uses, clamped
+      // into the hosting plan quotas and the platform CHECK bounds. Builds run
+      // on GitHub-hosted runners, so these values only bound serving quotas.
+      const cpuMillis = Math.max(100, Math.min(500, plan.cpuMillis));
+      const memoryMiB = Math.max(128, Math.min(512, plan.memoryMiB));
+      const diskMiB = Math.max(128, Math.min(2048, plan.diskMiB));
+      const processLimit = Math.max(16, Math.min(128, plan.processLimit));
+      const preset = FRAMEWORK_PRESETS.find((entry) => entry.slug === project.framework) ??
+        FRAMEWORK_PRESETS.find((entry) => entry.slug === "static");
+      if (!preset) {
+        result.note = "framework_preset_unavailable";
+        return result;
+      }
+      const outputDirectory = project.outputDirectory === "." ||
+        (/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) &&
+         !project.outputDirectory.startsWith("/") &&
+         !project.outputDirectory.split("/").some((part) => part === "." || part === ".."))
+        ? project.outputDirectory : preset.outputDirectory;
+      const insertStatement = (withPool: boolean) => db.prepare(
+        "INSERT INTO application_project_settings " +
+        "(id, organization_id, project_id, runtime_profile_id, spec_version, build_method, build_context, " +
+        "build_command, output_directory, start_command, listen_port, health_check_path, " +
+        "cpu_millis, memory_mib, disk_mib, process_limit" + (withPool ? ", node_pool_id" : "") + ", updated_at) " +
+        "VALUES (?, ?, ?, ?, 1, 'static', '.', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?" + (withPool ? ", ?" : "") + ", datetime('now'))",
+      );
+      try {
+        const insert = insertStatement(Boolean(poolId));
+        await insert.bind(...(poolId
+          ? [crypto.randomUUID(), organizationId, projectId, profile.id, preset.buildCommand, outputDirectory,
+             cpuMillis, memoryMiB, diskMiB, processLimit, poolId]
+          : [crypto.randomUUID(), organizationId, projectId, profile.id, preset.buildCommand, outputDirectory,
+             cpuMillis, memoryMiB, diskMiB, processLimit])).run();
+        result.settingsCreated = true;
+        result.poolAssigned = Boolean(poolId);
+        return result;
+      } catch {
+        // The pool guard trigger aborted the insert (pool eligibility changed
+        // between the probe and the insert). Retry without pool affinity - a
+        // later admission pass assigns the pool and dispatches.
+        const fallback = insertStatement(false);
+        await fallback.bind(crypto.randomUUID(), organizationId, projectId, profile.id, preset.buildCommand,
+          outputDirectory, cpuMillis, memoryMiB, diskMiB, processLimit).run();
+        result.settingsCreated = true;
+        result.note = "pool_assignment_raced";
+        return result;
+      }
+    }
+
+    // Settings exist without a pool: the assignment is guarded by the same
+    // readiness trigger the operator endpoint relies on.
+    if (!poolId) {
+      result.note = "no_eligible_pool";
+      return result;
+    }
+    const updated = await db.prepare(
+      "UPDATE application_project_settings SET node_pool_id = ?, updated_at = datetime('now') " +
+      "WHERE id = ? AND node_pool_id IS NULL",
+    ).bind(poolId, settings.id).run();
+    result.poolAssigned = Number(updated.meta?.changes ?? 0) === 1;
+    if (!result.poolAssigned) result.note = "pool_assignment_raced";
+    return result;
+  } catch (error) {
+    result.note = error instanceof Error ? error.message.slice(0, 120) : "self_heal_failed";
+    return result;
+  }
+}
+
+// Fires the first production deployment for every linked repository bound to
+// a runtime pool that has never deployed. Invoked when a runtime node enrolls
+// or an operator assigns a pool, so repositories linked before the node was
+// ready deploy without a new push or manual dispatch.
+async function dispatchRuntimeAdmissionBacklog(env: Bindings, nodePoolId: string, reason: string): Promise<void> {
+  const db = env.DB;
+  const pending = await db.prepare(
+    "SELECT p.id, p.organization_id AS organizationId, p.github_repository_id AS repositoryId, " +
+    "p.repository_full_name AS repositoryFullName, p.github_installation_id AS installationId, " +
+    "p.production_branch AS productionBranch, p.trusted_workflow_sha AS trustedWorkflowSha, p.status, " +
+    "COALESCE(NULLIF(s.output_directory,''), p.output_directory) AS outputDirectory " +
+    "FROM github_projects p JOIN application_project_settings s ON s.project_id = p.id AND s.organization_id = p.organization_id " +
+    "WHERE s.node_pool_id = ? AND p.auto_deploy = 1 AND p.status != 'paused' " +
+    "AND p.trusted_workflow_sha IS NOT NULL AND p.github_installation_id IS NOT NULL " +
+    "AND NOT EXISTS (SELECT 1 FROM github_deployments d WHERE d.project_id = p.id) LIMIT 10",
+  ).bind(nodePoolId).all<DispatchProject>();
+  for (const project of pending.results ?? []) {
+    try {
+      const response = await dispatchGitHubDeployment(env, {
+        project,
+        deploymentKind: "production",
+        branch: project.productionBranch,
+        triggerType: "manual",
+        actorType: "system",
+        actorId: null,
+        detailSource: reason,
+      });
+      if (!response.ok) {
+        const body = await response.clone().json().catch(() => null) as { message?: unknown } | null;
+        const message = body && typeof body.message === "string" ? body.message.slice(0, 160) : "no message";
+        console.warn(`Admission backlog dispatch for project ${project.id} returned ${response.status}: ${message}`);
+      }
+    } catch (error) {
+      console.warn("Admission backlog dispatch failed:", error instanceof Error ? error.message.slice(0, 160) : "unknown");
+    }
+  }
+}
+
+// Registers the backlog sweep with the Workers execution context when one is
+// available; callers without a context (tests, non-Workers runtimes) await it
+// inline so the work is still observable.
+async function scheduleAdmissionBacklog(
+  c: Context<{ Bindings: Bindings }>, env: Bindings, nodePoolId: string | null, reason: string,
+): Promise<void> {
+  if (!nodePoolId) return;
+  const pending = dispatchRuntimeAdmissionBacklog(env, nodePoolId, reason).catch((error) => {
+    console.warn("Admission backlog sweep failed:", error instanceof Error ? error.message.slice(0, 160) : "unknown");
+  });
+  try {
+    c.executionCtx.waitUntil(pending);
+  } catch {
+    await pending;
+  }
+}
+
 async function dispatchGitHubDeployment(
   env: Bindings,
   args: {
@@ -8294,7 +8537,7 @@ async function dispatchGitHubDeployment(
     deploymentKind: "production" | "preview";
     branch: string;
     triggerType: "manual" | "push";
-    actorType: "user" | "github_webhook";
+    actorType: "user" | "github_webhook" | "system";
     actorId: string | null;
     sourceDeploymentId?: string | null;
     commitSha?: string | null;
@@ -8313,11 +8556,11 @@ async function dispatchGitHubDeployment(
   if (!project.trustedWorkflowSha || !/^[a-f0-9]{40}$/i.test(project.trustedWorkflowSha)) {
     return jsonResponse({ message: "Review the Nexora workflow and approve its full commit SHA before dispatching deployments." }, 409);
   }
-  const runtimeAssignment = await db.prepare(
+  let runtimeAssignment = await db.prepare(
     "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
     "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, rp.profile_key AS profileKey, " +
     "rp.runtime_family AS runtimeFamily, s.build_method AS buildMethod, p.status AS poolStatus, " +
-    "p.isolation_level AS isolationLevel, " +
+    "p.isolation_level AS isolationLevel, p.runtime_engine AS runtimeEngine, " +
     "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
@@ -8329,12 +8572,38 @@ async function dispatchGitHubDeployment(
   ).bind(project.id, project.organizationId).first<{
     runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
     runtimeEnabled: number; profileKey: string; runtimeFamily: string; buildMethod: string;
-    poolStatus: string | null; isolationLevel: string | null; assignedNodeId: string | null;
+    poolStatus: string | null; isolationLevel: string | null; runtimeEngine: string | null; assignedNodeId: string | null;
   }>();
+  // Self-heal: repositories linked before runtime settings existed (or before
+  // any pool became eligible) get their static runtime contract created and
+  // bound here from the framework contract saved at link time, so the first
+  // deployment never waits for a manual reconfiguration. The admission check
+  // below still fails closed when the prerequisites are genuinely absent.
+  if (!runtimeAssignment || !isRuntimeAssignmentAdmitted(runtimeAssignment)) {
+    await ensureStaticRuntimeAssignment(env, project.id, project.organizationId);
+    runtimeAssignment = await db.prepare(
+      "SELECT s.runtime_profile_id AS runtimeProfileId, s.spec_version AS specVersion, " +
+      "s.node_pool_id AS nodePoolId, rp.enabled AS runtimeEnabled, rp.profile_key AS profileKey, " +
+      "rp.runtime_family AS runtimeFamily, s.build_method AS buildMethod, p.status AS poolStatus, " +
+      "p.isolation_level AS isolationLevel, p.runtime_engine AS runtimeEngine, " +
+      "(SELECT n.id FROM application_nodes n WHERE n.node_pool_id = s.node_pool_id " +
+      "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
+      "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+      "AND n.signing_public_key IS NOT NULL ORDER BY n.last_heartbeat_at DESC, n.id LIMIT 1) AS assignedNodeId " +
+      "FROM application_project_settings s " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "LEFT JOIN application_node_pools p ON p.id = s.node_pool_id " +
+      "WHERE s.project_id = ? AND s.organization_id = ? LIMIT 1",
+    ).bind(project.id, project.organizationId).first<{
+      runtimeProfileId: string; specVersion: number; nodePoolId: string | null;
+      runtimeEnabled: number; profileKey: string; runtimeFamily: string; buildMethod: string;
+      poolStatus: string | null; isolationLevel: string | null; runtimeEngine: string | null; assignedNodeId: string | null;
+    }>();
+  }
   // Fail closed: missing settings or any incomplete trust prerequisite blocks dispatch.
   if (!runtimeAssignment || !isRuntimeAssignmentAdmitted(runtimeAssignment)) {
     return jsonResponse({
-      message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
+      message: "Application deployment is not admitted yet: this project waits for an enabled static runtime assigned to a ready isolated or static-publishing pool with an online runtime node. The first build starts automatically once that prerequisite is met - no new push is required.",
     }, 409);
   }
   // The checked-in customer workflow currently stages static artifacts only.
@@ -8347,9 +8616,10 @@ async function dispatchGitHubDeployment(
     }, 409);
   }
   if (typeof project.outputDirectory !== "string" ||
-      !/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) ||
-      project.outputDirectory.startsWith("/") ||
-      project.outputDirectory.split("/").some((part) => part === "." || part === "..")) {
+      !(project.outputDirectory === "." ||
+        (/^[A-Za-z0-9._/-]{1,160}$/.test(project.outputDirectory) &&
+         !project.outputDirectory.startsWith("/") &&
+         !project.outputDirectory.split("/").some((part) => part === "." || part === "..")))) {
     return jsonResponse({ message: "Configure a valid relative static output directory before dispatching this deployment." }, 409);
   }
 
@@ -9219,14 +9489,15 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
   }
   const pool = await c.env.DB.prepare(
     "SELECT p.id FROM application_node_pools p " +
-    "WHERE p.id = ? AND p.status = 'ready' AND p.isolation_level IN ('rootless','microvm') " +
+    "WHERE p.id = ? AND p.status = 'ready' AND (p.isolation_level IN ('rootless','microvm') " +
+    "OR (p.runtime_engine = 'static' AND p.isolation_level = 'untrusted')) " +
     "AND EXISTS (SELECT 1 FROM application_nodes n WHERE n.node_pool_id = p.id " +
     "AND n.node_role = 'runtime' AND n.status = 'online' AND n.revoked_at IS NULL " +
     "AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
     "AND n.signing_public_key IS NOT NULL) LIMIT 1",
   ).bind(body.nodePoolId).first<{ id: string }>();
   if (!pool) {
-    return c.json({ message: "Runtime pool must be ready, isolated, and contain an enrolled online runtime node." }, 409);
+    return c.json({ message: "Runtime pool must be ready, isolated or static-publishing, and contain an enrolled online runtime node." }, 409);
   }
   const updated = await c.env.DB.prepare(
     "UPDATE application_project_settings SET node_pool_id = ?, updated_at = datetime('now') " +
@@ -9236,6 +9507,9 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
   if (Number(updated.meta?.changes ?? 0) !== 1) {
     return c.json({ message: "Runtime pool assignment changed concurrently or the project became active." }, 409);
   }
+  // With the pool bound, projects that never deployed are dispatched right
+  // away - the operator assignment is the last missing admission prerequisite.
+  await scheduleAdmissionBacklog(c, c.env, pool.id, "runtime_pool_assigned");
   return c.json({
     assigned: true,
     projectId,
@@ -9243,7 +9517,7 @@ app.post("/internal/v1/operator/application-projects/:projectId/runtime-pool", a
     previousNodePoolId: assignment.previousNodePoolId,
     executionEnabled: false,
     capacityAllocated: false,
-    message: "Runtime pool assigned as metadata. This does not start an application or allocate physical capacity.",
+    message: "Runtime pool assigned. Linked repositories without a deployment yet are dispatched automatically.",
   });
 });
 
@@ -9456,10 +9730,14 @@ app.post("/internal/v1/application-nodes/enroll", async (c) => {
     return c.json({ message: "Enrollment token is invalid, already consumed, or the node pool is not ready." }, 409);
   }
   const node = await c.env.DB.prepare(
-    "SELECT id, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
+    "SELECT id, node_pool_id AS nodePoolId, node_identity AS nodeIdentity, status, agent_version AS agentVersion " +
     "FROM application_nodes WHERE node_identity = ? LIMIT 1",
-  ).bind(body.nodeIdentity).first<{ id: string; nodeIdentity: string; status: string; agentVersion: string }>();
+  ).bind(body.nodeIdentity).first<{ id: string; nodePoolId: string | null; nodeIdentity: string; status: string; agentVersion: string }>();
   if (!node) return c.json({ message: "Node enrollment could not be confirmed." }, 500);
+  // The pool this node just joined may now satisfy admission for repositories
+  // that were linked while no runtime node was online. Fire the first-build
+  // backlog for those projects without blocking the enrollment response.
+  await scheduleAdmissionBacklog(c, c.env, node.nodePoolId, "runtime_node_enrolled");
   return c.json({ enrolled: true, node: { id: node.id, identity: node.nodeIdentity, status: node.status, agentVersion: node.agentVersion },
     credentialModel: "ed25519_per_node", executionEnabled: false });
 });

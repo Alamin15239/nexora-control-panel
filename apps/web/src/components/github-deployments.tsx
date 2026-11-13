@@ -541,7 +541,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700"><Rocket size={17} /></span>
             <div>
               <p className="text-sm font-bold text-amber-900">Public serving and rollback are still in acceptance</p>
-              <p className="mt-1 text-sm leading-6 text-amber-800">Repository configuration, manual dispatch, push/PR webhooks with preview deployments, environment variables, webhook secrets, and build logs are wired end to end. Public serving of deployment hostnames and one-click rollback remain gated until the isolated static publisher passes end-to-end acceptance on the production runtime.</p>
+              <p className="mt-1 text-sm leading-6 text-amber-800">Linking a repository auto-detects the app type, provisions its build contract, and dispatches the first build — immediately when a runtime node is serving, or automatically the moment one finishes acceptance; no new push is required. Push/PR webhooks with preview deployments, environment variables, webhook secrets, and build logs are wired end to end. Public serving of deployment hostnames and one-click rollback remain gated until the isolated static publisher passes end-to-end acceptance on the production runtime.</p>
             </div>
           </div>
           <p className="text-xs text-slate-400">Repository links are saved to the current workspace. <a href="https://github.com/settings/installations" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:underline">Manage GitHub App installations <ExternalLink size={11} /></a></p>

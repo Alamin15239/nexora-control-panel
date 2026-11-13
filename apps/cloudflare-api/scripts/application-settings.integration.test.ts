@@ -454,7 +454,7 @@ test("platform deployment dispatch rejects projects with no runtime assignment",
   );
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    message: "Application deployment is not admitted: configure an enabled runtime assigned to a ready isolated pool with an online runtime node.",
+    message: "Application deployment is not admitted yet: this project waits for an enabled static runtime assigned to a ready isolated or static-publishing pool with an online runtime node. The first build starts automatically once that prerequisite is met - no new push is required.",
   });
   assert.equal(db.writes, 0);
 });

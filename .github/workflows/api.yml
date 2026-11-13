@@ -74,6 +74,8 @@ jobs:
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-env-vars.integration.test.ts
       - name: Deploy platform webhook, preview, and promotion tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-webhooks.integration.test.ts
+      - name: Deploy platform automatic first-deployment (self-heal and backlog) tests
+        run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/github-deploy-selfheal.integration.test.ts
       - name: Deploy platform OIDC build-env injection and log proxy tests
         run: pnpm --filter @nexora/api exec tsx --test ../cloudflare-api/scripts/deploy-logs-oidc-env.integration.test.ts
       - name: MFA atomicity real-SQLite concurrency tests

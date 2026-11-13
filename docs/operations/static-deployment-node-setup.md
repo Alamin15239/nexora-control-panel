@@ -60,9 +60,17 @@ acceptance decision and is not authorized by a successful install or preflight.
 
 The first `nexora-server` target is a static file publisher, not an isolated application runtime or builder. Its pool must therefore remain `runtime_engine='static'` and `isolation_level='untrusted'`. Do not classify this VM as `rootless` or `microvm`: the root-owned Nginx vhost broker means the host itself is not a rootless isolation boundary, and it is not a microVM.
 
-The Worker admits an untrusted pool only when its runtime engine is explicitly `static`. The node can authenticate and process only releases whose project is configured for the enabled `static-v1` profile and `build_method='static'`. General desired-state polling, runtime-pool assignment, OCI/container execution, builder usage reporting, and arbitrary customer build execution continue to require a `rootless` or `microvm` pool. This is a static-publishing admission exception, not a claim of host isolation.
+The Worker admits an untrusted pool only when its runtime engine is explicitly `static`. The node can authenticate and process only releases whose project is configured for the enabled `static-v1` profile and `build_method='static'`. OCI/container execution, builder usage reporting, and arbitrary customer build execution continue to require a `rootless` or `microvm` pool; runtime-pool assignment and deployment admission share the same compound predicate as enrollment — `rootless`/`microvm` pools, or a pool that is explicitly `runtime_engine='static' AND isolation_level='untrusted'` (migration `0049_static_pool_project_assignment.sql` aligns the assignment guard triggers with that predicate). This is a static-publishing admission exception, not a claim of host isolation.
 
 Create the static pool as `provisioning` while preparing the node. After the reviewed binaries, trust files, account/domain bindings, service identities, and read-only preflight have passed, an authorized operator may mark that exact static pool `ready` so the one-time enrollment token can be issued. Do not create a pool with a rootless or microVM classification to bypass this gate. The operator enrollment endpoint accepts only a ready pool that is either explicitly isolated or explicitly `runtime_engine='static' AND isolation_level='untrusted'`.
+
+## Automatic first deployment
+
+Linked repositories deploy once connected, without a manual push or dispatch:
+
+1. Linking a repository auto-detects the framework, provisions the `application_project_settings` row from the saved framework contract (plan-clamped resource quotas included), and binds the best eligible ready pool — the same compound predicate the operator assignment endpoint uses, preferring static-publishing pools. The first build dispatches immediately when a runtime node is already online.
+2. When no runtime node is online yet, the linked repository stays `runtime acceptance pending`; nothing is lost. The moment a runtime node enrolls into the pool (or an operator assigns the pool to a project), the control plane sweeps the admission backlog and dispatches the first production deployment for every never-deployed, auto-deploy-enabled project bound to that pool.
+3. Any dispatch attempt also self-heals legacy links: missing runtime settings are re-created and a missing pool binding is assigned idempotently before the admission check re-runs. Admission itself still fails closed — a genuinely missing pool, node, or disabled profile produces a 409 and no build.
 
 Create the pool with a unique operator-generated ID before preparing the node. Keep it in `provisioning` during installation and preflight:
 
