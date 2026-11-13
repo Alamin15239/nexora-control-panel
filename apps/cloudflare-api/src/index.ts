@@ -6769,7 +6769,12 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
       permissions: { actions: "write", contents: "write", metadata: "read" },
     } : {}),
   });
-  if (!response.ok) throw new Error("Unable to mint a GitHub installation access token");
+  if (!response.ok) {
+    if (response.status === 403 || response.status === 422) {
+      throw new Error("Automatic repository setup requires Nexora GitHub App Contents: read and write and Actions: read and write permissions. Update the App permissions and approve the installation update.");
+    }
+    throw new Error("Unable to mint a GitHub installation access token");
+  }
   const data = await response.json() as { token?: string; expires_at?: string };
   if (!data.token || !data.expires_at || Date.parse(data.expires_at) <= Date.now()) throw new Error("GitHub returned an invalid installation token");
   return data.token;
