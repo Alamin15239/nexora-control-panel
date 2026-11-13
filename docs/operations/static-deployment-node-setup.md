@@ -1,6 +1,6 @@
 # Static deployment node trust and filesystem setup
 
-This is an operator runbook for a **disposable, explicitly approved static publisher node**. It does not authorize enrolling the existing development VM or enabling production deployments. Complete the architecture acceptance gates before running these commands.
+This is an operator runbook for a **non-production, explicitly approved static publisher test node**. The normal path is a disposable VM. The user-selected `nexora-server` may use the narrowly scoped `development-test` install path below, but this does not make it a production node or authorize customer deployments. Complete the architecture acceptance gates before starting either service.
 
 ## 0. Install reviewed binaries on an approved disposable node
 
@@ -21,7 +21,7 @@ bash scripts/install-static-deployment-node.sh --artifact-dir /path/to/reviewed-
 
 Applying requires all of the following: an explicitly disposable test node, a
 root-owned approval file with mode `0600`, an exact node identity match, and
-the explicit `--apply` flag. The approval file schema is exactly:
+the explicit `--apply` flag. For a disposable test VM, the approval file schema is exactly:
 
 ```json
 {
@@ -31,18 +31,39 @@ the explicit `--apply` flag. The approval file schema is exactly:
 }
 ```
 
-Create that approval file only through the authenticated operator process on
-the disposable test node. Never create it on the existing development VM
-(`nexora-server`) or a production host. The installer independently refuses
-the protected hostname `nexora-server`.
+The selected `nexora-server` has a separate, explicit development-test approval
+shape. Create it only through the authenticated operator process after confirming
+the exact node identity and that the purpose is a controlled test—not production:
 
-After the approval file and reviewed artifacts are present, the explicit
-installation command is:
+```json
+{
+  "environment": "development-test",
+  "node_identity": "YOUR_NEXORA_SERVER_NODE_ID",
+  "allow_static_publisher_install": true,
+  "allow_development_host_install": true
+}
+```
+
+This exception is restricted to the exact hostname `nexora-server` and requires
+both the `--development-test` command-line flag and the root-owned approval file.
+It does not enable services, enroll the node, change runtime-pool admission, enable
+`static-v1`, or authorize customer workloads. Never use this approval shape on a
+production host.
+
+For a disposable VM, use:
 
 ```sh
 sudo bash scripts/install-static-deployment-node.sh \
   --artifact-dir /path/to/reviewed-artifacts \
   --node-id YOUR_APPROVED_NODE_ID --apply
+```
+
+For the explicitly selected `nexora-server` development-test install only, use:
+
+```sh
+sudo bash scripts/install-static-deployment-node.sh \
+  --artifact-dir /path/to/reviewed-artifacts \
+  --node-id YOUR_NEXORA_SERVER_NODE_ID --development-test --apply
 ```
 
 The installer creates/verifies the dedicated service identity and data
