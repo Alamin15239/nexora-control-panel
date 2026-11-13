@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan-first installer for an explicitly approved disposable static node.
+# Plan-first installer for an explicitly approved non-production static test node.
 # It never installs secrets and never starts, enables, or reloads services.
 set -Eeuo pipefail
 MODE=plan
@@ -127,4 +127,8 @@ install -D -o root -g root -m 0755 "$ARTIFACT_DIR/nexora-static-vhostd" /usr/loc
 install -D -o root -g root -m 0755 "$ARTIFACT_DIR/nexora-static-publisher" /usr/local/bin/nexora-static-publisher
 install -D -o root -g root -m 0644 "$ARTIFACT_DIR/nexora-static-vhostd.service" /etc/systemd/system/nexora-static-vhostd.service
 install -D -o root -g root -m 0644 "$ARTIFACT_DIR/nexora-static-publisher.service" /etc/systemd/system/nexora-static-publisher.service
-printf 'Installed on approved disposable node %s. Services remain stopped and disabled.\n' "$NODE_ID"
+if [[ "$DEVELOPMENT_TEST" == "1" ]]; then
+  printf 'Installed on approved development-test node %s. Services remain stopped and disabled.\n' "$NODE_ID"
+else
+  printf 'Installed on approved disposable-test node %s. Services remain stopped and disabled.\n' "$NODE_ID"
+fi
