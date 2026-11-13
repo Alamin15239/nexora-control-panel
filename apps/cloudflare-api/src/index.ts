@@ -6132,11 +6132,18 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "INSERT INTO application_workloads " +
       "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
-      "VALUES (?, ?, ?, ?, ?, 'web', 'healthy', 1, 1) " +
-      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "SELECT ?, ?, ?, ?, ?, 'web', 'healthy', 1, 1 " +
+      "WHERE EXISTS (SELECT 1 FROM application_releases r " +
+      "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "WHERE r.id = ? AND r.state = 'succeeded' AND r.artifact_digest = ? " +
+      "AND r.assigned_node_id = ? AND r.node_pool_id = ? AND s.build_method = 'static' " +
+      "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1)" + activeNodePredicate +
+      " ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
       "active_release_id = excluded.active_release_id, node_id = excluded.node_id, status = 'healthy', " +
       "desired_replicas = 1, observed_replicas = 1, updated_at = datetime('now')",
-    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id),
+    ).bind(crypto.randomUUID(), release.organizationId, release.projectId, release.releaseRowId, node.id,
+      release.releaseRowId, body.artifactSha256, node.id, node.nodePoolId, ...commonNodeArgs),
     c.env.DB.prepare(
       "UPDATE github_deployments SET status = 'succeeded', finished_at = datetime('now'), " +
       "log_excerpt = 'Application health check succeeded.' " +
@@ -6162,14 +6169,21 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
     c.env.DB.prepare(
       "INSERT INTO application_workloads " +
       "(id, organization_id, project_id, active_release_id, node_id, workload_kind, status, desired_replicas, observed_replicas) " +
-      "VALUES (?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0) " +
-      "ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
+      "SELECT ?, ?, ?, ?, ?, 'web', 'unhealthy', 1, 0 " +
+      "WHERE EXISTS (SELECT 1 FROM application_releases r " +
+      "JOIN application_project_settings s ON s.project_id = r.project_id AND s.organization_id = r.organization_id " +
+      "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "WHERE r.id = ? AND r.state = 'failed' AND r.artifact_digest = ? " +
+      "AND r.assigned_node_id = ? AND r.node_pool_id = ? AND s.build_method = 'static' " +
+      "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.enabled = 1)" + activeNodePredicate +
+      " ON CONFLICT(organization_id, project_id, workload_kind) DO UPDATE SET " +
       "status = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
       "THEN application_workloads.status ELSE 'unhealthy' END, " +
       "observed_replicas = CASE WHEN application_workloads.active_release_id IS NOT NULL " +
       "THEN application_workloads.observed_replicas ELSE 0 END, updated_at = datetime('now')",
     ).bind(crypto.randomUUID(), release.organizationId, release.projectId,
-      release.previousActiveReleaseId, release.previousActiveNodeId ?? node.id),
+      release.previousActiveReleaseId, release.previousActiveNodeId ?? node.id,
+      release.releaseRowId, body.artifactSha256, node.id, node.nodePoolId, ...commonNodeArgs),
     c.env.DB.prepare(
       "UPDATE github_deployments SET status = 'failed', finished_at = datetime('now'), " +
       "log_excerpt = 'Application health check failed.' " +
