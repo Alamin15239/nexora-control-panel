@@ -158,6 +158,10 @@ test("static pending poll returns only well-formed assigned releases and same-no
   assert.match(rollbackQuery, /failed\.state = 'failed'/);
   assert.match(rollbackQuery, /target\.state = 'succeeded'/);
   assert.match(rollbackQuery, /target\.assigned_node_id = \?/);
+  assert.match(rollbackQuery, /rp\.profile_key = 'static-v1'/);
+  assert.match(rollbackQuery, /rp\.runtime_family = 'static'/);
+  assert.match(rollbackQuery, /pool\.runtime_engine = 'static'/);
+  assert.match(rollbackQuery, /pool\.isolation_level = 'untrusted'/);
   assert.match(rollbackQuery, /NOT EXISTS \(SELECT 1 FROM application_rollback_acknowledgements/);
 });
 
