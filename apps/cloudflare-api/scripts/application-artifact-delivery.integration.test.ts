@@ -21,6 +21,7 @@ class ArtifactD1 {
   };
   release = {
     releaseId: "release-a",
+    staticProfileEnabled: true,
     organizationId: "org-a",
     projectId: "project-a",
     deploymentId: "deployment-a",
