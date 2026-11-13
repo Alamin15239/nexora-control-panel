@@ -172,7 +172,7 @@ Run the repository's read-only preflight after installing the reviewed binaries,
 sudo bash scripts/preflight-static-deployment-node.sh
 ```
 
-The preflight checks service identities and group membership, exact file ownership/modes, both copies of the deployment public key, matching issuer/audience/key ID, NSS UID mappings, unique account/domain bindings, Nginx traversal, `nginx -t`, and systemd unit validity. It does not create or modify files and never starts, stops, enables, or reloads services. A non-zero exit means the node is not ready; correct the issue through the approved operator process and rerun it. A successful preflight is necessary but does not replace the disposable-hostname deployment, health, rollback, or Cloudflare-path acceptance tests.
+The preflight checks service identities and group membership, exact file ownership/modes, both copies of the deployment public key, matching issuer/audience/key ID, NSS UID mappings, unique account/domain bindings, Nginx traversal, `nginx -t`, and systemd unit validity. It does not create or modify files and never starts, stops, enables, or reloads services. A non-zero exit means the node is not ready; correct the issue through the approved operator process and rerun it. A successful preflight is necessary but does not replace the first controlled production deployment, health, rollback, or Cloudflare-path verification.
 
 Do not enable the services until all of the following are true:
 
@@ -180,7 +180,7 @@ Do not enable the services until all of the following are true:
 - The enrolled node identity and publisher configuration are verified.
 - The node is explicitly approved for static publishing and has the required filesystem layout.
 - The broker socket peer-UID test, signed-envelope tests, race tests, and full Linux-agent CI pass.
-- A disposable-VM test proves the exact hostname returns the expected release over HTTP and that a failed Nginx reload restores the previous config.
+- The first controlled production deployment uses a dedicated low-risk hostname, proves the expected release is served over HTTP/HTTPS through Cloudflare, and verifies that a failed health check restores the previous release and Nginx configuration.
 - Health reporting and rollback orchestration are tested end to end.
 
 ## 5. Key rotation
