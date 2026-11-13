@@ -3,6 +3,7 @@ import { ensureSaasDnsRecord } from "./cloudflare-dns";
 import { createDnsRecord, deleteDnsRecord, listDnsRecords, updateDnsRecord } from "./dns-records";
 import { pruneFailedDeploymentArtifacts } from "./artifact-retention";
 import { isRuntimeAssignmentAdmitted } from "./runtime-admission";
+import { NEXORA_DEPLOY_WORKFLOW } from "./github-deploy-workflow";
 
 type Bindings = {
   DB: D1Database;
@@ -6765,7 +6766,7 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
     },
     body: JSON.stringify(repositoryId ? {
       repository_ids: [Number(repositoryId)],
-      permissions: { actions: "write", contents: "read", metadata: "read" },
+      permissions: { actions: "write", contents: "write", metadata: "read" },
     } : {}),
   });
   if (!response.ok) throw new Error("Unable to mint a GitHub installation access token");
@@ -6794,6 +6795,65 @@ async function githubApi(token: string, path: string): Promise<Response> {
       "User-Agent": "Nexora-Control-Panel",
     },
   });
+}
+
+const NEXORA_DEPLOY_WORKFLOW_PATH = ".github/workflows/nexora-deploy.yml";
+
+async function ensureNexoraDeploymentWorkflow(
+  token: string, repositoryFullName: string, branch: string,
+): Promise<{ workflowSha: string; created: boolean }> {
+  const repository = repositoryFullName.split("/").map(encodeURIComponent).join("/");
+  const path = NEXORA_DEPLOY_WORKFLOW_PATH.split("/").map(encodeURIComponent).join("/");
+  const contentPath = `/repos/${repository}/contents/${path}?ref=${encodeURIComponent(branch)}`;
+  const existing = await githubApi(token, contentPath);
+  if (existing.ok) {
+    const file = await existing.json() as { type?: string; encoding?: string; content?: string };
+    if (file.type !== "file" || file.encoding !== "base64" || typeof file.content !== "string") {
+      throw new Error("The existing Nexora workflow could not be verified.");
+    }
+    const decoded = new TextDecoder().decode(Uint8Array.from(atob(file.content.replace(/\\s/g, "")), c => c.charCodeAt(0)));
+    if (decoded.replace(/\\r\\n/g, "\\n") !== NEXORA_DEPLOY_WORKFLOW.replace(/\\r\\n/g, "\\n")) {
+      throw new Error("A different workflow already uses .github/workflows/nexora-deploy.yml. It was left untouched; review or rename it before linking.");
+    }
+    const commits = await githubApi(token, `/repos/${repository}/commits?path=${encodeURIComponent(NEXORA_DEPLOY_WORKFLOW_PATH)}&sha=${encodeURIComponent(branch)}&per_page=1`);
+    if (!commits.ok) throw new Error("Unable to pin the existing Nexora workflow revision.");
+    const rows = await commits.json() as Array<{ sha?: string }>;
+    const workflowSha = rows[0]?.sha ?? "";
+    if (!/^[a-f0-9]{40}$/i.test(workflowSha)) throw new Error("GitHub did not return a valid Nexora workflow commit.");
+    return { workflowSha: workflowSha.toLowerCase(), created: false };
+  }
+  if (existing.status !== 404) {
+    throw new Error(existing.status === 403
+      ? "GitHub denied repository workflow access. Grant the Nexora App Contents: read and write permission, then update its installation."
+      : "Unable to inspect the repository workflow before setup.");
+  }
+  const bytes = new TextEncoder().encode(NEXORA_DEPLOY_WORKFLOW);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const created = await fetch(`https://api.github.com/repos/${repository}/contents/${path}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "Nexora-Control-Panel",
+    },
+    body: JSON.stringify({
+      message: "chore: add Nexora deployment workflow",
+      content: btoa(binary),
+      branch,
+    }),
+  });
+  if (!created.ok) {
+    throw new Error(created.status === 403
+      ? "Automatic setup needs Nexora GitHub App Contents: read and write permission. Update the App permission and reinstall/update the installation."
+      : "GitHub could not add the Nexora deployment workflow to this repository.");
+  }
+  const payload = await created.json() as { commit?: { sha?: string } };
+  const workflowSha = payload.commit?.sha ?? "";
+  if (!/^[a-f0-9]{40}$/i.test(workflowSha)) throw new Error("GitHub did not return the workflow commit SHA.");
+  return { workflowSha: workflowSha.toLowerCase(), created: true };
 }
 
 type GithubApiDetail = {
@@ -7161,16 +7221,42 @@ app.post("/v1/github/projects", async (c) => {
     if (repo.id !== repositoryId || repo.full_name?.toLowerCase() !== repositoryFullName.toLowerCase()) {
       return c.json({ message: "Repository does not belong to the selected Nexora GitHub App installation." }, 400);
     }
+    const productionBranch = branch || repo.default_branch || "main";
+    const workflow = await ensureNexoraDeploymentWorkflow(token, repo.full_name, productionBranch);
     const id = crypto.randomUUID();
     await c.env.DB.prepare(
-      `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, auto_deploy, status)
-       VALUES (?, ?, ?, (SELECT id FROM github_connections WHERE organization_id = ?), ?, ?, ?, ?, ?, ?, ?, 1, 'configured')`
-    ).bind(id, identity.organizationId, hostingAccountId, identity.organizationId, String(repositoryId), repo.full_name, String(installationId), branch || repo.default_branch || "main", rootDirectory || ".", outputDirectory || "dist", framework).run();
+      `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, auto_deploy, status, trusted_workflow_sha)
+       VALUES (?, ?, ?, (SELECT id FROM github_connections WHERE organization_id = ?), ?, ?, ?, ?, ?, ?, ?, 1, 'configured', ?)`
+    ).bind(id, identity.organizationId, hostingAccountId, identity.organizationId, String(repositoryId), repo.full_name, String(installationId), productionBranch, rootDirectory || ".", outputDirectory || "dist", framework, workflow.workflowSha).run();
     await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.project_configured', 'github_project', ?, ?)")
-      .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ repository: repo.full_name, hostingAccountId })).run();
-    return c.json({ project: { id, repositoryFullName: repo.full_name, productionBranch: branch || repo.default_branch || "main", framework, outputDirectory, status: "configured" }, message: "Repository linked. Automatic production deploys are enabled for pushes to the selected branch; the first build will start when the repository workflow and isolated runtime are accepted." }, 201);
+      .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ repository: repo.full_name, hostingAccountId, workflowProvisioned: workflow.created, trustedWorkflowSha: workflow.workflowSha })).run();
+    const initial = await dispatchGitHubDeployment(c.env, {
+      project: {
+        id, organizationId: identity.organizationId, repositoryId: String(repositoryId),
+        repositoryFullName: repo.full_name, installationId: String(installationId),
+        productionBranch, trustedWorkflowSha: workflow.workflowSha, status: "configured", outputDirectory,
+      },
+      deploymentKind: "production", branch: productionBranch, triggerType: "manual",
+      actorType: "user", actorId: identity.id, detailSource: "repository_link",
+    });
+    let initialResult: unknown = null;
+    try { initialResult = await initial.clone().json(); } catch { initialResult = null; }
+    const initialAccepted = initial.status === 202;
+    return c.json({
+      project: { id, repositoryFullName: repo.full_name, productionBranch, framework, outputDirectory, status: "configured", autoDeploy: true, trustedWorkflowSha: workflow.workflowSha },
+      workflow: { provisioned: true, created: workflow.created },
+      initialDeployment: { accepted: initialAccepted, ...(initialResult && typeof initialResult === "object" ? initialResult as Record<string, unknown> : {}) },
+      message: initialAccepted
+        ? "Repository linked. Nexora installed and pinned its deployment workflow, started the first deployment, and enabled automatic production deploys for future pushes."
+        : "Repository linked and the Nexora workflow is installed and pinned. Automatic production deploys are enabled; the first deployment is waiting for runtime admission to pass.",
+    }, 201);
   } catch (error) {
-    const message = error instanceof Error && /UNIQUE constraint failed/.test(error.message) ? "This hosting account already has a GitHub project linked." : "Unable to configure the GitHub project.";
+    const detail = error instanceof Error ? error.message : "";
+    const message = /UNIQUE constraint failed/.test(detail)
+      ? "This hosting account already has a GitHub project linked."
+      : detail.startsWith("Automatic setup") || detail.startsWith("A different workflow") || detail.startsWith("The existing Nexora workflow") || detail.startsWith("Unable to ") || detail.startsWith("GitHub ")
+        ? detail
+        : "Unable to configure the GitHub project.";
     return c.json({ message }, 409);
   }
 });
