@@ -23,6 +23,7 @@ type Bindings = {
   DEPLOY_DOMAIN?: string;
   GITHUB_APP_ID?: string;
   GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_APP_WEBHOOK_SECRET?: string;
   GITHUB_APP_SLUG?: string;
   GITHUB_OIDC_AUDIENCE?: string;
   GITHUB_DEPLOYMENT_ENVELOPE_PRIVATE_KEY?: string;
@@ -7162,12 +7163,12 @@ app.post("/v1/github/projects", async (c) => {
     }
     const id = crypto.randomUUID();
     await c.env.DB.prepare(
-      `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, status)
-       VALUES (?, ?, ?, (SELECT id FROM github_connections WHERE organization_id = ?), ?, ?, ?, ?, ?, ?, ?, 'configured')`
+      `INSERT INTO github_projects (id, organization_id, hosting_account_id, github_connection_id, github_repository_id, repository_full_name, github_installation_id, production_branch, root_directory, output_directory, framework, auto_deploy, status)
+       VALUES (?, ?, ?, (SELECT id FROM github_connections WHERE organization_id = ?), ?, ?, ?, ?, ?, ?, ?, 1, 'configured')`
     ).bind(id, identity.organizationId, hostingAccountId, identity.organizationId, String(repositoryId), repo.full_name, String(installationId), branch || repo.default_branch || "main", rootDirectory || ".", outputDirectory || "dist", framework).run();
     await c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'github.project_configured', 'github_project', ?, ?)")
       .bind(crypto.randomUUID(), identity.organizationId, identity.id, id, JSON.stringify({ repository: repo.full_name, hostingAccountId })).run();
-    return c.json({ project: { id, repositoryFullName: repo.full_name, productionBranch: branch || repo.default_branch || "main", framework, outputDirectory, status: "configured" }, message: "Repository linked. Build execution will be enabled after the isolated build worker is deployed." }, 201);
+    return c.json({ project: { id, repositoryFullName: repo.full_name, productionBranch: branch || repo.default_branch || "main", framework, outputDirectory, status: "configured" }, message: "Repository linked. Automatic production deploys are enabled for pushes to the selected branch; the first build will start when the repository workflow and isolated runtime are accepted." }, 201);
   } catch (error) {
     const message = error instanceof Error && /UNIQUE constraint failed/.test(error.message) ? "This hosting account already has a GitHub project linked." : "Unable to configure the GitHub project.";
     return c.json({ message }, 409);
@@ -8483,23 +8484,37 @@ app.post("/v1/github/webhooks", async (c) => {
     outputDirectory: string; webhookSecretEncrypted: string | null; webhookSecretIv: string | null;
   }>();
 
-  // Verify the signature against each candidate project's secret. Only a
-  // verified delivery is attributed and recorded.
+  // Prefer the GitHub App's single installation-wide webhook secret. This
+  // lets every repository granted to the Nexora App deploy without creating
+  // a separate webhook or secret for each project. Keep per-project HMAC as
+  // a backwards-compatible fallback for existing integrations.
   let verified: (typeof candidates.results)[number] | null = null;
   if (signatureHeader.startsWith("sha256=")) {
     const provided = signatureHeader.slice("sha256=".length).toLowerCase();
-    for (const candidate of candidates.results ?? []) {
-      if (!candidate.webhookSecretEncrypted || !candidate.webhookSecretIv) continue;
-      let secret: string;
-      try {
-        secret = await decryptGithubToken(c.env, candidate.webhookSecretEncrypted, candidate.webhookSecretIv);
-      } catch {
-        continue;
-      }
-      const expected = await hmacSha256(secret, rawBody);
+    const installation = payload.installation as { id?: unknown } | undefined;
+    const installationId = installation && (typeof installation.id === "number" || typeof installation.id === "string")
+      ? String(installation.id) : null;
+    const appSecret = c.env.GITHUB_APP_WEBHOOK_SECRET ?? "";
+    if (appSecret && installationId) {
+      const expected = await hmacSha256(appSecret, rawBody);
       if (constantTimeEqual(expected, provided)) {
-        verified = candidate;
-        break;
+        verified = (candidates.results ?? []).find((candidate) => candidate.installationId === installationId) ?? null;
+      }
+    }
+    if (!verified) {
+      for (const candidate of candidates.results ?? []) {
+        if (!candidate.webhookSecretEncrypted || !candidate.webhookSecretIv) continue;
+        let secret: string;
+        try {
+          secret = await decryptGithubToken(c.env, candidate.webhookSecretEncrypted, candidate.webhookSecretIv);
+        } catch {
+          continue;
+        }
+        const expected = await hmacSha256(secret, rawBody);
+        if (constantTimeEqual(expected, provided)) {
+          verified = candidate;
+          break;
+        }
       }
     }
   }
