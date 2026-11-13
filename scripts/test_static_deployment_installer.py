@@ -45,13 +45,18 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
     def test_apply_is_explicitly_approved_and_non_activating(self):
         source = SCRIPT.read_text(encoding="utf-8")
         for required in (
-            "MODE=plan", "--apply", "--node-id", "--development-test", "/etc/nexora-static-node/approval.json",
+            "MODE=plan", "--apply", "--node-id", "--development-test", "--production-node", "/etc/nexora-static-node/approval.json",
             'approval.get("environment") == "disposable-test"', "allow_static_publisher_install",
             "Refusing nexora-server install without explicit --development-test approval",
             "--development-test is restricted to the exact host nexora-server",
             'approval.get("environment") == "development-test"',
             'approval.get("allow_development_host_install") is True',
             "allow_development_host_install",
+            'approval.get("environment") == "production"',
+            'approval.get("allow_production_node_install") is True',
+            "allow_production_node_install",
+            "--production-node",
+            "production node",
             "root:root:600", "Refusing to overwrite existing target",
             "Group=www-data", "SupplementaryGroups=nexora-static",
             "runtime_gecos runtime_home runtime_shell",
