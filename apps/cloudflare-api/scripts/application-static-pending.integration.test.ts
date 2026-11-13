@@ -70,6 +70,7 @@ class StaticPendingD1 {
         return { results: [] as T[] };
       },
       async run() {
+        db.queries.push(query);
         if (query.includes("INSERT OR IGNORE INTO application_node_request_nonces")) {
           const nonce = String(values[1]);
           if (db.nonces.has(nonce)) return { success: true, meta: { changes: 0 } };
