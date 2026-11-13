@@ -5384,9 +5384,10 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     healthCheckPath: string; targetArtifactSha256: string;
   }>();
   await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
-    "WHERE id = ? AND node_identity = ? AND status = 'online' AND revoked_at IS NULL",
-  ).bind(node.id, nodeIdentity).run();
+    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
+    "AND revoked_at IS NULL AND signing_public_key = ?",
+  ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
   return c.json({
     nodeIdentity,
     polledAt: new Date().toISOString(),
@@ -5580,7 +5581,7 @@ app.post("/internal/v1/application-nodes/artifact", async (c) => {
   ).bind(node.id, nodeIdentity, node.signingPublicKey).first<{ id: string }>();
   if (!stillEligible) return c.json({ message: "Runtime node or isolated pool became ineligible during artifact delivery." }, 409);
   await c.env.DB.prepare(
-    "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+    "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
     "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
     "AND revoked_at IS NULL AND signing_public_key = ?",
   ).bind(node.id, nodeIdentity, node.signingPublicKey).run();
@@ -5735,7 +5736,7 @@ app.post("/internal/v1/application-nodes/releases/validated", async (c) => {
       "FROM application_releases WHERE id = ? AND state = 'publishing'" + activeNodePredicate,
     ).bind(crypto.randomUUID(), node.id, details, release.releaseId, node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
@@ -5897,7 +5898,7 @@ app.post("/internal/v1/application-nodes/releases/activated", async (c) => {
     ).bind(crypto.randomUUID(), node.id, details, release.releaseId, body.artifactSha256,
       node.id, nodeIdentity, node.signingPublicKey),
     c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
@@ -6142,7 +6143,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
     ).bind(body.deploymentId, release.organizationId, release.projectId),
     c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
@@ -6175,7 +6176,7 @@ app.post("/internal/v1/application-nodes/releases/health-check", async (c) => {
       "WHERE id = ? AND organization_id = ? AND project_id = ? AND status = 'building'",
     ).bind(body.deploymentId, release.organizationId, release.projectId),
     c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND status = 'online' AND node_role = 'runtime' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
@@ -6391,7 +6392,7 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     ).bind(crypto.randomUUID(), binding.organizationId, binding.targetReleaseId, node.id, details,
       body.operationId, node.id, binding.targetReleaseId, binding.targetReleaseId, details),
     c.env.DB.prepare(
-      "UPDATE application_nodes SET last_signature_at = datetime('now'), updated_at = datetime('now') " +
+      "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
       "AND revoked_at IS NULL AND signing_public_key = ?",
     ).bind(node.id, nodeIdentity, node.signingPublicKey),
