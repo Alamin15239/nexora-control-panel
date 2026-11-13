@@ -5369,7 +5369,6 @@ app.get(STATIC_PENDING_RELEASES_PATH, async (c) => {
     "JOIN hosting_accounts ha ON ha.id = p.hosting_account_id AND ha.organization_id = p.organization_id AND ha.status = 'ACTIVE' " +
     "JOIN domains dom ON dom.id = (SELECT d2.id FROM domains d2 WHERE d2.hosting_account_id = ha.id " +
     "ORDER BY d2.is_primary DESC, d2.name ASC LIMIT 1) " +
-    "JOIN application_project_settings s ON s.project_id = failed.project_id AND s.organization_id = failed.organization_id " +
     "WHERE failed.assigned_node_id = ? AND failed.node_pool_id = ? AND failed.state = 'failed' " +
     "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' " +
     "AND rp.runtime_family = 'static' AND rp.enabled = 1 " +
