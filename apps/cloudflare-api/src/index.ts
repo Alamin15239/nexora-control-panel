@@ -3649,15 +3649,23 @@ app.post("/v1/provisioning-jobs/:id/retry", async (c) => {
   if (activeJob) return c.json({ message: "A job with the same idempotency key is already queued or running." }, 409);
   const jobId = crypto.randomUUID();
   const retryKey = `${job.idempotencyKey}:retry-${job.attempts + 1}`;
-  await c.env.DB.batch([
+  const retryStatements = [
     c.env.DB.prepare(
       `INSERT INTO provisioning_jobs (id, hosting_account_id, operation, status, idempotency_key, attempts, request_payload)
        VALUES (?, ?, ?, 'QUEUED', ?, 0, ?)`,
     ).bind(jobId, job.hostingAccountId, job.operation, retryKey, job.requestPayload),
+    // A failed CREATE_HOSTING_ACCOUNT leaves the account in FAILED; moving it
+    // back to PENDING keeps the inventory honest while the retry is in flight.
+    ...(job.operation === "CREATE_HOSTING_ACCOUNT" ? [
+      c.env.DB.prepare(
+        "UPDATE hosting_accounts SET status = 'PENDING', updated_at = datetime('now') WHERE id = ? AND status = 'FAILED'",
+      ).bind(job.hostingAccountId),
+    ] : []),
     c.env.DB.prepare(
       "INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'provisioning_job.retried', 'provisioning_job', ?, ?)",
     ).bind(crypto.randomUUID(), job.organizationId, identity.id, job.id, JSON.stringify({ newJobId: jobId, operation: job.operation, attempt: job.attempts + 1 })),
-  ]);
+  ];
+  await c.env.DB.batch(retryStatements);
   return c.json({ success: true, jobId, idempotencyKey: retryKey, message: "Retry queued. The agent will claim it with the next poll." }, 201);
 });
 
@@ -3666,6 +3674,8 @@ type HostingAccountRow = {
   id: string; username: string; primary_domain: string | null; status: string;
   created_at: string; server_id: string; server_hostname: string;
   plan_id: string; plan_name: string; job_status: string | null;
+  job_id: string | null; error_code: string | null; error_message: string | null;
+  job_attempts: number | null;
 };
 
 function validDomain(value: string): boolean {
@@ -4402,21 +4412,33 @@ app.delete("/v1/hosting-accounts/:id", async (c) => {
     "SELECT id, username, status FROM hosting_accounts WHERE id = ? AND organization_id = ? LIMIT 1",
   ).bind(c.req.param("id"), identity.organizationId).first<{ id: string; username: string; status: string }>();
   if (!account || account.status === "DELETED") return c.json({ message: "Hosting account not found." }, 404);
-  if (account.status !== "PENDING") return c.json({ message: "This account has progressed beyond the safe pre-provisioning stage. Active or partially provisioned Linux accounts require the agent-backed deprovisioning workflow; no data has been changed." }, 409);
+  // PENDING: never provisioned. FAILED: the agent refused or errored, so the
+  // account is unusable — deletion must stay possible (bugfix: the previous
+  // guard treated FAILED as "finished" and blocked deletion forever).
+  const deletable = account.status === "PENDING" || account.status === "FAILED";
+  if (!deletable) return c.json({ message: "This account has progressed beyond the safe pre-provisioning stage. Active or partially provisioned Linux accounts require the agent-backed deprovisioning workflow; no data has been changed." }, 409);
   const jobs = await c.env.DB.prepare(
     "SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' ORDER BY requested_at DESC LIMIT 1",
   ).bind(account.id).first<{ id: string; status: string }>();
-  if (jobs && jobs.status !== "QUEUED" && jobs.status !== "CANCELLED") {
-    return c.json({ message: "The provisioning job is already running or finished. Wait for it to stop or complete before deletion." }, 409);
+  if (jobs && jobs.status === "RUNNING") {
+    return c.json({ message: "The provisioning job is currently running. Wait for it to finish before deleting the account." }, 409);
   }
   const now = new Date().toISOString();
+  // Free the UNIQUE(server_id, username) slot: the soft-deleted row keeps its
+  // audit trail under a tombstoned username, so the same username can be
+  // re-created on this server immediately after a failed attempt.
+  const tombstonedUsername = `${account.username}-deleted-${account.id.slice(0, 8)}`;
+  const auditAction = account.status === "FAILED" ? "hosting_account.failed_provisioning_deleted" : "hosting_account.cancelled_before_provisioning";
+  const auditMessage = account.status === "FAILED"
+    ? "Failed provisioning attempt removed. The username is freed; any partial Linux-side state is left untouched and is verified on any future provision."
+    : "Unprovisioned hosting account removed. No Linux account or website data was present to delete.";
   await c.env.DB.batch([
     c.env.DB.prepare("UPDATE provisioning_jobs SET status = 'CANCELLED', finished_at = ? WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT' AND status = 'QUEUED'").bind(now, account.id),
     c.env.DB.prepare("UPDATE hosting_account_memberships SET status = 'REVOKED', updated_at = ? WHERE hosting_account_id = ? AND organization_id = ?").bind(now, account.id, identity.organizationId),
-    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'DELETED', updated_at = ? WHERE id = ? AND organization_id = ? AND status = 'PENDING'").bind(now, account.id, identity.organizationId),
-    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, 'hosting_account.cancelled_before_provisioning', 'hosting_account', ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, account.id, JSON.stringify({ username: account.username })),
+    c.env.DB.prepare("UPDATE hosting_accounts SET status = 'DELETED', username = ?, updated_at = ? WHERE id = ? AND organization_id = ? AND status IN ('PENDING','FAILED')").bind(tombstonedUsername, now, account.id, identity.organizationId),
+    c.env.DB.prepare("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, resource_type, resource_id, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), identity.organizationId, identity.id, auditAction, "hosting_account", account.id, JSON.stringify({ username: account.username, tombstonedUsername, status: account.status })),
   ]);
-  return c.json({ deleted: true, message: "Unprovisioned hosting account removed. No Linux account or website data was present to delete." });
+  return c.json({ deleted: true, message: auditMessage });
 });
 
 app.get("/v1/hosting-accounts", async (c) => {
@@ -4428,7 +4450,19 @@ app.get("/v1/hosting-accounts", async (c) => {
             a.plan_id, p.name AS plan_name,
             (SELECT j.status FROM provisioning_jobs j
              WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
-             ORDER BY j.requested_at DESC LIMIT 1) AS job_status
+             ORDER BY j.requested_at DESC LIMIT 1) AS job_status,
+            (SELECT j.id FROM provisioning_jobs j
+             WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
+             ORDER BY j.requested_at DESC LIMIT 1) AS job_id,
+            (SELECT j.error_code FROM provisioning_jobs j
+             WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
+             ORDER BY j.requested_at DESC LIMIT 1) AS error_code,
+            (SELECT j.error_message FROM provisioning_jobs j
+             WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
+             ORDER BY j.requested_at DESC LIMIT 1) AS error_message,
+            (SELECT j.attempts FROM provisioning_jobs j
+             WHERE j.hosting_account_id = a.id AND j.operation = 'CREATE_HOSTING_ACCOUNT'
+             ORDER BY j.requested_at DESC LIMIT 1) AS job_attempts
      FROM hosting_accounts a
      JOIN servers s ON s.id = a.server_id
      JOIN hosting_plans p ON p.id = a.plan_id

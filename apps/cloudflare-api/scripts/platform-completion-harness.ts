@@ -88,7 +88,7 @@ class PlatformCompletionD1 {
   }>();
   accounts = new Map<string, {
     id: string; organizationId: string; serverId: string; planId: string;
-    username: string; status: string; primaryDomain: string | null;
+    username: string; status: string; primaryDomain: string | null; createdAt: string;
   }>();
   hostingAccountMemberships = new Map<string, {
     hostingAccountId: string; organizationId: string; userId: string; role: string; status: string;
@@ -152,7 +152,7 @@ class PlatformCompletionD1 {
     this.servers.set(SERVER_1, { id: SERVER_1, hostname: "node1.nexora.test", status: "ONLINE", lastHeartbeatAt: now });
     this.plans.set(PLAN_BASIC, { id: PLAN_BASIC, organizationId: ORG_A, name: "Basic", websiteLimit: 2, databaseLimit: 2, mailboxLimit: 1, active: 1, priceSarMinor: 1500 });
     this.plans.set(PLAN_SMALL, { id: PLAN_SMALL, organizationId: ORG_A, name: "Small", websiteLimit: 1, databaseLimit: 1, mailboxLimit: 0, active: 1, priceSarMinor: 800 });
-    this.accounts.set(ACCOUNT_1, { id: ACCOUNT_1, organizationId: ORG_A, serverId: SERVER_1, planId: PLAN_BASIC, username: "acme01", status: "ACTIVE", primaryDomain: "acme01.test" });
+    this.accounts.set(ACCOUNT_1, { id: ACCOUNT_1, organizationId: ORG_A, serverId: SERVER_1, planId: PLAN_BASIC, username: "acme01", status: "ACTIVE", primaryDomain: "acme01.test", createdAt: isoInDays(-2) });
     this.hostingAccountMemberships.set(`${ACCOUNT_1}:${MEMBER_A}`, { hostingAccountId: ACCOUNT_1, organizationId: ORG_A, userId: MEMBER_A, role: "ACCOUNT_OWNER", status: "ACTIVE" });
     for (const [tokenHash] of this.sessions) {
       const session = this.sessions.get(tokenHash)!;
@@ -243,12 +243,37 @@ class PlatformCompletionD1 {
       const membership = this.memberships.get(`${userId}:${orgId}`);
       return (membership ? { role: membership.role } : null) as T;
     }
+    // hosting account delete-route lookup (needs username + status)
+    if (query.includes("SELECT id, username, status FROM hosting_accounts WHERE id = ?")) {
+      const account = this.accounts.get(String(values[0]));
+      if (!account || account.organizationId !== String(values[1])) return null as T;
+      return ({ id: account.id, username: account.username, status: account.status }) as T;
+    }
     // hosting account existence/ownership lookup (email domain link, etc.)
     if (query.includes("FROM hosting_accounts WHERE id = ?")) {
       const account = this.accounts.get(String(values[0]));
       if (!account || account.organizationId !== String(values[1])) return null as T;
       if (query.includes("status = 'ACTIVE'") && account.status !== "ACTIVE") return null as T;
       return ({ id: account.id }) as T;
+    }
+    // latest CREATE_HOSTING_ACCOUNT job for the hosting-account delete route
+    if (query.includes("SELECT id, status FROM provisioning_jobs WHERE hosting_account_id = ? AND operation = 'CREATE_HOSTING_ACCOUNT'")) {
+      const accountId = String(values[0]);
+      const latest = [...this.jobs.values()]
+        .filter((job) => job.hostingAccountId === accountId && job.operation === "CREATE_HOSTING_ACCOUNT")
+        .sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : -1))[0];
+      return (latest ? { id: latest.id, status: latest.status } : null) as T;
+    }
+    // hosting-account create route: server + plan lookups
+    if (query.includes("SELECT id, hostname FROM servers WHERE id = ? AND organization_id = ? LIMIT 1")) {
+      const server = this.servers.get(String(values[0]));
+      if (!server || server.status === "DELETED") return null as T;
+      return ({ id: server.id, hostname: server.hostname }) as T;
+    }
+    if (query.includes("SELECT id, name, active, website_limit FROM hosting_plans WHERE id = ? AND organization_id = ? LIMIT 1")) {
+      const plan = this.plans.get(String(values[0]));
+      if (!plan || plan.organizationId !== String(values[1])) return null as T;
+      return ({ id: plan.id, name: plan.name, active: plan.active, website_limit: plan.websiteLimit }) as T;
     }
     // customer domain lookup for delete (primary-domain protection)
     if (query.includes("FROM domains d WHERE d.id = ? AND d.hosting_account_id = ? LIMIT 1")) {
@@ -577,6 +602,29 @@ class PlatformCompletionD1 {
       const domainId = String(values[0]);
       return [...this.emailMailboxes.values()].filter((m) => m.emailDomainId === domainId && m.status !== "DELETED").map((m) => ({ id: m.id, address: m.address, quotaMb: m.quotaMb, status: m.status, providerStatus: m.providerStatus }) as T);
     }
+    // hosting-account inventory (admin hosting-accounts list) with latest
+    // CREATE_HOSTING_ACCOUNT job status + failure reason subselects
+    if (query.includes("FROM hosting_accounts a") && query.includes("ORDER BY a.created_at DESC")) {
+      const organizationId = String(values[0]);
+      const rows = [...this.accounts.values()]
+        .filter((a) => a.organizationId === organizationId && a.status !== "DELETED")
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .map((a) => {
+          const latestJob = [...this.jobs.values()]
+            .filter((job) => job.hostingAccountId === a.id && job.operation === "CREATE_HOSTING_ACCOUNT")
+            .sort((x, y) => (x.requestedAt < y.requestedAt ? 1 : -1))[0];
+          return {
+            id: a.id, username: a.username, primary_domain: a.primaryDomain, status: a.status,
+            created_at: a.createdAt, server_id: a.serverId,
+            server_hostname: this.servers.get(a.serverId)?.hostname ?? "",
+            plan_id: a.planId, plan_name: this.plans.get(a.planId)?.name ?? "",
+            job_status: latestJob?.status ?? null, job_id: latestJob?.id ?? null,
+            error_code: latestJob?.errorCode ?? null, error_message: latestJob?.errorMessage ?? null,
+            job_attempts: latestJob ? latestJob.attempts : null,
+          } as T;
+        });
+      return rows;
+    }
     // forwards inventory
     if (query.includes("FROM email_forwards WHERE email_domain_id = ? ORDER BY created_at ASC")) {
       const domainId = String(values[0]);
@@ -756,6 +804,63 @@ class PlatformCompletionD1 {
       const account = this.accounts.get(accountId);
       if (account) account.planId = planId;
       return { success: true, meta: { changes: account ? 1 : 0 } };
+    }
+    // hosting-account create route: INSERT INTO hosting_accounts with the
+    // real UNIQUE(server_id, username) semantics (all rows, any status)
+    if (query.startsWith("INSERT INTO hosting_accounts")) {
+      this.throwIfUniqueArmed();
+      const [id, organizationId, serverId, planId, username, primaryDomain] = values as [string, string, string, string, string, string | null];
+      for (const existing of this.accounts.values()) {
+        if (existing.serverId === serverId && existing.username === username) {
+          throw new Error("UNIQUE constraint failed: hosting_accounts.server_id, hosting_accounts.username");
+        }
+      }
+      this.accounts.set(id, { id, organizationId, serverId, planId, username, status: "PENDING", primaryDomain: primaryDomain || null, createdAt: new Date().toISOString() });
+      return { success: true, meta: { changes: 1 } };
+    }
+    // hosting-account delete route: soft delete + username tombstone
+    if (query.includes("UPDATE hosting_accounts SET status = 'DELETED', username = ?")) {
+      const [tombstonedUsername, , accountId] = values as [string, string, string];
+      const account = this.accounts.get(accountId);
+      if (!account || !["PENDING", "FAILED"].includes(account.status)) return { success: true, meta: { changes: 0 } };
+      account.status = "DELETED";
+      account.username = tombstonedUsername;
+      return { success: true, meta: { changes: 1 } };
+    }
+    // retry route: failed CREATE_HOSTING_ACCOUNT moves back to PENDING
+    if (query.includes("UPDATE hosting_accounts SET status = 'PENDING', updated_at = datetime('now')")) {
+      const accountId = String(values[0]);
+      const account = this.accounts.get(accountId);
+      if (!account || account.status !== "FAILED") return { success: true, meta: { changes: 0 } };
+      account.status = "PENDING";
+      return { success: true, meta: { changes: 1 } };
+    }
+    // hosting-account delete route: cancel queued CREATE_HOSTING_ACCOUNT jobs
+    if (query.includes("UPDATE provisioning_jobs SET status = 'CANCELLED', finished_at = ?")) {
+      const finishedAt = String(values[0]);
+      const accountId = String(values[1]);
+      let changes = 0;
+      for (const job of this.jobs.values()) {
+        if (job.hostingAccountId === accountId && job.operation === "CREATE_HOSTING_ACCOUNT" && job.status === "QUEUED") {
+          job.status = "CANCELLED";
+          (job as unknown as { finishedAt?: string }).finishedAt = finishedAt;
+          changes += 1;
+        }
+      }
+      return { success: true, meta: { changes } };
+    }
+    // hosting-account delete route: revoke account memberships
+    if (query.includes("UPDATE hosting_account_memberships SET status = 'REVOKED'")) {
+      const [, accountId, organizationId] = values as [string, string, string];
+      let changes = 0;
+      for (const [key, membership] of this.hostingAccountMemberships) {
+        if (membership.hostingAccountId === accountId && membership.organizationId === organizationId && membership.status === "ACTIVE") {
+          membership.status = "REVOKED";
+          this.hostingAccountMemberships.set(key, membership);
+          changes += 1;
+        }
+      }
+      return { success: true, meta: { changes } };
     }
     // Invoice insert — renew route binds (id, orgId, subId, accountId, number, amount, period, start, end, due, paidAt, ref)
     if (query.startsWith("INSERT INTO invoices")) {
