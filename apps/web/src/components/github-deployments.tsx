@@ -272,7 +272,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
       });
       const data = await response.json() as { framework?: string; outputDirectory?: string; detectedFrom?: string };
       if (response.ok && typeof data.framework === "string") {
-        const known = ["static", "vite", "react", "vue", "astro", "next-static"];
+        const known = ["static", "vite", "react", "vue", "astro", "next-static", "gatsby", "docusaurus", "eleventy", "parcel"];
         if (known.includes(data.framework)) setFramework(data.framework);
         if (typeof data.outputDirectory === "string" && data.outputDirectory) setOutputDirectory(data.outputDirectory);
         setDetection({ framework: data.framework, outputDirectory: String(data.outputDirectory ?? ""), detectedFrom: String(data.detectedFrom ?? "") });
@@ -461,7 +461,7 @@ export default function GithubDeployments({ customerMode = false }: { customerMo
                 </label>
                 <label className="space-y-1.5 text-xs font-semibold text-slate-600">Framework
                   <select value={framework} onChange={event => setFramework(event.target.value)} className="nx-select">
-                    <option value="auto">Auto detect</option><option value="static">Static HTML</option><option value="vite">Vite</option><option value="react">React</option><option value="vue">Vue</option><option value="astro">Astro (static)</option><option value="next-static">Next.js static export</option>
+                    <option value="auto">Auto detect</option><option value="static">Static HTML</option><option value="vite">Vite</option><option value="react">React</option><option value="vue">Vue</option><option value="astro">Astro (static)</option><option value="next-static">Next.js static export</option><option value="gatsby">Gatsby</option><option value="docusaurus">Docusaurus</option><option value="eleventy">Eleventy (11ty)</option><option value="parcel">Parcel</option>
                   </select>
                 </label>
                 <label className="space-y-1.5 text-xs font-semibold text-slate-600">Repository root

@@ -354,13 +354,19 @@ test("framework presets require authentication and expose the build contract", a
   assert.equal(authed.status, 200);
   const presets = authed.json.presets as Array<Record<string, unknown>>;
   const slugs = presets.map((preset) => preset.slug);
-  assert.deepEqual(slugs.sort(), ["astro", "next-static", "react", "static", "vite", "vue"]);
+  assert.deepEqual(slugs.sort(), ["astro", "docusaurus", "eleventy", "gatsby", "next-static", "parcel", "react", "static", "vite", "vue"]);
   const next = presets.find((preset) => preset.slug === "next-static")!;
   assert.equal(next.outputDirectory, "out");
   assert.equal(next.requiresBuild, true);
   const statik = presets.find((preset) => preset.slug === "static")!;
   assert.equal(statik.requiresBuild, false);
   assert.equal(statik.buildCommand, null);
+  for (const [slug, output] of [["gatsby", "public"], ["docusaurus", "build"], ["eleventy", "_site"], ["parcel", "dist"]] as const) {
+    const preset = presets.find((item) => item.slug === slug)!;
+    assert.equal(preset.outputDirectory, output, slug);
+    assert.equal(preset.requiresBuild, true, slug);
+    assert.equal(preset.buildCommand, "npm run build", slug);
+  }
 });
 
 test("create stores AES-GCM ciphertext and returns metadata only", async () => {
@@ -633,6 +639,48 @@ test("detection: plain HTML repository falls back to static with honest evidence
   assert.equal(result.json.detectedFrom, "root-files:index.html");
   const evidence = result.json.evidence as Array<{ source: string; detail: string }>;
   assert.ok(evidence.some((item) => item.detail === "index.html without package.json"));
+});
+
+test("detection: gatsby, docusaurus, eleventy, and parcel are detected from dependencies", async () => {
+  const cases: Array<{ dependencies: Record<string, string>; framework: string; outputDirectory: string; detectedFrom: string; buildCommand: string }> = [
+    { dependencies: { gatsby: "^5.0.0" }, framework: "gatsby", outputDirectory: "public", detectedFrom: "package.json:dependencies:gatsby", buildCommand: "npm run build" },
+    { dependencies: { "@docusaurus/core": "^3.0.0" }, framework: "docusaurus", outputDirectory: "build", detectedFrom: "package.json:dependencies:@docusaurus/core", buildCommand: "npm run build" },
+    { dependencies: { "@11ty/eleventy": "^2.0.0" }, framework: "eleventy", outputDirectory: "_site", detectedFrom: "package.json:dependencies:@11ty/eleventy", buildCommand: "npm run build" },
+    { dependencies: { parcel: "^2.11.0" }, framework: "parcel", outputDirectory: "dist", detectedFrom: "package.json:dependencies:parcel", buildCommand: "npm run build" },
+  ];
+  for (const testCase of cases) {
+    const db = new DeployEnvD1(OWNER_IDENTITY);
+    await db.encryptGithubTokenForTest(GITHUB_TOKEN);
+    withFetchStub(detectionRoutes({
+      tree: { truncated: false, tree: [{ path: "package.json", type: "blob" }, { path: "src/index.js", type: "blob" }] },
+      packageJson: { content: Buffer.from(JSON.stringify({ dependencies: testCase.dependencies })).toString("base64"), encoding: "base64" },
+    }));
+    const result = await callApi(db, {
+      method: "POST", path: "/v1/github/projects/detect-framework",
+      body: { repositoryId: 101, installationId: 7, repositoryFullName: REPO_FULL, branch: "main" },
+    });
+    assert.equal(result.status, 200, testCase.framework);
+    assert.equal(result.json.framework, testCase.framework, testCase.framework);
+    assert.equal(result.json.outputDirectory, testCase.outputDirectory, testCase.framework);
+    assert.equal(result.json.detectedFrom, testCase.detectedFrom, testCase.framework);
+    assert.equal(result.json.buildCommand, testCase.buildCommand, testCase.framework);
+  }
+});
+
+test("detection: vite still wins over parcel when both are present", async () => {
+  const db = new DeployEnvD1(OWNER_IDENTITY);
+  await db.encryptGithubTokenForTest(GITHUB_TOKEN);
+  withFetchStub(detectionRoutes({
+    tree: { truncated: false, tree: [{ path: "package.json", type: "blob" }] },
+    packageJson: { content: Buffer.from(JSON.stringify({ devDependencies: { vite: "^5.0.0", parcel: "^2.11.0" } })).toString("base64"), encoding: "base64" },
+  }));
+  const result = await callApi(db, {
+    method: "POST", path: "/v1/github/projects/detect-framework",
+    body: { repositoryId: 101, installationId: 7, repositoryFullName: REPO_FULL, branch: "main" },
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.json.framework, "vite");
+  assert.equal(result.json.detectedFrom, "package.json:dependencies:vite");
 });
 
 test("detection errors are honest: missing branch, rate limit, no connection", async () => {

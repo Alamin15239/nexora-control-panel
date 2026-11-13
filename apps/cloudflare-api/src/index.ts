@@ -7203,7 +7203,7 @@ app.post("/v1/github/projects", async (c) => {
   const rootDirectory = typeof input.rootDirectory === "string" ? input.rootDirectory.trim() : ".";
   const outputDirectory = typeof input.outputDirectory === "string" ? input.outputDirectory.trim() : "dist";
   const framework = typeof input.framework === "string" ? input.framework : "auto";
-  if (!hostingAccountId || !Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(rootDirectory) || rootDirectory.startsWith("/") || rootDirectory.split("/").includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(outputDirectory) || outputDirectory.startsWith("/") || outputDirectory.split("/").includes("..") || !["auto", "static", "vite", "react", "vue", "astro", "next-static"].includes(framework)) {
+  if (!hostingAccountId || !Number.isSafeInteger(repositoryId) || repositoryId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0 || !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(repositoryFullName) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch) || branch.startsWith("/") || branch.includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(rootDirectory) || rootDirectory.startsWith("/") || rootDirectory.split("/").includes("..") || !/^[A-Za-z0-9._/-]{1,160}$/.test(outputDirectory) || outputDirectory.startsWith("/") || outputDirectory.split("/").includes("..") || !["auto", "static", "vite", "react", "vue", "astro", "next-static", "gatsby", "docusaurus", "eleventy", "parcel"].includes(framework)) {
     return c.json({ message: "Invalid repository, branch, directory, framework, or hosting account configuration." }, 400);
   }
   const account = identity.platformRole
@@ -7291,7 +7291,7 @@ app.get("/v1/github/projects", async (c) => {
 // ---------------------------------------------------------------------------
 
 type FrameworkPreset = {
-  slug: "static" | "vite" | "react" | "vue" | "astro" | "next-static";
+  slug: "static" | "vite" | "react" | "vue" | "astro" | "next-static" | "gatsby" | "docusaurus" | "eleventy" | "parcel";
   label: string;
   description: string;
   requiresBuild: boolean;
@@ -7354,6 +7354,42 @@ const FRAMEWORK_PRESETS: FrameworkPreset[] = [
     installCommand: "npm ci",
     buildCommand: "npm run build",
     outputDirectory: "out",
+  },
+  {
+    slug: "gatsby",
+    label: "Gatsby",
+    description: "Gatsby site built to a fully static public/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "public",
+  },
+  {
+    slug: "docusaurus",
+    label: "Docusaurus",
+    description: "Docusaurus documentation site built to a static build/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "build",
+  },
+  {
+    slug: "eleventy",
+    label: "Eleventy (11ty)",
+    description: "Eleventy site built to a static _site/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "_site",
+  },
+  {
+    slug: "parcel",
+    label: "Parcel",
+    description: "Parcel-bundled static site built to a dist/ directory.",
+    requiresBuild: true,
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
   },
 ];
 
@@ -7455,12 +7491,16 @@ function detectFrameworkFromRepository(
   if (dependencies.astro || rootFiles.has("astro.config.mjs") || rootFiles.has("astro.config.js") || rootFiles.has("astro.config.ts")) {
     return pick("astro", dependencies.astro ? "package.json:dependencies:astro" : "root-files:astro.config");
   }
+  if (dependencies.gatsby) return pick("gatsby", "package.json:dependencies:gatsby");
+  if (dependencies["@docusaurus/core"]) return pick("docusaurus", "package.json:dependencies:@docusaurus/core");
+  if (dependencies["@11ty/eleventy"]) return pick("eleventy", "package.json:dependencies:@11ty/eleventy");
   if (dependencies["react-scripts"]) return pick("react", "package.json:dependencies:react-scripts");
   if (dependencies["@vue/cli-service"]) return pick("vue", "package.json:dependencies:@vue/cli-service");
   if (dependencies.vue && dependencies.vite) return pick("vue", "package.json:dependencies:vue+vite");
   if (dependencies.vite || rootFiles.has("vite.config.js") || rootFiles.has("vite.config.mjs") || rootFiles.has("vite.config.ts")) {
     return pick("vite", dependencies.vite ? "package.json:dependencies:vite" : "root-files:vite.config");
   }
+  if (dependencies.parcel) return pick("parcel", "package.json:dependencies:parcel");
   if (packageJson) {
     evidence.push({ source: "package.json", detail: "no recognized framework in dependencies" });
   }
