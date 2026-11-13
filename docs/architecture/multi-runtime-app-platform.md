@@ -114,6 +114,14 @@ Node lifecycle administration is separate from customer workspace roles. The ope
 
 The operator credential is not configured by this change. Configure it separately as a Cloudflare Worker secret before using these endpoints; do not put it in source control, D1, logs, or customer-facing settings. No node is revoked or rotated as part of this code change. Node roles now default to `runtime`; a trusted operator must explicitly assign `builder`, and the pool must independently be classified `rootless` or `microvm` before the usage-report gate admits it. These labels are admission controls, not evidence of actual host isolation.
 
+## Static-publisher admission on a non-isolated host
+
+The dedicated static publisher is a separate capability from general application execution. The initial single-node static host may use a pool with `runtime_engine='static'` and `isolation_level='untrusted'`; this does not assert rootless or microVM isolation. The operator enrollment route admits this exact combination, while the general runtime-pool assignment, desired-state API and builder usage path continue to require `rootless` or `microvm`.
+
+A static-publisher node can authenticate for static release polling, artifact delivery, archive validation, activation, health reporting and same-node rollback only. Every release lookup in that path is constrained to an enabled `static-v1` profile with `build_method='static'`. A static pool cannot be assigned as a general application runtime pool, and its node cannot report builder usage. Do not run customer build commands, OCI workloads, server-side application processes or arbitrary customer code on this host. Static artifacts must be built in a separately trusted workflow and published as immutable files.
+
+The static pool should remain `provisioning` until host installation, local trust configuration, account/domain bindings and preflight have been reviewed. Mark it `ready` only when the operator is ready to issue the one-time node enrollment. The node's runtime role is a shared identity schema value; the static runtime-engine classification and endpoint-specific static profile checks are the actual capability boundary.
+
 ## Monthly build-minute accounting
 
 Hosting plans carry an explicit monthly application build-minute allowance (default 300 minutes; administrators may configure 0–100,000 minutes). The period is the UTC calendar month. Usage is stored as integer build seconds to avoid rounding each short build upward; API responses expose both seconds and fractional minutes.
