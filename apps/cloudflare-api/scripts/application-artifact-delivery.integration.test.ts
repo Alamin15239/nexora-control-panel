@@ -87,9 +87,8 @@ class ArtifactD1 {
           const valid = idMatches && identity === db.node.nodeIdentity &&
             db.node.status === "online" && db.node.role === "runtime" &&
             db.node.revokedAt === null && db.node.poolStatus === "ready" &&
-            (["rootless", "microvm"].includes(db.node.isolationLevel) ||
-              (query.includes("runtime_engine = 'static'") &&
-                db.node.runtimeEngine === "static" && db.node.isolationLevel === "untrusted")) &&
+            query.includes("runtime_engine = 'static'") &&
+            db.node.runtimeEngine === "static" && db.node.isolationLevel === "untrusted" &&
             Boolean(db.node.signingPublicKey);
           return valid ? ({
             id: db.node.id,
