@@ -8536,6 +8536,10 @@ app.post("/v1/github/webhooks", async (c) => {
   };
 
   const project = verifiedProject;
+  if (project.status === "paused") {
+    await recordDelivery("skipped_project_paused", {}, null, null);
+    return c.json({ outcome: "skipped_project_paused", deliveryId }, 200);
+  }
   const projectContext: DispatchProject = {
     id: project.id,
     organizationId: project.organization_id,
