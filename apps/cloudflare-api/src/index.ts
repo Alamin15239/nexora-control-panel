@@ -6766,12 +6766,12 @@ async function githubInstallationToken(env: Bindings, installationId: string, re
     },
     body: JSON.stringify(repositoryId ? {
       repository_ids: [Number(repositoryId)],
-      permissions: { actions: "write", contents: "write", metadata: "read" },
+      permissions: { actions: "write", contents: "write", metadata: "read", workflows: "write" },
     } : {}),
   });
   if (!response.ok) {
     if (response.status === 403 || response.status === 422) {
-      throw new Error("Automatic repository setup requires Nexora GitHub App Contents: read and write and Actions: read and write permissions. Update the App permissions and approve the installation update.");
+      throw new Error("Automatic repository setup requires Nexora GitHub App Contents: read and write, Workflows: read and write, and Actions: read and write permissions. Update all three App permissions and approve the installation update.");
     }
     throw new Error("Unable to mint a GitHub installation access token");
   }
@@ -6852,7 +6852,7 @@ async function ensureNexoraDeploymentWorkflow(
   });
   if (!created.ok) {
     throw new Error(created.status === 403
-      ? "Automatic setup needs Nexora GitHub App Contents: read and write permission. Update the App permission and reinstall/update the installation."
+      ? "Automatic setup needs Nexora GitHub App Contents: read and write and Workflows: read and write permissions. Update both App permissions and approve the installation update."
       : "GitHub could not add the Nexora deployment workflow to this repository.");
   }
   const payload = await created.json() as { commit?: { sha?: string } };
