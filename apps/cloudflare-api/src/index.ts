@@ -10753,6 +10753,35 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
     httpStatus: body.httpStatus,
     durationMs: body.durationMs,
   });
+  const rollbackAckEligibilitySql =
+    "EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
+    "JOIN application_releases failed ON failed.id = a.failed_release_id " +
+    "JOIN application_releases target ON target.id = a.target_release_id " +
+    "JOIN application_project_settings s ON s.project_id = a.project_id AND s.organization_id = a.organization_id " +
+    "JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+    "JOIN application_node_pools p ON p.id = failed.node_pool_id " +
+    "JOIN application_nodes n ON n.id = a.node_id " +
+    "JOIN application_workloads w ON w.organization_id = a.organization_id AND w.project_id = a.project_id " +
+    "AND w.workload_kind = 'web' AND w.active_release_id = a.target_release_id AND w.node_id = a.node_id " +
+    "WHERE a.operation_id = ? AND a.node_id = ? AND a.failed_release_id = ? AND a.target_release_id = ? " +
+    "AND a.target_artifact_sha256 = ? AND a.http_status = ? AND a.probe_duration_ms = ? " +
+    "AND failed.organization_id = a.organization_id AND failed.project_id = a.project_id " +
+    "AND failed.deployment_id = a.failed_deployment_id AND failed.assigned_node_id = a.node_id AND failed.state = 'failed' " +
+    "AND target.organization_id = a.organization_id AND target.project_id = a.project_id " +
+    "AND target.deployment_id = a.target_deployment_id AND target.assigned_node_id = a.node_id " +
+    "AND target.state = 'succeeded' AND target.artifact_digest = a.target_artifact_sha256 " +
+    "AND s.build_method = 'static' AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' " +
+    "AND rp.execution_kind = 'static' AND rp.enabled = 1 " +
+    "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted' " +
+    "AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+    "AND n.revoked_at IS NULL AND n.signing_public_key = ? " +
+    "AND n.last_heartbeat_at >= datetime('now', '-15 minutes'))";
+  const rollbackAckEligibilityValues = [
+    body.operationId, node.id, binding.failedReleaseId, binding.targetReleaseId,
+    body.targetArtifactSha256, body.httpStatus, body.durationMs,
+    nodeIdentity, node.signingPublicKey,
+  ];
+
   const results = await c.env.DB.batch([
     c.env.DB.prepare(
       "INSERT OR IGNORE INTO application_rollback_acknowledgements " +
@@ -10760,32 +10789,34 @@ app.post(ROLLBACK_COMPLETION_PATH, async (c) => {
       "failed_deployment_id, target_deployment_id, target_artifact_sha256, http_status, probe_duration_ms) " +
       "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? " +
       "WHERE EXISTS (SELECT 1 FROM application_workloads w WHERE w.id = ? " +
-      "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy'))",
+      "AND w.active_release_id = ? AND w.node_id = ? AND w.status IN ('unhealthy','healthy')) " +
+      "AND EXISTS (SELECT 1 FROM application_nodes n JOIN application_node_pools p ON p.id = n.node_pool_id " +
+      "WHERE n.id = ? AND n.node_identity = ? AND n.node_role = 'runtime' AND n.status = 'online' " +
+      "AND n.revoked_at IS NULL AND n.signing_public_key = ? AND n.last_heartbeat_at >= datetime('now', '-15 minutes') " +
+      "AND p.status = 'ready' AND p.runtime_engine = 'static' AND p.isolation_level = 'untrusted') " +
+      "AND EXISTS (SELECT 1 FROM application_project_settings s JOIN application_runtime_profiles rp ON rp.id = s.runtime_profile_id " +
+      "WHERE s.project_id = ? AND s.organization_id = ? AND s.build_method = 'static' " +
+      "AND rp.profile_key = 'static-v1' AND rp.runtime_family = 'static' AND rp.execution_kind = 'static' AND rp.enabled = 1)",
     ).bind(body.operationId, binding.organizationId, binding.projectId, node.id,
       binding.failedReleaseId, binding.targetReleaseId, body.failedDeploymentId,
       body.targetDeploymentId, body.targetArtifactSha256, body.httpStatus, body.durationMs,
-      binding.workloadId, binding.targetReleaseId, node.id),
+      binding.workloadId, binding.targetReleaseId, node.id,
+      node.id, nodeIdentity, node.signingPublicKey, binding.projectId, binding.organizationId),
     c.env.DB.prepare(
       "UPDATE application_workloads SET status = 'healthy', desired_replicas = 1, " +
       "observed_replicas = 1, updated_at = datetime('now') " +
       "WHERE id = ? AND active_release_id = ? AND node_id = ? AND status IN ('unhealthy','healthy') " +
-      "AND EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
-      "WHERE a.operation_id = ? AND a.node_id = ? AND a.failed_release_id = ? " +
-      "AND a.target_release_id = ? AND a.target_artifact_sha256 = ? " +
-      "AND a.http_status = ? AND a.probe_duration_ms = ?)",
-    ).bind(binding.workloadId, binding.targetReleaseId, node.id, body.operationId, node.id,
-      binding.failedReleaseId, binding.targetReleaseId, body.targetArtifactSha256,
-      body.httpStatus, body.durationMs),
+      "AND " + rollbackAckEligibilitySql,
+    ).bind(binding.workloadId, binding.targetReleaseId, node.id, ...rollbackAckEligibilityValues),
     c.env.DB.prepare(
       "INSERT INTO application_release_events " +
       "(id, organization_id, release_id, from_state, to_state, actor_type, actor_id, event_code, details_redacted_json) " +
       "SELECT ?, ?, ?, 'succeeded', 'succeeded', 'node', ?, 'rollback_completed', ? " +
-      "WHERE EXISTS (SELECT 1 FROM application_rollback_acknowledgements a " +
-      "WHERE a.operation_id = ? AND a.node_id = ? AND a.target_release_id = ?) " +
+      "WHERE " + rollbackAckEligibilitySql + " " +
       "AND NOT EXISTS (SELECT 1 FROM application_release_events e WHERE e.release_id = ? " +
       "AND e.event_code = 'rollback_completed' AND e.details_redacted_json = ?)",
     ).bind(crypto.randomUUID(), binding.organizationId, binding.targetReleaseId, node.id, details,
-      body.operationId, node.id, binding.targetReleaseId, binding.targetReleaseId, details),
+      ...rollbackAckEligibilityValues, binding.targetReleaseId, details),
     c.env.DB.prepare(
       "UPDATE application_nodes SET last_heartbeat_at = datetime('now'), last_signature_at = datetime('now'), updated_at = datetime('now') " +
       "WHERE id = ? AND node_identity = ? AND node_role = 'runtime' AND status = 'online' " +
