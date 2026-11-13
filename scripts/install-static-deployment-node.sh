@@ -5,15 +5,21 @@ set -Eeuo pipefail
 MODE=plan
 ARTIFACT_DIR=""
 NODE_ID=""
+DEVELOPMENT_TEST=0
 APPROVAL_FILE="/etc/nexora-static-node/approval.json"
 usage() {
   cat <<'EOF'
 Usage: install-static-deployment-node.sh --artifact-dir DIR [--node-id ID] [--plan]
        install-static-deployment-node.sh --artifact-dir DIR --node-id ID --apply
-Default is a read-only plan. Apply requires a root:root 0600 approval JSON:
+       install-static-deployment-node.sh --artifact-dir DIR --node-id ID --development-test --apply
+Default is a read-only plan. Disposable-node apply requires a root:root 0600 approval JSON:
 {"environment":"disposable-test","node_identity":"NODE_ID","allow_static_publisher_install":true}
+The explicitly selected nexora-server development-test path additionally requires:
+{"environment":"development-test","node_identity":"NODE_ID","allow_static_publisher_install":true,"allow_development_host_install":true}
 The installer only installs binaries and disabled unit files. It never starts,
 enables, or reloads services and never installs keys, trust, bindings, or config.
+Development-test installation does not authorize node enrollment, runtime admission,
+customer deployments, or production use.
 EOF
 }
 while (($#)); do
@@ -22,6 +28,7 @@ while (($#)); do
     --apply) MODE=apply; shift ;;
     --artifact-dir) [[ $# -ge 2 ]] || { echo "Missing --artifact-dir value" >&2; exit 2; }; ARTIFACT_DIR=$2; shift 2 ;;
     --node-id) [[ $# -ge 2 ]] || { echo "Missing --node-id value" >&2; exit 2; }; NODE_ID=$2; shift 2 ;;
+    --development-test) DEVELOPMENT_TEST=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -53,6 +60,7 @@ if [[ "$MODE" == "plan" ]]; then
   printf 'Artifact directory: %s\n' "$ARTIFACT_DIR"
   printf 'Would create/verify nexora-static group and nexora-runtime:www-data service account.\n'
   printf 'Would install binaries root:root 0755 and units root:root 0644.\n'
+  if [[ "$DEVELOPMENT_TEST" == "1" ]]; then printf 'Mode: explicit development-test only; no node enrollment or customer runtime admission.\n'; fi
   printf 'Would leave both services stopped and disabled; no secrets/config installed.\n'
   for target in "${TARGETS[@]}"; do
     if [[ -e "$target" || -L "$target" ]]; then printf 'CONFLICT: target already exists: %s\n' "$target" >&2; exit 3; fi
@@ -63,22 +71,39 @@ fi
 [[ "${EUID}" -eq 0 ]] || { echo "--apply must run as root" >&2; exit 2; }
 [[ -n "$NODE_ID" && "$NODE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$ ]] || { echo "--apply requires a valid --node-id" >&2; exit 2; }
 host="$(hostname -s)"
-[[ "$host" != "nexora-server" ]] || { echo "Refusing to install on protected development host nexora-server" >&2; exit 4; }
+if [[ "$host" == "nexora-server" ]]; then
+  [[ "$DEVELOPMENT_TEST" == "1" ]] || { echo "Refusing nexora-server install without explicit --development-test approval" >&2; exit 4; }
+elif [[ "$DEVELOPMENT_TEST" == "1" ]]; then
+  echo "--development-test is restricted to the exact host nexora-server" >&2
+  exit 4
+fi
 [[ -f "$APPROVAL_FILE" && ! -L "$APPROVAL_FILE" ]] || { echo "Missing operator approval file: $APPROVAL_FILE" >&2; exit 4; }
 [[ "$(stat -c '%U:%G:%a' "$APPROVAL_FILE")" == "root:root:600" ]] || { echo "Approval file must be root:root mode 0600" >&2; exit 4; }
-python3 - "$APPROVAL_FILE" "$NODE_ID" <<'PY'
+python3 - "$APPROVAL_FILE" "$NODE_ID" "$DEVELOPMENT_TEST" <<'PY'
 import json, sys
 from pathlib import Path
 try:
     approval = json.loads(Path(sys.argv[1]).read_text())
 except Exception as exc:
     raise SystemExit(f"Invalid approval JSON: {exc}")
-if (not isinstance(approval, dict) or
-    set(approval) != {"environment", "node_identity", "allow_static_publisher_install"} or
-    approval.get("environment") != "disposable-test" or
-    approval.get("node_identity") != sys.argv[2] or
-    approval.get("allow_static_publisher_install") is not True):
-    raise SystemExit("Approval must explicitly authorize this disposable test node identity")
+common = {"node_identity", "allow_static_publisher_install"}
+if sys.argv[3] == "1":
+    expected = common | {"environment", "allow_development_host_install"}
+    valid = (isinstance(approval, dict) and set(approval) == expected and
+             approval.get("environment") == "development-test" and
+             approval.get("node_identity") == sys.argv[2] and
+             approval.get("allow_static_publisher_install") is True and
+             approval.get("allow_development_host_install") is True)
+    if not valid:
+        raise SystemExit("Approval must explicitly authorize this exact nexora-server development-test node")
+else:
+    expected = common | {"environment"}
+    valid = (isinstance(approval, dict) and set(approval) == expected and
+             approval.get("environment") == "disposable-test" and
+             approval.get("node_identity") == sys.argv[2] and
+             approval.get("allow_static_publisher_install") is True)
+    if not valid:
+        raise SystemExit("Approval must explicitly authorize this disposable test node identity")
 PY
 for target in "${TARGETS[@]}"; do
   [[ ! -e "$target" && ! -L "$target" ]] || { echo "Refusing to overwrite existing target: $target" >&2; exit 4; }
