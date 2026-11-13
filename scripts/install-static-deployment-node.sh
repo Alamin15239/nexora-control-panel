@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan-first installer for an explicitly approved non-production static test node.
+# Plan-first installer for explicitly approved static deployment nodes.
 # It never installs secrets and never starts, enables, or reloads services.
 set -Eeuo pipefail
 MODE=plan
@@ -18,10 +18,13 @@ Default is a read-only plan. Disposable-node apply requires a root:root 0600 app
 {"environment":"disposable-test","node_identity":"NODE_ID","allow_static_publisher_install":true}
 The explicitly selected nexora-server development-test path additionally requires:
 {"environment":"development-test","node_identity":"NODE_ID","allow_static_publisher_install":true,"allow_development_host_install":true}
+The explicitly selected nexora-server production path requires:
+{"environment":"production","node_identity":"NODE_ID","allow_static_publisher_install":true,"allow_production_node_install":true}
 The installer only installs binaries and disabled unit files. It never starts,
 enables, or reloads services and never installs keys, trust, bindings, or config.
 Development-test installation does not authorize node enrollment, runtime admission,
-customer deployments, or production use.
+customer deployments, or production use. Production-node installation does not itself
+enroll the node, enable runtime admission, or activate customer deployments.
 EOF
 }
 while (($#)); do
