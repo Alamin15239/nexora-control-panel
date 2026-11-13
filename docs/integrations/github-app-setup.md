@@ -15,7 +15,8 @@ In GitHub, open **Settings → Developer settings → GitHub Apps → Nexora** a
 - **User authorization callback URL:** keep the existing configured OAuth callback, `https://api.nexoraedge.digital/v1/github/callback`.
 - **Repository permissions:**
   - Metadata: Read-only (required by GitHub).
-  - Contents: Read and write (Nexora adds its pinned deployment workflow when a repository is linked).
+  - Contents: Read and write (Nexora reads repository files and adds its pinned deployment workflow).
+  - Workflows: Read and write (GitHub requires this separate permission to create or update files under `.github/workflows/`).
   - Actions: Read and write (used by the deployment workflow integration).
 - **Webhook:** set the URL to `https://api.nexoraedge.digital/v1/github/webhooks`, configure a strong webhook secret, and subscribe to **Push** and **Pull requests** events. Store the exact same secret in the Nexora API Worker as `GITHUB_APP_WEBHOOK_SECRET`. This is one App-level webhook for all repositories covered by the installation; per-repository webhook setup is not required.
 - **Where can this GitHub App be installed?** Choose the intended availability (any account, or only the Nexora-controlled organization).
