@@ -15,7 +15,7 @@ class ArtifactD1 {
     status: "online",
     role: "runtime",
     poolStatus: "ready",
-    isolationLevel: "rootless",
+    runtimeEngine: "static", isolationLevel: "untrusted",
     revokedAt: null as string | null,
   };
   release = {
@@ -85,7 +85,7 @@ class ArtifactD1 {
           const valid = idMatches && identity === db.node.nodeIdentity &&
             db.node.status === "online" && db.node.role === "runtime" &&
             db.node.revokedAt === null && db.node.poolStatus === "ready" &&
-            ["rootless", "microvm"].includes(db.node.isolationLevel) &&
+            db.node.runtimeEngine === "static" && db.node.isolationLevel === "untrusted" &&
             Boolean(db.node.signingPublicKey);
           return valid ? ({
             id: db.node.id,
@@ -293,7 +293,7 @@ class ArtifactD1 {
           db.githubDeploymentStatus = "failed";
           return { success: true, meta: { changes: 1 } };
         }
-        if (query.includes("UPDATE application_nodes SET last_signature_at")) {
+        if (query.includes("UPDATE application_nodes SET last_heartbeat_at")) {
           db.lastSignatureUpdated = true;
         }
         return { success: true, meta: { changes: 1 } };
