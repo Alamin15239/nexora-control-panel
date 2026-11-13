@@ -16,6 +16,7 @@ class ArtifactD1 {
     role: "runtime",
     poolStatus: "ready",
     isolationLevel: "rootless",
+    runtimeEngine: "containerd",
     revokedAt: null as string | null,
   };
   release = {
@@ -85,7 +86,9 @@ class ArtifactD1 {
           const valid = idMatches && identity === db.node.nodeIdentity &&
             db.node.status === "online" && db.node.role === "runtime" &&
             db.node.revokedAt === null && db.node.poolStatus === "ready" &&
-            ["rootless", "microvm"].includes(db.node.isolationLevel) &&
+            (["rootless", "microvm"].includes(db.node.isolationLevel) ||
+              (query.includes("runtime_engine = 'static'") &&
+                db.node.runtimeEngine === "static" && db.node.isolationLevel === "untrusted")) &&
             Boolean(db.node.signingPublicKey);
           return valid ? ({
             id: db.node.id,
@@ -195,9 +198,11 @@ class ArtifactD1 {
           const stateAllowed = purpose === "validate"
             ? ["artifact_uploaded", "validating", "publishing"].includes(db.release.state)
             : ["ready_to_publish", "publishing"].includes(db.release.state);
+          const staticProfileAllowed = !query.includes("rp.profile_key = 'static-v1'") ||
+            db.release.staticProfileEnabled !== false;
           return deploymentId === db.release.deploymentId && nodePoolId === db.release.nodePoolId &&
             assignedNodeId === db.node.id && assignedNodeId === db.release.assignedNodeId &&
-            stateAllowed ? ({ ...db.release } as T) : null;
+            staticProfileAllowed && stateAllowed ? ({ ...db.release } as T) : null;
         }
         if (query.includes("SELECT state FROM application_releases")) {
           return ({ state: db.release.state } as T);
@@ -603,6 +608,32 @@ test("artifact delivery rejects builder nodes and untrusted runtime pools", asyn
   db.node.isolationLevel = "untrusted";
   const untrusted = await worker.fetch(await signedArtifactRequest(node.privateKey, "c".repeat(32)), env, {} as ExecutionContext);
   assert.equal(untrusted.status, 401);
+});
+
+test("static publisher can fetch static releases from an explicitly static untrusted pool", async () => {
+  const db = new ArtifactD1();
+  db.node.runtimeEngine = "static";
+  db.node.isolationLevel = "untrusted";
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  const signer = await keyPair("RSASSA-PKCS1-v1_5");
+  const env = await environment(db, signer.privateKeyPEM);
+  const response = await worker.fetch(await signedArtifactRequest(node.privateKey), env, {} as ExecutionContext);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-nexora-release-id"), "release-a");
+});
+
+test("static publisher cannot fetch a release without the enabled static-v1 profile", async () => {
+  const db = new ArtifactD1();
+  db.node.runtimeEngine = "static";
+  db.node.isolationLevel = "untrusted";
+  db.release.staticProfileEnabled = false;
+  const node = await keyPair("Ed25519");
+  db.node.signingPublicKey = node.publicKey;
+  const signer = await keyPair("RSASSA-PKCS1-v1_5");
+  const env = await environment(db, signer.privateKeyPEM);
+  const response = await worker.fetch(await signedArtifactRequest(node.privateKey), env, {} as ExecutionContext);
+  assert.equal(response.status, 404);
 });
 
 test("artifact delivery is scoped to the assigned node pool", async () => {
