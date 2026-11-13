@@ -46,7 +46,7 @@ class StaticDeploymentInstallerTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         for required in (
             "MODE=plan", "--apply", "--node-id", "--development-test", "/etc/nexora-static-node/approval.json",
-            '"environment") != "disposable-test"', "allow_static_publisher_install",
+            'approval.get("environment") == "disposable-test"', "allow_static_publisher_install",
             "Refusing nexora-server install without explicit --development-test approval",
             "--development-test is restricted to the exact host nexora-server",
             'approval.get("environment") == "development-test"',
